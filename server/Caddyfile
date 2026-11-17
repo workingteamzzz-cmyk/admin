@@ -1,0 +1,6 @@
+canopus.kantor.go.id {
+	encode gzip
+	reverse_proxy canopus:8080 {
+		flush_interval -1
+	}
+}

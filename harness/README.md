@@ -58,3 +58,19 @@ A live run sends roughly 20 short requests, so it costs a few cents on most prov
 | persist | Chats and canvases survive a reload |
 
 Reports are written to `report/<timestamp>/report.md`; the latest is copied to `report/latest.md`.
+
+## Server edition
+
+`server-run.mjs` tests `../server` (multi-user, knowledge, admin console). It starts a throwaway server with an
+empty database and routes every Claude API call through a local recorder, so it can prove that sensitive values
+(NIK, email, admin-defined terms) never leave the server.
+
+```bash
+node server-run.mjs                                   # simulated Claude API, free
+ANTHROPIC_API_KEY=sk-ant-... node server-run.mjs --live   # real Claude API, still recorded and checked
+```
+
+Checks: one-time admin link, groups, collections with access rules, document indexing, refusal of Rahasia
+documents, answers with citations, masking and unmasking, sandboxed canvases, inviting a user, access control
+between groups, API guards (admin-only, CSRF, other users' files, anonymous), monthly budgets, server-side
+persistence across devices, sign-in throttling, audit log, usage tracking, and a final no-leak check.

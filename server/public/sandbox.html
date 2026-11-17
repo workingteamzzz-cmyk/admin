@@ -1,0 +1,6 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Canvas</title>
+<script>
+// Receives a canvas (HTML) from the Canopus app and renders it. This page is sandboxed: it cannot read the app's data or make network requests.
+addEventListener('message', function (e) { if (typeof e.data !== 'string') return; document.open(); document.write(e.data); document.close(); });
+parent.postMessage('canopus-sandbox-ready', '*');
+</script></head><body></body></html>

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Canopus</title>
+<meta name="description" content="Canopus — your organization's AI workspace">
+<meta name="referrer" content="no-referrer">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<div class="auth" id="auth" hidden></div>
+
+<div class="app v-home" id="app" hidden>
+  <aside class="side">
+    <div class="side-head">
+      <div class="logo" data-go="home" role="button" title="Home"><svg data-ic="star"></svg>CANOPUS</div>
+      <button class="icon-btn" title="Close sidebar" data-act="toggle"><svg data-ic="sidebar"></svg></button>
+    </div>
+    <div class="side-actions">
+      <button class="new-btn" data-act="new" title="New chat (Ctrl+Shift+O)"><svg data-ic="plus"></svg>New chat</button>
+      <button class="search-btn" data-act="search" title="Search (Ctrl+K)"><svg data-ic="search"></svg></button>
+    </div>
+    <div class="side-scroll">
+      <button class="nav-item" data-go="home"><svg data-ic="home" class="c-gold"></svg>Home</button>
+      <button class="nav-item" data-go="knowledge"><svg data-ic="book" class="c-sky"></svg>Knowledge<span class="n" id="nKnow"></span></button>
+      <button class="nav-item" data-go="studio"><svg data-ic="layers" class="c-orange"></svg>Studio<span class="n" id="nStudio"></span></button>
+      <button class="nav-item" data-go="sources"><svg data-ic="archive" class="c-muted"></svg>My files<span class="n" id="nSources"></span></button>
+      <button class="nav-item" data-go="prompts"><svg data-ic="bolt" class="c-violet"></svg>Prompts</button>
+      <button class="nav-item" data-go="skills"><svg data-ic="puzzle" class="c-green"></svg>Skills<span class="n" id="nSkills"></span></button>
+      <button class="nav-item" data-go="admin" id="navAdmin" hidden><svg data-ic="shield" class="c-pink"></svg>Admin</button>
+
+      <div class="section">
+        <div class="sec-head"><span>Spaces</span><button class="icon-btn" title="New space" data-act="newspace"><svg data-ic="plus"></svg></button></div>
+        <div class="sec-body" id="spaceList"></div>
+      </div>
+      <div class="section">
+        <div class="sec-head"><span>Chats</span></div>
+        <div class="sec-body" id="chatList"></div>
+      </div>
+    </div>
+    <div class="user" data-act="settings" role="button" title="Settings">
+      <div class="avatar" id="avatar">C</div>
+      <div class="who"><b id="userName">You</b><small id="budgetText">—</small><div class="budget" id="budgetBar"><i></i></div></div>
+      <svg data-ic="settings" class="c-muted" style="width:18px;height:18px;margin-right:6px"></svg>
+    </div>
+  </aside>
+  <div class="scrim" data-act="toggle"></div>
+
+  <main class="main">
+    <div class="topbar">
+      <button class="icon-btn open-side" title="Open sidebar" data-act="toggle"><svg data-ic="sidebar"></svg></button>
+      <div class="chat-head" id="chatHead"></div>
+    </div>
+    <div class="workspace">
+      <div class="view" id="v-home">
+        <section class="stage" id="stage">
+          <div class="home" id="home">
+            <div class="home-in">
+              <div class="hero"><svg class="hero-star" data-ic="star"></svg><div class="date" id="today"></div><h1 class="greet" id="greet"></h1></div>
+              <div id="composerHomeSlot"></div>
+              <div id="homeSections"></div>
+            </div>
+          </div>
+          <div class="thread" id="thread" hidden><div class="thread-in" id="threadIn"></div></div>
+          <div class="composer-wrap" id="composerChatSlot" hidden></div>
+        </section>
+      </div>
+
+      <div class="view page" id="v-knowledge" hidden><div class="page-in" id="knowPage"></div></div>
+
+      <div class="view page" id="v-studio" hidden>
+        <div class="page-in">
+          <div class="page-head">
+            <div><h1><span class="h-ic c-orange"><svg data-ic="layers"></svg></span>Studio</h1><p class="sub">Everything Canopus has built for you — reports, dashboards, infographics and tools. Every revision is kept as a version.</p></div>
+            <button class="cta" data-act="newcanvas"><svg data-ic="sparkle"></svg>Create something</button>
+          </div>
+          <div class="bar"><label class="search"><svg data-ic="search"></svg><input id="studioQ" placeholder="Search your work…"></label><div class="pills" id="studioSort"></div></div>
+          <div id="cards"></div>
+          <div class="foot" id="studioFoot"></div>
+        </div>
+      </div>
+
+      <div class="view page" id="v-sources" hidden>
+        <div class="page-in">
+          <div class="page-head">
+            <div><h1><span class="h-ic c-muted"><svg data-ic="archive"></svg></span>My files</h1><p class="sub">Your personal reference files. Attach them to any chat, or pin them to a Space. Only you can see them. For documents the whole organization should use, ask an administrator to add them to Knowledge.</p></div>
+            <button class="cta" data-act="upload"><svg data-ic="upload"></svg>Add files</button>
+            <input type="file" id="kFile" multiple hidden>
+          </div>
+          <div class="stat-row" id="srcStats"></div>
+          <div class="bar"><label class="search" style="flex:0 1 360px"><svg data-ic="search"></svg><input id="fileQ" placeholder="Search files…"></label><div class="pills" id="pills"></div></div>
+          <div id="fileList"></div>
+        </div>
+      </div>
+
+      <div class="view page" id="v-prompts" hidden>
+        <div class="page-in">
+          <div class="page-head">
+            <div><h1><span class="h-ic c-violet"><svg data-ic="bolt"></svg></span>Prompts</h1><p class="sub">Reusable prompt templates. Write <span class="var">{{blanks}}</span> and Canopus asks you to fill them in.</p></div>
+            <button class="cta" data-act="newprompt"><svg data-ic="plus"></svg>New prompt</button>
+          </div>
+          <div class="bar"><label class="search"><svg data-ic="search"></svg><input id="promptQ" placeholder="Search prompts…"></label></div>
+          <div id="promptList"></div>
+        </div>
+      </div>
+
+      <div class="view page" id="v-skills" hidden>
+        <div class="page-in narrow">
+          <div class="page-head">
+            <div><h1><span class="h-ic c-green"><svg data-ic="puzzle"></svg></span>Skills</h1><p class="sub">Expert instructions Canopus applies whenever a request matches them. Organization skills are set by your administrator; you can add your own too.</p></div>
+            <div style="display:flex;gap:8px"><button class="btn" data-act="uploadskill"><svg data-ic="upload"></svg>Upload</button><button class="cta" data-act="newskill"><svg data-ic="plus"></svg>Write a skill</button></div>
+            <input type="file" id="pFile" accept=".zip,.gz,.tgz,.md,.txt" multiple hidden>
+          </div>
+          <div id="skillList"></div>
+        </div>
+      </div>
+
+      <div class="view page" id="v-space" hidden><div class="page-in" id="spacePage"></div></div>
+      <div class="view page" id="v-admin" hidden><div class="page-in" id="adminPage"></div></div>
+
+      <aside class="panel" id="panel" hidden></aside>
+    </div>
+  </main>
+</div>
+
+<template id="composerTpl">
+  <div class="notice" id="keybar" hidden><svg data-ic="key"></svg><span>The AI service isn't configured on the server yet. Ask your administrator.</span></div>
+  <form class="composer" id="composer">
+    <div class="chips" id="chips"></div>
+    <textarea id="input" rows="2" placeholder="Ask anything, or type / for prompts"></textarea>
+    <div class="tools">
+      <div class="drop">
+        <button type="button" class="icon-btn" title="Add" data-menu="addMenu"><svg data-ic="plus"></svg></button>
+        <div class="menu" id="addMenu">
+          <button type="button" data-act="attach"><svg data-ic="attach"></svg><div>Upload from device<small>Images, PDF, Word and text files</small></div></button>
+          <button type="button" data-act="fromsources"><svg data-ic="archive"></svg><div>Add from My files<small>Reuse files you saved before</small></div></button>
+          <button type="button" data-act="shot"><svg data-ic="screen"></svg><div>Capture screen<small>Attach a screenshot</small></div></button>
+          <div class="m-sep"></div>
+          <button type="button" data-act="useprompt"><svg data-ic="bolt"></svg><div>Use a prompt<small>Insert a saved template</small></div></button>
+        </div>
+      </div>
+      <input type="file" id="file" multiple hidden>
+      <button type="button" class="toggle-chip" id="knowBtn" data-act="know" title="Let Canopus search the organization's knowledge"><svg data-ic="book"></svg><span class="wl">Knowledge</span></button>
+      <button type="button" class="toggle-chip" id="webBtn" data-act="web" title="Let Canopus search the web" hidden><svg data-ic="globe"></svg><span class="wl">Web</span></button>
+      <span class="sep"></span>
+      <div class="drop">
+        <button type="button" class="drop-btn" data-menu="modelMenu"><span id="modelLabel">Model</span><svg data-ic="chevDown"></svg></button>
+        <div class="menu" id="modelMenu"></div>
+      </div>
+      <span class="grow"></span>
+      <div class="drop" id="modeDrop">
+        <button type="button" class="drop-btn" data-menu="modeMenu"><span id="modeLabel">Balanced</span><svg data-ic="chevDown"></svg></button>
+        <div class="menu right" id="modeMenu"></div>
+      </div>
+      <button type="button" class="icon-btn" title="Improve my prompt" data-act="enhance" id="enhBtn"><svg data-ic="sparkle"></svg></button>
+      <button type="button" class="icon-btn mic" title="Dictate" data-act="mic"><svg data-ic="mic"></svg></button>
+      <button type="submit" class="send" id="send" title="Send"><svg data-ic="arrowUp"></svg></button>
+    </div>
+  </form>
+  <div class="hint" id="hint">Canopus can make mistakes. Check important information against the cited sources.</div>
+</template>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="modal" id="modal" hidden></div>
+</body>
+</html>

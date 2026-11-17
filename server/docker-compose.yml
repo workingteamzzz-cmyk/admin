@@ -1,0 +1,25 @@
+services:
+  canopus:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:8080:8080"   # only reachable through the HTTPS reverse proxy below
+
+  # HTTPS in front of Canopus. Replace canopus.kantor.go.id in Caddyfile with your domain,
+  # or remove this service if your organization already has a reverse proxy / load balancer.
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [canopus]
+
+volumes:
+  caddy_data:
