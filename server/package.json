@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Canopus: secure, multi-user AI workspace backed by Claude",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
     "create-admin": "node --disable-warning=ExperimentalWarning src/cli.mjs create-admin",
@@ -14,6 +16,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "1.4.0",
     "dompurify": "3.4.17",
+    "exceljs": "4.4.0",
     "jszip": "3.10.1",
     "mammoth": "1.12.3",
     "marked": "18.1.3",

@@ -14,10 +14,17 @@ const PATTERNS = [
 const TOKEN_RE = /⟦([A-Z]+_\d+)⟧/g;
 
 export class Redactor {
-  constructor({ userId, chatId, enabled, terms = [] }) {
+  // values: [{kind, value}] from sensitive table columns (patient names, record numbers, addresses, …)
+  constructor({ userId, chatId, enabled, terms = [], values = [] }) {
     this.userId = userId; this.chatId = String(chatId || 'none').slice(0, 64); this.enabled = !!enabled;
     this.terms = terms.map(t => String(t).trim()).filter(t => t.length >= 3).sort((a, b) => b.length - a.length);
+    this.values = []; this.addValues(values);
     this.count = 0;
+  }
+  addValues(values) {
+    const seen = new Set(this.values.map(v => v.lower));
+    for (const v of values) { const value = String(v.value || '').trim(); const lower = value.toLowerCase(); if (value.length < 3 || /^\d{1,3}$/.test(value) || seen.has(lower)) continue; seen.add(lower); this.values.push({ kind: v.kind || 'NAME', value, lower }); }
+    this.values.sort((a, b) => b.value.length - a.value.length);
   }
   tokenFor(kind, value) {
     const hit = one(`SELECT token FROM redactions WHERE user_id=? AND chat_id=? AND value=?`, this.userId, this.chatId, value);
@@ -30,6 +37,12 @@ export class Redactor {
   mask(text) {
     if (!this.enabled || !text) return text;
     let out = String(text);
+    let lower = out.toLowerCase();
+    for (const v of this.values) {
+      if (!lower.includes(v.lower)) continue; // cheap check first; most values are not in a given text
+      const re = new RegExp(`(?<![\\p{L}\\p{N}])${v.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu');
+      out = out.replace(re, m => { this.count++; return this.tokenFor(v.kind, m); }); lower = out.toLowerCase();
+    }
     for (const term of this.terms) {
       const re = new RegExp(`(?<![\\p{L}\\p{N}])${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu');
       out = out.replace(re, m => { this.count++; return this.tokenFor('NAME', m); });

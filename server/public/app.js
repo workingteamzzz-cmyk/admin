@@ -141,8 +141,10 @@ const space=id=>state.spaces.find(s=>s.id===id);
 const isAdmin=()=>me?.user.role==='admin';
 function ftypeOf(name){ const t=FTYPES.find(t=>t.ext&&t.ext.test(name)); return t?t.id:'doc'; }
 const allSkills=()=>[...BUILTIN_SKILLS.map(b=>({...b, enabled:state.skills.find(s=>s.id===b.id)?.enabled ?? false})), ...state.skills.filter(s=>!s.builtin)];
-const allPrompts=()=>[...(me?.orgPrompts||[]).map(p=>({...p, org:true})), ...state.prompts, ...BUILTIN_PROMPTS.filter(b=>!state.prompts.some(p=>p.id===b.id))];
-function currentModel(){ const ms=me?.config.models||[]; return ms.find(m=>m.id===state.model) || ms.find(m=>m.id===me?.config.defaultModel) || ms[0] || null; } // Auto selection UI: in progress
+const allPrompts=()=>[...(me?.orgPrompts||[]).map(p=>({...p, org:true})), ...state.prompts, ...BUILTIN_PROMPTS.filter(b=>!state.prompts.some(p=>p.id===b.id)&&(me?.config.canvas||b.id!=='bp5'))];
+const AUTO={id:'auto', label:'Auto', d:'Picks the best model for each question'};
+function currentModel(){ const ms=me?.config.models||[]; if(state.model==='auto'&&me?.config.auto) return AUTO; return ms.find(m=>m.id===state.model) || (me?.config.defaultModel==='auto'&&me?.config.auto?AUTO:ms.find(m=>m.id===me?.config.defaultModel)) || ms[0] || null; }
+const PROVIDER={anthropic:'Claude', openai:'OpenAI', local:'On-premise (data stays inside)'};
 function downloadText(name,text,type='text/html'){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type})); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000); }
 const safeName=s=>(String(s).replace(/[^\w\- ]+/g,'').trim()||'canopus').slice(0,60);
 document.addEventListener('error', e=>{ if(e.target.tagName==='IMG' && e.target.closest('.src')) e.target.remove(); }, true);
@@ -192,7 +194,8 @@ async function refreshMe(){ try{ me=await api('/api/me'); renderSide(); updateTo
 
 /* ================= Routing ================= */
 const VIEWS=['home','knowledge','studio','sources','prompts','skills','space','admin'];
-let spaceId=null, pendingSpace=null;
+let spaceId=null, pendingSpace=null, pendingProject=null;
+const projectById=id=>me?.projects?.find(p=>p.id===id);
 const curView=()=>{ const v=location.hash.slice(1).split('/')[0]||'home'; return VIEWS.includes(v)?v:'home'; };
 function route(){
   if(!me) return;
@@ -212,6 +215,8 @@ function renderPage(v=curView()){ ({home:renderHome, knowledge:renderKnowledge, 
 /* ================= Sidebar ================= */
 function renderSide(){
   const cv=curView(); document.querySelectorAll('.side [data-go]').forEach(b=>b.classList.toggle('active', b.dataset.go===cv && (cv!=='home'||!state.current)));
+  $('#projList').innerHTML=(me.projects||[]).map(p=>`<div class="row-item ${pendingProject===p.id&&!state.current?'active':''}" data-project="${p.id}" role="button" title="${esc(p.description||p.name)}">${ic('book','c-sky')}<span>${esc(p.name)}</span><small>${state.chats.filter(c=>c.projectId===p.id).length||''}</small></div>`).join('')||`<div class="empty">${isAdmin()?'Create shared projects in Admin → Projects.':'No shared projects yet.'}</div>`;
+  document.querySelector('[data-go=studio]').hidden=!me.config.canvas&&!state.canvases.length;
   $('#spaceList').innerHTML=state.spaces.map(s=>`<div class="row-item ${location.hash==='#space/'+s.id?'active':''}" data-space="${s.id}" role="button"><i class="dotc" style="background:${s.color}"></i><span>${esc(s.name)}</span><small>${state.chats.filter(c=>c.spaceId===s.id).length||''}</small></div>`).join('')||`<div class="empty">Group related chats with shared instructions and files.</div>`;
   const onHome=cv==='home';
   const row=c=>`<div class="row-item ${onHome&&c.id===state.current?'active':''}" data-open="${c.id}" role="button" title="${esc(c.title)}">${c.spaceId&&space(c.spaceId)?`<i class="dotc" style="background:${space(c.spaceId).color}"></i>`:''}<span>${esc(c.title)}</span>${c.msgs.some(m=>m.streaming)?'<i class="live"></i>':''}<button class="mini" data-chatmenu="${c.id}" title="Options">${ic('dots')}</button></div>`;
@@ -234,7 +239,8 @@ function renderHead(){
   const c=curChat(); const h=$('#chatHead');
   if(curView()!=='home'||!c){ h.innerHTML=''; return; }
   const sp=space(c.spaceId);
-  h.innerHTML=`<span class="t" data-act="renamechat" title="Rename">${esc(c.title)}</span>${sp?`<span class="space-chip" data-space="${sp.id}"><i style="background:${sp.color}"></i>${esc(sp.name)}</span>`:''}
+  const pj=projectById(c.projectId);
+  h.innerHTML=`<span class="t" data-act="renamechat" title="Rename">${esc(c.title)}</span>${pj?`<span class="space-chip" data-project="${pj.id}">${ic('book','c-sky')}${esc(pj.name)}</span>`:''}${sp?`<span class="space-chip" data-space="${sp.id}"><i style="background:${sp.color}"></i>${esc(sp.name)}</span>`:''}
     <div class="top-acts"><button class="icon-btn ${c.pinned?'pinned':''}" data-act="pinchat" title="${c.pinned?'Unpin':'Pin'}">${ic('pin')}</button><button class="icon-btn hide-m" data-act="exportchat" title="Export as Markdown">${ic('download')}</button><button class="icon-btn" data-chatmenu="${c.id}" title="More">${ic('dots')}</button></div>`;
 }
 
@@ -255,7 +261,12 @@ function updateTools(){
   $('#webBtn').hidden=!me.config.webSearch; $('#webBtn').classList.toggle('on', !!state.web&&me.config.webSearch);
   $('#knowBtn').classList.toggle('on', state.knowledge!==false);
   $('#keybar').hidden=!!me.config.apiConfigured;
-  $('#modelMenu').innerHTML=me.config.models.map(x=>`<button type="button" data-model="${x.id}" class="${m&&x.id===m.id?'sel':''}"><div>${esc(x.label)}<small>${esc(x.d)}</small></div>${tick}</button>`).join('');
+  const b=me.budget; const warn=[...(b.limit>0&&b.spent>=b.limit*.8?[`You have used ${Math.round(b.spent/b.limit*100)}% of your monthly AI budget (${usd(b.spent)} of ${usd(b.limit)}).`]:[]), ...(b.groups||[]).filter(g=>g.spent>=g.limit*.8).map(g=>`Group “${g.name}” has used ${Math.round(g.spent/g.limit*100)}% of its monthly budget.`)];
+  let bn=$('#budgetWarn'); if(!bn){ bn=document.createElement('div'); bn.id='budgetWarn'; bn.className='notice'; $('#composer').before(bn); }
+  bn.hidden=!warn.length; bn.innerHTML=warn.length?`${ic('clock')}<span>${esc(warn.join(' '))}</span>`:'';
+  let mh=me.config.auto?`<button type="button" data-model="auto" class="${m?.id==='auto'?'sel':''}"><div>Auto <span class="badge gold" style="margin-left:4px">Recommended</span><small>${esc(AUTO.d)} — cheaper for simple tasks</small></div>${tick}</button>`:''; let grp='';
+  for(const x of me.config.models){ if(x.provider!==grp){ grp=x.provider; mh+=`<div class="m-h">${PROVIDER[grp]||grp}</div>`; } mh+=`<button type="button" data-model="${x.id}" class="${m&&x.id===m.id?'sel':''}"><div>${esc(x.label)}<small>${esc(x.d)}</small></div>${tick}</button>`; }
+  $('#modelMenu').innerHTML=mh;
   $('#modeMenu').innerHTML=MODES.map(x=>`<button type="button" data-mode="${x.id}" class="${x.id===state.mode?'sel':''}"><div>${x.name}<small>${x.d}</small></div>${tick}</button>`).join('');
   updateSend();
 }
@@ -314,7 +325,7 @@ comp.addEventListener('submit',async e=>{
   if(attachments.some(a=>a.uploading)){ toast('Wait for the upload to finish'); return; }
   const text=input.value.trim(); if(!text&&!attachments.length) return;
   const atts=[...attachments]; atts.forEach(addFileRecord);
-  if(!chat){ chat={id:uid(), title:(text||atts[0]?.name||'New chat').split('\n')[0].slice(0,60), msgs:[], pinned:false, created:Date.now(), updated:Date.now(), spaceId:pendingSpace||null}; state.chats.unshift(chat); state.current=chat.id; pendingSpace=null; }
+  if(!chat){ chat={id:uid(), title:(text||atts[0]?.name||'New chat').split('\n')[0].slice(0,60), msgs:[], pinned:false, created:Date.now(), updated:Date.now(), spaceId:pendingSpace||null, projectId:pendingProject||null}; state.chats.unshift(chat); state.current=chat.id; pendingSpace=null; pendingProject=null; }
   chat.msgs.push({r:'user', text, refs:atts.map(a=>a.id), atts:atts.map(a=>({name:a.name, kind:a.kind, thumb:a.thumb}))});
   input.value=''; attachments=[]; renderChips(); autosize();
   if(curView()!=='home') go('home');
@@ -331,15 +342,16 @@ function renderHome(){
   $('#today').textContent=d.toLocaleDateString('en-US',{weekday:'long', month:'long', day:'numeric'});
   const n=(me.user.name||'').split(' ')[0];
   $('#greet').innerHTML=n?`${g}, <em>${esc(n)}</em>`:'What are we working on today?';
-  input.placeholder=pendingSpace&&space(pendingSpace)?`New chat in ${space(pendingSpace).name}…`:'Ask anything, or type / for prompts';
+  input.placeholder=pendingProject&&projectById(pendingProject)?`Ask within “${projectById(pendingProject).name}”…`:pendingSpace&&space(pendingSpace)?`New chat in ${space(pendingSpace).name}…`:'Ask anything, or type / for prompts';
   const recent=[...state.chats].sort((a,b)=>(b.updated||0)-(a.updated||0)).slice(0,3);
   const works=[...state.canvases].sort((a,b)=>b.updated-a.updated).slice(0,3);
   const docs=knowledge.reduce((a,c)=>a+c.docs.filter(x=>x.status==='ready').length,0);
   let h='';
   if(docs) h+=`<div class="notice info" style="margin-top:14px">${ic('book')}<span>Canopus can search <b>${docs} internal document${docs>1?'s':''}</b> you have access to, and cites them in its answers.</span><button class="btn sm" data-go="knowledge">View</button></div>`;
+  if(me.projects?.length) h+=`<div class="hsec"><div class="hsec-h">${ic('book')}Projects</div><div class="cont">${me.projects.slice(0,6).map(p=>`<button class="cc" data-project="${p.id}"><b>${esc(p.name)}</b><p>${esc(p.description||'Shared project with its own instructions and knowledge.')}</p><small>${p.collections?p.collections+' knowledge collection'+(p.collections>1?'s':''):'All your knowledge'}</small></button>`).join('')}</div></div>`;
   h+=`<div class="hsec"><div class="hsec-h">${ic('bolt')}Quick start<a data-go="prompts">All prompts →</a></div><div class="qs">${allPrompts().slice(0,4).map(p=>`<button class="q" data-useprompt="${p.id}">${ic(p.icon||'bolt')}<b>${esc(p.title)}</b><small>${esc(p.body.replace(/\{\{[^}]+\}\}/g,'…').replace(/…\./g,'…').split('\n')[0].slice(0,80))}</small></button>`).join('')}</div></div>`;
   if(recent.length) h+=`<div class="hsec"><div class="hsec-h">${ic('clock')}Continue<a data-act="search">Search all →</a></div><div class="cont">${recent.map(c=>{ const last=[...c.msgs].reverse().find(m=>m.r==='assistant'&&botText(m)); return `<button class="cc" data-open="${c.id}"><b>${esc(c.title)}</b><p>${esc((last?botText(last):c.msgs[0]?.text||'').replace(/```[\s\S]*?```/g,'[canvas]').replace(/[#*`>|_]+/g,' ').slice(0,160))}</p><small>${ago(c.updated)}</small></button>`; }).join('')}</div></div>`;
-  if(works.length) h+=`<div class="hsec"><div class="hsec-h">${ic('layers')}Recent in Studio<a data-go="studio">Open Studio →</a></div><div class="mini-cards">${works.map(cardHTML).join('')}</div></div>`;
+  if(works.length&&me.config.canvas) h+=`<div class="hsec"><div class="hsec-h">${ic('layers')}Recent in Studio<a data-go="studio">Open Studio →</a></div><div class="mini-cards">${works.map(cardHTML).join('')}</div></div>`;
   $('#homeSections').innerHTML=h; fillThumbs($('#homeSections'));
 }
 
@@ -375,7 +387,8 @@ function botInner(m,i,isLast){
   let h='';
   if(m.thinking) h+=`<details class="think" data-think="${i}" ${m.thinkOpen?'open':''}><summary>${ic('chevRight','chv')}${ic('bulb')}<span class="${m.streaming&&!m.live?'shimmer':''}">${m.streaming&&!m.live?'Thinking…':'Thought process'}</span></summary><div class="tx">${esc(m.thinking)}</div></details>`;
   if(m.streaming&&m.status) h+=`<div class="status">${ic(/web/i.test(m.status)?'globe':'book')}<span class="shimmer">${esc(m.status)}</span></div>`;
-  const body=bodyHTML(m);
+  let body=bodyHTML(m);
+  if(body&&!m.streaming&&m.provider==='openai'&&m.citations?.length) body=body.replace(/\[(\d{1,2})\](?![^<]*<\/a>)/g,(x,n)=>{ const j=m.citations.findIndex(c=>c.n===+n); return j<0?x:`<button class="cn" data-cite="${i}:${j}" title="${esc(m.citations[j].title)}">${n}</button>`; });
   if(body) h+=`<div class="md">${body}</div>`;
   else if(m.streaming&&!m.thinking&&!m.status) h+=`<span class="typing"><span></span><span></span><span></span></span>`;
   if(m.stop==='refusal') h+=`<div class="err">${ic('x')}<div>Canopus can't help with that request. Try rephrasing it.</div></div>`;
@@ -383,7 +396,9 @@ function botInner(m,i,isLast){
   if(!m.streaming){
     h+=citesHTML(m,i);
     const u=m.usage; const usage=u&&(u.in||u.out)?` · ${fmtTok(u.in)} in · ${fmtTok(u.out)} out`:'';
-    h+=`<div class="acts">${botText(m)?`<button class="icon-btn" title="Copy" data-copy="${i}">${ic('copy')}</button>`:''}${isLast?`<button class="icon-btn" title="Regenerate" data-act="regen">${ic('refresh')}</button>`:''}<span class="meta">${esc(m.modelName||'')}${m.modeName?' · '+esc(m.modeName):''}${m.stopped?' · stopped':''}${usage}</span></div>`;
+    const r=m.route; const routeTxt=r?.auto?`Auto → ${esc(m.modelName||'')}${r.category?` · ${esc(me.config.categories?.[r.category]?.label||r.category)}`:''}`:esc(m.modelName||'');
+    const fo=r?.failover?` · switched from ${esc(r.failover.from)} (${esc(r.failover.reason)})`:'';
+    h+=`<div class="acts">${botText(m)?`<button class="icon-btn" title="Copy" data-copy="${i}">${ic('copy')}</button>`:''}${isLast?`<button class="icon-btn" title="Regenerate" data-act="regen">${ic('refresh')}</button>`:''}<span class="meta" title="${r?.auto?esc('Chosen automatically: '+(r.reason||'')):''}">${routeTxt}${m.modeName?' · '+esc(m.modeName):''}${fo}${m.stopped?' · stopped':''}${usage}</span></div>`;
   }
   return h;
 }
@@ -467,11 +482,11 @@ function historyFor(chat, upto){
 async function respond(chat){
   const M=currentModel(); if(!M){ toast('No AI model is enabled. Ask your administrator.'); return; }
   const sp=space(chat.spaceId);
-  const bot={r:'assistant', live:'', thinking:'', found:[], streaming:true, modelName:M.label, modeName:mode().name};
+  const bot={r:'assistant', live:'', thinking:'', found:[], streaming:true, modelName:M.id==='auto'?'Auto':M.label, modeName:mode().name};
   chat.msgs.push(bot); chat.updated=Date.now();
   const idx=chat.msgs.length-1; const ac=new AbortController(); const ctl={abort(){ ctl.aborted=true; ac.abort(); }};
   running.set(chat.id, ctl); renderSide(); if(curView()==='home'&&chat.id===state.current){ renderHead(); renderHome(); }
-  const payload={ chatId:chat.id, model:M.id, mode:state.mode, web:!!state.web, knowledge:state.knowledge!==false, messages:historyFor(chat, idx),
+  const payload={ chatId:chat.id, projectId:chat.projectId||undefined, model:M.id, mode:state.mode, web:!!state.web, knowledge:state.knowledge!==false, messages:historyFor(chat, idx),
     system:{ instructions:state.instructions, spaceName:sp?.name, spaceInstructions:sp?.instructions, skills:allSkills().filter(s=>s.enabled).map(s=>({name:s.name, content:s.content})) } };
   try{
     const r=await fetch('/api/chat',{method:'POST', signal:ac.signal, headers:{'content-type':'application/json','x-canopus':'1'}, body:JSON.stringify(payload)});
@@ -489,7 +504,7 @@ async function respond(chat){
         else if(ev.t==='status') bot.status=ev.d;
         else if(ev.t==='sources') bot.found.push(...ev.d);
         else if(ev.t==='error'){ bot.error=ev.message; }
-        else if(ev.t==='route'){ bot.modelName=ev.model.label; bot.provider=ev.model.provider; bot.route=ev.route; }
+        else if(ev.t==='route'){ bot.modelName=ev.model.label; bot.provider=ev.model.provider; bot.route=ev.route; bot.modeName=mode().name; }
         else if(ev.t==='done'){ bot.provider=ev.provider; bot.turn=ev.turn; bot.display=ev.display; bot.citations=ev.citations; bot.usage=ev.usage; bot.stop=ev.stop; }
         paint(chat, idx);
       }
@@ -530,12 +545,19 @@ const clsBadge=c=>`<span class="cls ${esc(c)}">${esc(me.config.classifications[c
 async function renderKnowledge(){
   const total=knowledge.reduce((a,c)=>a+c.docs.length,0);
   $('#knowPage').innerHTML=`<div class="page-head"><div><h1><span class="h-ic c-sky"><svg data-ic="book"></svg></span>Knowledge</h1><p class="sub">Internal documents Canopus can search when you ask a question. Documents stay on this server: only the few passages relevant to your question are sent to the AI, sensitive details like ID numbers are masked first, and every answer cites its sources.</p></div>${isAdmin()?`<button class="cta" data-go="admin" data-tab="knowledge">${ic('settings')}Manage</button>`:''}</div>
+    <div class="set-sec" style="margin-bottom:16px"><h3 style="display:flex;gap:8px;align-items:center">${ic('search')}Search documents directly</h3><p>Finds passages without using AI: nothing leaves the server and it costs nothing. Works for every collection you can access, including on-premise ones.</p>
+      <form id="dsForm" class="bar" style="margin:0"><label class="search"><svg data-ic="search"></svg><input id="dsQ" placeholder="e.g. a name, a record number, “anggaran 2026”…"></label><button class="btn primary" type="submit">Search</button></form><div id="dsRes"></div></div>
     <div class="stat-row"><div class="stat"><small>Collections you can access</small><b>${knowledge.length}</b></div><div class="stat"><small>Documents</small><b>${total}</b></div><div class="stat"><small>Searchable passages</small><b>${knowledge.reduce((a,c)=>a+c.docs.reduce((x,d)=>x+(d.chunks||0),0),0)}</b></div></div>
-    ${knowledge.length?knowledge.map(c=>`<div class="col-card"><div class="col-head"><div><h3>${esc(c.name)}</h3><p>${c.description?esc(c.description)+' · ':''}Access: ${c.groups.length?c.groups.map(g=>esc(g.name)).join(', '):'everyone'}</p></div><button class="btn sm" data-askcol="${c.id}">${ic('chat')}Ask about this</button></div>
-      ${c.docs.length?c.docs.map(d=>`<div class="doc-row">${ic('file')}<span class="t" title="${esc(d.filename)}">${esc(d.title)}</span>${clsBadge(d.classification)}<small>${d.pages>1?d.pages+' pages · ':''}${fmtDate(d.created)}</small>${d.status==='ready'?`<a class="icon-btn" href="/api/knowledge/docs/${d.id}/file" target="_blank" rel="noopener" title="Open original">${ic('eye')}</a>`:`<span class="cls ${d.status}">${d.status}</span>`}</div>`).join(''):'<div class="empty" style="padding:6px 0">No documents yet.</div>'}</div>`).join('')
+    ${knowledge.length?knowledge.map(c=>`<div class="col-card"><div class="col-head"><div><h3>${esc(c.name)}</h3><p>${c.local_only?`<span class="cls biasa">${ic('lock')}On this server only</span> `:''}${c.description?esc(c.description)+' · ':''}Access: ${c.groups.length?c.groups.map(g=>esc(g.name)).join(', '):'everyone'}</p></div><button class="btn sm" data-askcol="${c.id}">${ic('chat')}Ask about this</button></div>
+      ${c.docs.length?c.docs.map(d=>`<div class="doc-row">${ic('file')}<span class="t" title="${esc(d.filename)}">${esc(d.title)}</span>${clsBadge(d.classification)}${d.sensitive?`<span class="cls terbatas" title="Values in personal-data columns are always masked before reaching the AI">${ic('lock')}${d.sensitive} masked</span>`:''}<small>${d.pages>1?d.pages+' pages · ':''}${fmtDate(d.created)}</small>${d.status==='ready'?`<a class="icon-btn" href="/api/knowledge/docs/${d.id}/file" target="_blank" rel="noopener" title="Open original">${ic('eye')}</a>`:`<span class="cls ${d.status}">${d.status}</span>`}</div>`).join(''):'<div class="empty" style="padding:6px 0">No documents yet.</div>'}</div>`).join('')
       :`<div class="empty-box"><div class="e-ic">${ic('book')}</div><b>No knowledge available yet</b><p>${isAdmin()?'Create a collection and upload documents in Admin → Knowledge.':'Your administrator hasn\'t shared any knowledge collections with you yet.'}</p></div>`}`;
   hydrateIcons($('#knowPage'));
+  $('#dsForm').onsubmit=async e=>{ e.preventDefault(); const q=$('#dsQ').value.trim(); if(!q) return; const box=$('#dsRes'); box.innerHTML='<div class="help">Searching…</div>';
+    try{ const hits=await api('/api/knowledge/search',{method:'POST', body:{query:q}}); dsHits=hits;
+      box.innerHTML=hits.length?hits.map((h,j)=>`<div class="doc-row" style="align-items:flex-start">${ic('file')}<div style="flex:1;min-width:0"><b style="font-size:14px">${esc(h.title)}${h.page?' — p. '+h.page:''}</b> <small>${esc(h.collection)}</small>${h.localOnly?` <span class="cls biasa">${ic('lock')}on-premise</span>`:''}<div class="help" style="white-space:pre-wrap;color:var(--fg);opacity:.85">${esc(h.text.slice(0,400))}${h.text.length>400?'…':''}</div></div><button class="icon-btn" data-dshit="${j}" title="Show passage">${ic('eye')}</button></div>`).join(''):'<div class="help">No matching passages.</div>'; }
+    catch(err){ box.innerHTML=`<div class="help" style="color:var(--red)">${esc(err.message)}</div>`; } };
 }
+let dsHits=[];
 
 /* ================= Studio ================= */
 function cardHTML(c){ const v=c.versions.length; return `<div class="card"><div class="thumb" data-copen="${c.id}" data-thumb="${c.id}" role="button"></div><div class="card-body"><div class="card-top"><h3>${esc(c.title)}</h3><button class="icon-btn" data-cmenu="${c.id}" title="Options">${ic('dots')}</button></div><div class="date">Updated ${ago(c.updated)}</div><div class="badges"><span class="badge">${ic('sidebar')}Interactive page</span>${v>1?`<span class="badge gold">${ic('layers')}${v} versions</span>`:''}</div></div></div>`; }
@@ -634,12 +656,12 @@ async function loadAdmin(){ admin=await api('/api/admin/overview'); }
 async function renderAdmin(){
   const page=$('#adminPage');
   try{ await loadAdmin(); }catch(e){ page.innerHTML=`<div class="empty-box"><b>Could not load the admin console</b><p>${esc(e.message)}</p></div>`; return; }
-  const tabs=[['users','Users'],['groups','Groups'],['knowledge','Knowledge'],['settings','Settings'],['usage','Usage'],['audit','Audit log']];
+  const tabs=[['users','Users'],['groups','Groups'],['projects','Projects'],['knowledge','Knowledge'],['models','Models'],['settings','Settings'],['integrations','Integrations'],['usage','Usage'],['audit','Audit log']];
   page.innerHTML=`<div class="page-head"><div><h1><span class="h-ic c-pink"><svg data-ic="shield"></svg></span>Admin</h1><p class="sub">Manage who can use Canopus, what internal knowledge they can reach, the AI models and budgets, and review activity.</p></div></div>
-    ${admin.apiConfigured?'':`<div class="notice" style="max-width:none">${ic('key')}<span>The server has no Anthropic API key. Set <b>ANTHROPIC_API_KEY</b> in the server's environment and restart it.</span></div>`}
+    ${admin.apiConfigured?'':`<div class="notice" style="max-width:none">${ic('key')}<span>No AI provider is configured. Set <b>ANTHROPIC_API_KEY</b> and/or <b>OPENAI_API_KEY</b> in the server's .env file and restart it.</span></div>`}
     <div class="tabs">${tabs.map(([k,l])=>`<button class="tab ${adminTab===k?'on':''}" data-atab="${k}">${l}</button>`).join('')}</div><div id="adminBody" style="margin-top:18px"></div>`;
   hydrateIcons(page);
-  ({users:adminUsers, groups:adminGroups, knowledge:adminKnowledge, settings:adminSettings, usage:adminUsage, audit:adminAudit}[adminTab])();
+  ({users:adminUsers, groups:adminGroups, projects:adminProjects, knowledge:adminKnowledge, models:adminModels, settings:adminSettings, integrations:adminIntegrations, usage:adminUsage, audit:adminAudit}[adminTab])();
 }
 const groupName=id=>admin.groups.find(g=>g.id===id)?.name||'?';
 function adminUsers(){
@@ -661,38 +683,124 @@ function userModal(u){
 }
 function showLink(title, link){ modalDone=null; openModal(`<h3>${esc(title)}</h3><p class="s">Copy this one-time link and send it to the user through a trusted internal channel. It expires in 72 hours and can be used once.</p><div class="linkbox"><input type="text" id="linkIn" value="${esc(link)}" readonly><button class="btn primary" data-act="copylink">${ic('copy')}Copy</button></div><div class="dlg-actions"><button class="btn" data-dlg="cancel">Done</button></div>`,'wide'); }
 function adminGroups(){
-  $('#adminBody').innerHTML=`<div class="bar"><div style="flex:1;color:var(--muted)">Groups decide which knowledge collections each user can search (for example a directorate or a working unit).</div><button class="cta" data-act="addgroup">${ic('plus')}New group</button></div>
-    ${admin.groups.length?`<div class="tblwrap"><table class="tbl"><thead><tr><th>Group</th><th class="r">Members</th><th class="r">Collections</th><th></th></tr></thead><tbody>${admin.groups.map(g=>`<tr><td><b>${esc(g.name)}</b></td><td class="r">${g.members}</td><td class="r">${admin.collections.filter(c=>c.groups.some(x=>x.id===g.id)).length}</td><td class="r"><button class="icon-btn" data-delgroup="${g.id}" title="Delete">${ic('trash')}</button></td></tr>`).join('')}</tbody></table></div>`:`<div class="empty-box"><b>No groups yet</b><p>Without groups, every collection is visible to everyone.</p></div>`}`;
+  $('#adminBody').innerHTML=`<div class="bar"><div style="flex:1;color:var(--muted)">Groups decide which knowledge collections and projects people can use, which models they may choose, and an optional shared monthly budget.</div><button class="cta" data-act="addgroup">${ic('plus')}New group</button></div>
+    ${admin.groups.length?`<div class="tblwrap"><table class="tbl"><thead><tr><th>Group</th><th class="r">Members</th><th>Models allowed</th><th class="r">This month</th><th></th></tr></thead><tbody>${admin.groups.map(g=>`<tr><td><b>${esc(g.name)}</b></td><td class="r">${g.members}</td><td>${g.models?g.models.map(id=>`<span class="gchip">${esc(admin.models.find(m=>m.id===id)?.label||id)}</span>`).join(''):'<span class="muted">All enabled models</span>'}</td><td class="r">${usd(g.spent)}<div class="muted">${g.budget_usd>0?'of '+usd(g.budget_usd):'no group budget'}</div></td><td class="r"><button class="icon-btn" data-editgroup="${g.id}" title="Edit">${ic('edit')}</button><button class="icon-btn" data-delgroup="${g.id}" title="Delete">${ic('trash')}</button></td></tr>`).join('')}</tbody></table></div>`:`<div class="empty-box"><b>No groups yet</b><p>Without groups, every collection and project is visible to everyone.</p></div>`}`;
+}
+function groupModal(g){
+  const enabled=admin.models.filter(m=>admin.settings.models.includes(m.id)); modalDone=null;
+  openModal(`<h3>Edit group</h3><p class="s">${esc(g.name)} · ${g.members} member${g.members===1?'':'s'}</p>
+    <label for="gName">Name</label><input type="text" id="gName" value="${esc(g.name)}">
+    <label for="gBudget">Shared monthly budget (USD) <span style="font-weight:400;color:var(--dim)">— leave empty for none</span></label><input type="text" id="gBudget" value="${g.budget_usd??''}" placeholder="e.g. 20">
+    <label>Models this group may use</label><div class="checks" id="gModels"><label><input type="checkbox" value="__all" ${g.models?'':'checked'}>All enabled models</label>${enabled.map(m=>`<label><input type="checkbox" value="${m.id}" ${g.models?.includes(m.id)?'checked':''}>${esc(m.label)}</label>`).join('')}</div>
+    <div class="help">If a person belongs to several groups, they may use any model allowed in at least one of them. Auto picks the closest allowed model.</div>
+    <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="savegroup" data-gid="${g.id}">Save</button></div>`,'wide');
+}
+function adminProjects(){
+  $('#adminBody').innerHTML=`<div class="bar"><div style="flex:1;color:var(--muted)">Shared projects work like Claude Projects: instructions plus knowledge, ready for everyone you choose — without anyone needing their own AI account.</div><button class="cta" data-act="addproject">${ic('plus')}New project</button></div>
+    ${admin.projects.length?admin.projects.map(p=>`<div class="col-card"><div class="col-head"><div><h3>${esc(p.name)}</h3><p>${p.description?esc(p.description)+' · ':''}Model: ${p.model==='auto'?'Auto':esc(admin.models.find(m=>m.id===p.model)?.label||p.model)} · Knowledge: ${p.collections.length?p.collections.map(c=>esc(admin.collections.find(x=>x.id===c)?.name||'?')).join(', '):'all the user can access'} · Access: ${p.groups.length?p.groups.map(g=>esc(groupName(g))).join(', '):'everyone'}</p></div><button class="btn sm" data-editproject="${p.id}">${ic('edit')}Edit</button></div>${p.instructions?`<div class="quote" style="max-height:120px;font-size:13px">${esc(p.instructions.slice(0,600))}${p.instructions.length>600?'…':''}</div>`:''}</div>`).join('')
+      :`<div class="empty-box"><div class="e-ic">${ic('book')}</div><b>No projects yet</b><p>Create one from scratch, or copy a Claude project: paste its instructions and upload the same files.</p></div>`}`;
+}
+function projectModal(p){
+  const enabled=admin.models.filter(m=>admin.settings.models.includes(m.id)); modalDone=null;
+  openModal(`<h3>${p?'Edit project':'New project'}</h3><p class="s">${p?'':'<b>Copying a Claude project?</b> Open it on claude.ai, copy the text under “Instructions”, paste it below, and upload the same files.'}</p>
+    <label for="pjName">Name</label><input type="text" id="pjName" value="${esc(p?.name||'')}" autofocus>
+    <label for="pjDesc">Short description</label><input type="text" id="pjDesc" value="${esc(p?.description||'')}">
+    <label for="pjInstr">Instructions</label><textarea id="pjInstr" style="min-height:160px" placeholder="How Canopus should behave in this project: role, tone, format, what to focus on…">${esc(p?.instructions||'')}</textarea>
+    <div class="row2"><div><label for="pjModel">Model</label><select id="pjModel"><option value="auto">Auto (recommended)</option>${enabled.map(m=>`<option value="${m.id}" ${p?.model===m.id?'selected':''}>${esc(m.label)}</option>`).join('')}</select></div><div></div></div>
+    <label>Knowledge collections <span style="font-weight:400;color:var(--dim)">— none checked = everything the user can access</span></label><div class="checks" id="pjCols">${admin.collections.map(c=>`<label><input type="checkbox" value="${c.id}" ${p?.collections.includes(c.id)?'checked':''}>${esc(c.name)}</label>`).join('')||'<span class="help">No collections yet.</span>'}</div>
+    ${p?'':`<label>Or upload this project's files now <span style="font-weight:400;color:var(--dim)">— creates a new collection for it</span></label><input type="file" id="pjFiles" multiple accept=".pdf,.docx,.xlsx,.csv,.tsv,.txt,.md,.html,.htm,.json"><select id="pjCls" style="margin-top:8px">${Object.entries(admin.classifications).filter(([,v])=>v.allowed).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}</select><div id="pjLog" class="help"></div>`}
+    <label>Who can use it <span style="font-weight:400;color:var(--dim)">— none checked = everyone</span></label><div id="pjGroups">${groupChecks(p?.groups||[])}</div>
+    <div class="dlg-actions">${p?`<button class="btn danger" data-delproject="${p.id}">${ic('trash')}Delete</button><span class="grow"></span>`:''}<button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="saveproject" data-pid="${p?.id||''}">Save project</button></div>`,'xwide');
 }
 function adminKnowledge(){
   const cls=admin.classifications;
   $('#adminBody').innerHTML=`<div class="notice info" style="max-width:none;margin:0 0 16px">${ic('lock')}<span>Only <b>${Object.values(cls).filter(c=>c.allowed).map(c=>c.label).join('</b> and <b>')}</b> documents can be added. ${Object.values(cls).filter(c=>!c.allowed).map(c=>c.label).join(' and ')} documents are refused and never stored. Text is indexed on this server; only matching passages are sent to the AI, with personal identifiers masked${admin.settings.redaction.enabled?'':' (masking is currently OFF in Settings)'}.</span></div>
     <div class="bar"><div style="flex:1;color:var(--muted)">${admin.collections.length} collection${admin.collections.length===1?'':'s'}</div><button class="cta" data-act="addcol">${ic('plus')}New collection</button></div>
-    ${admin.collections.map(c=>`<div class="col-card"><div class="col-head"><div><h3>${esc(c.name)}</h3><p>${c.description?esc(c.description)+' · ':''}Access: ${c.groups.length?c.groups.map(g=>esc(g.name)).join(', '):'everyone'}</p></div><button class="btn sm" data-editcol="${c.id}">${ic('edit')}Edit</button><button class="btn sm primary" data-upcol="${c.id}">${ic('upload')}Upload</button></div>
-      ${c.docs.length?c.docs.map(d=>`<div class="doc-row">${ic('file')}<span class="t" title="${esc(d.filename)}">${esc(d.title)}</span>${clsBadge(d.classification)}<small>${d.status==='ready'?`${d.chunks} passage${d.chunks===1?'':'s'}${d.pages>1?' · '+d.pages+' pages':''}`:''}</small>${d.status==='ready'?'':`<span class="cls ${d.status}" title="${esc(d.error||'')}">${d.status==='error'?'Error':d.status}</span>`}<button class="icon-btn" data-deldoc="${d.id}" title="Delete">${ic('trash')}</button></div>${d.error?`<div class="help" style="color:var(--red);padding:0 0 8px 30px">${esc(d.error)}</div>`:''}`).join(''):'<div class="empty" style="padding:6px 0">No documents yet. Upload PDF, DOCX, TXT, MD, CSV or HTML files.</div>'}</div>`).join('')}`;
+    ${admin.collections.map(c=>`<div class="col-card"><div class="col-head"><div><h3>${esc(c.name)}</h3><p>${c.local_only?`<span class="cls biasa">${ic('lock')}On this server only</span> `:''}${c.description?esc(c.description)+' · ':''}Access: ${c.groups.length?c.groups.map(g=>esc(g.name)).join(', '):'everyone'}</p></div><button class="btn sm" data-editcol="${c.id}">${ic('edit')}Edit</button><button class="btn sm primary" data-upcol="${c.id}">${ic('upload')}Upload</button></div>
+      ${c.docs.length?c.docs.map(d=>`<div class="doc-row">${ic('file')}<span class="t" title="${esc(d.filename)}">${esc(d.title)}</span>${clsBadge(d.classification)}${d.sensitive?`<span class="cls terbatas" title="Personal-data values always masked">${ic('lock')}${d.sensitive} masked</span>`:''}<small>${d.status==='ready'?`${d.chunks} passage${d.chunks===1?'':'s'}${d.pages>1?' · '+d.pages+' pages':''}`:''}</small>${d.status==='ready'?'':`<span class="cls ${d.status}" title="${esc(d.error||'')}">${d.status==='error'?'Error':d.status}</span>`}<button class="icon-btn" data-deldoc="${d.id}" title="Delete">${ic('trash')}</button></div>${d.error?`<div class="help" style="color:var(--red);padding:0 0 8px 30px">${esc(d.error)}</div>`:''}`).join(''):'<div class="empty" style="padding:6px 0">No documents yet. Upload PDF, DOCX, TXT, MD, CSV or HTML files.</div>'}</div>`).join('')}`;
 }
-function colModal(c){ modalDone=null; openModal(`<h3>${c?'Edit collection':'New collection'}</h3><p class="s">A collection is a set of documents with the same audience, for example “Regulations” or “Directorate A reports”.</p><label for="cName">Name</label><input type="text" id="cName" value="${esc(c?.name||'')}" autofocus><label for="cDesc">Description</label><input type="text" id="cDesc" value="${esc(c?.description||'')}"><label>Who can search it <span style="font-weight:400;color:var(--dim)">— leave all unchecked for everyone</span></label><div id="cGroups">${groupChecks(c?.groups.map(g=>g.id)||[])}</div><div class="dlg-actions">${c?`<button class="btn danger" data-delcol="${c.id}">${ic('trash')}Delete collection</button><span class="grow"></span>`:''}<button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="savecol" data-cid="${c?.id||''}">Save</button></div>`,'wide'); }
+function colModal(c){ modalDone=null; openModal(`<h3>${c?'Edit collection':'New collection'}</h3><p class="s">A collection is a set of documents with the same audience, for example “Regulations” or “Directorate A reports”.</p><label for="cName">Name</label><input type="text" id="cName" value="${esc(c?.name||'')}" autofocus><label for="cDesc">Description</label><input type="text" id="cDesc" value="${esc(c?.description||'')}"><label>Who can search it <span style="font-weight:400;color:var(--dim)">— leave all unchecked for everyone</span></label><div id="cGroups">${groupChecks(c?.groups.map(g=>g.id)||[])}</div>
+  <label>Privacy</label><div class="checks"><label><input type="checkbox" id="cLocal" ${c?.local_only?'checked':''}>Keep on this server only — never sent to cloud AI (Claude/GPT)</label></div>
+  <div class="help">For patient records and other highly sensitive data. These documents can only be read by the on-premise AI model${admin.providers.local?'':' (not configured yet — set CANOPUS_LOCAL_BASE_URL)'} and by direct document search, which uses no AI at all.</div><div class="dlg-actions">${c?`<button class="btn danger" data-delcol="${c.id}">${ic('trash')}Delete collection</button><span class="grow"></span>`:''}<button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="savecol" data-cid="${c?.id||''}">Save</button></div>`,'wide'); }
 function uploadModal(cid){
   const c=admin.collections.find(x=>x.id===cid); const cls=admin.classifications; modalDone=null;
   openModal(`<h3>Upload to “${esc(c.name)}”</h3><p class="s">Choose the security classification that applies to <b>all</b> files in this upload.</p>
     <label for="docCls">Classification</label><select id="docCls">${Object.entries(cls).map(([k,v])=>`<option value="${k}" ${k==='biasa'?'selected':''}>${esc(v.label)}${v.allowed?'':' — not allowed'}</option>`).join('')}</select>
-    <label for="docFiles">Files</label><input type="file" id="docFiles" multiple accept=".pdf,.docx,.txt,.md,.csv,.tsv,.html,.htm,.json">
-    <div class="help">PDF (with selectable text), DOCX, TXT, MD, CSV, HTML · max ${me.config.maxUploadMb} MB each. Scanned PDFs need OCR first.</div><div id="upLog" class="help"></div>
+    <label for="docFiles">Files</label><input type="file" id="docFiles" multiple accept=".pdf,.docx,.xlsx,.csv,.tsv,.txt,.md,.html,.htm,.json">
+    <div class="help">PDF (with selectable text), DOCX, XLSX, CSV, TXT, MD, HTML · max ${me.config.maxUploadMb} MB each. Scanned PDFs need OCR first. In spreadsheets, columns such as Nama, NIK, No RM, Alamat, HP and Tgl Lahir are detected automatically and always masked before reaching the AI.</div><div id="upLog" class="help"></div>
     <div class="dlg-actions"><button class="btn" data-dlg="cancel">Close</button><button class="btn primary" data-act="douploaddocs" data-cid="${cid}">Upload</button></div>`,'wide');
 }
+function adminModels(){
+  const s=admin.settings; const pv=admin.providers; const cats=admin.categories;
+  const enabled=admin.models.filter(m=>s.models.includes(m.id)&&pv[m.provider]);
+  const row=m=>`<div class="set-row"><div><b>${esc(m.label)}</b><small>${esc(m.d)} · ${esc(m.tier)}${m.vision?' · reads images':''}${m.provider!=='local'&&m.price?` · $${m.price.in}/$${m.price.out} per M tokens`:''}</small></div>${m.provider!=='anthropic'?`<button class="icon-btn" data-editoa="${m.id}" data-prov="${m.provider}" title="Edit">${ic('edit')}</button>`:''}<button class="switch ${s.models.includes(m.id)?'on':''}" data-setmodel="${m.id}" role="switch" aria-checked="${s.models.includes(m.id)}" aria-label="${esc(m.label)}" ${pv[m.provider]?'':'disabled title="Provider not configured"'}></button></div>`;
+  $('#adminBody').innerHTML=`<div class="set-sec"><h3>Providers</h3><p>API keys live only in the server's <span class="mono">.env</span> file. They are never shown or sent to browsers.</p>
+      <div class="set-row"><div><b>Anthropic · Claude</b><small><span class="mono">ANTHROPIC_API_KEY</span></small></div>${pv.anthropic?'<span class="cls biasa">Connected</span>':'<span class="cls error">Not configured</span>'}</div>
+      <div class="set-row"><div><b>OpenAI · GPT</b><small><span class="mono">OPENAI_API_KEY</span></small></div>${pv.openai?'<span class="cls biasa">Connected</span>':'<span class="cls error">Not configured</span>'}</div></div>
+    <div class="set-sec"><h3>Claude models</h3><p>Built in. Swift is the cheapest, Prime the most capable.</p>${admin.models.filter(m=>m.provider==='anthropic').map(row).join('')}</div>
+    <div class="set-sec"><h3>OpenAI models</h3><p>Add the GPT models your organization wants to use. Enter the exact model ID from your OpenAI account and its price per million tokens (used for budgets).</p>
+      ${admin.models.filter(m=>m.provider==='openai').map(row).join('')||'<div class="help">None yet.</div>'}
+      <div style="display:flex;gap:8px;margin-top:10px"><button class="btn sm" data-editoa="">${ic('plus')}Add OpenAI model</button>${pv.openai?`<button class="btn sm" data-act="listoa">${ic('search')}See available model IDs</button>`:''}</div><div id="oaList" class="help"></div></div>
+    <div class="set-sec"><h3>On-premise model <span class="cls biasa" style="margin-left:6px">${ic('lock')}data stays inside</span></h3><p>An AI model running on your own server (OpenAI-compatible API such as Ollama or vLLM, address in <span class="mono">CANOPUS_LOCAL_BASE_URL</span>). It is the only model allowed to read collections marked “On this server only”, and chats that used it never move to cloud AI.</p>
+      <div class="set-row"><div><b>Local AI server</b><small class="mono">CANOPUS_LOCAL_BASE_URL</small></div>${pv.local?'<span class="cls biasa">Connected</span>':'<span class="cls error">Not configured</span>'}</div>
+      ${admin.models.filter(m=>m.provider==='local').map(row).join('')}
+      <button class="btn sm" style="margin-top:10px" data-editoa="" data-prov="local">${ic('plus')}Add local model</button></div>
+    <div class="set-sec"><h3>Auto routing</h3><p>When someone chooses <b>Auto</b>, a quick, low-cost check decides what kind of request it is, then uses the model you pick for that kind. People's group permissions still apply.</p>
+      <table class="tbl rt"><tbody>${Object.entries(cats).filter(([k])=>s.canvas||k!=='visual').map(([k,c])=>`<tr><td><b>${esc(c.label)}</b><div class="muted">${esc(c.d)}</div></td><td class="r"><select data-rule="${k}">${enabled.map(m=>`<option value="${m.id}" ${s.routing.rules[k]===m.id?'selected':''}>${esc(m.label)}</option>`).join('')}</select></td></tr>`).join('')}</tbody></table>
+      <div class="set-row"><div><b>Automatic failover</b><small>If a provider is down or rate-limited before answering, retry once with the closest model from the other provider.</small></div><button class="switch ${s.routing.failover?'on':''}" data-settoggle="failover" role="switch" aria-checked="${s.routing.failover}"></button></div>
+      <div class="set-row"><div><b>Default for new chats</b></div><select id="defModel"><option value="auto" ${s.defaultModel==='auto'?'selected':''}>Auto</option>${enabled.map(m=>`<option value="${m.id}" ${s.defaultModel===m.id?'selected':''}>${esc(m.label)}</option>`).join('')}</select></div></div>
+    <div class="save-bar"><button class="btn primary" data-act="savemodels">Save models</button></div>`;
+}
+function oaModal(m, prov='openai'){
+  modalDone=null; const local=prov==='local';
+  openModal(`<h3>${m?'Edit':'Add'} ${local?'local':'OpenAI'} model</h3><p class="s">${local?'Use the model name exactly as your local server lists it (for Ollama, the name shown by <span class="mono">ollama list</span>). Local models cost nothing per token.':'Use the exact model ID from your OpenAI account. Prices are per million tokens, from OpenAI&#39;s pricing page; they are used for budgets and the Usage page.'}</p>
+    <div class="row2"><div><label for="oaApi">Model ID</label><input type="text" id="oaApi" value="${esc(m?.api||'')}" autofocus></div><div><label for="oaLabel">Name shown to people</label><input type="text" id="oaLabel" value="${esc(m?.label||'')}" placeholder="e.g. GPT Standard"></div></div>
+    <div class="row2"><div><label for="oaTier">Tier</label><select id="oaTier">${['light','standard','advanced'].map(t=>`<option value="${t}" ${m?.tier===t?'selected':''}>${t}</option>`).join('')}</select></div><div><label>Capabilities</label><div class="checks"><label><input type="checkbox" id="oaVision" ${m?.vision?'checked':''}>Reads images</label>${local?'':`<label><input type="checkbox" id="oaReason" ${m?.reasoning?'checked':''}>Reasoning model</label>`}</div></div></div>
+    ${local?'':`<div class="row2"><div><label for="oaIn">Input $ / M tokens</label><input type="text" id="oaIn" value="${m?.price?.in??''}"></div><div><label for="oaOut">Output $ / M tokens</label><input type="text" id="oaOut" value="${m?.price?.out??''}"></div></div>
+    <label for="oaCached">Cached input $ / M tokens <span style="font-weight:400;color:var(--dim)">— optional</span></label><input type="text" id="oaCached" value="${m&&m.price&&m.price.cacheRead!==m.price.in?m.price.cacheRead:''}">
+    <div class="help">“Reasoning model” sends the Quick/Balanced/Deep setting as reasoning effort; only tick it for models that support that parameter.</div>`}
+    <div class="dlg-actions">${m?`<button class="btn danger" data-deloa="${m.id}">${ic('trash')}Remove</button><span class="grow"></span>`:''}<button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="saveoa" data-mid="${m?.id||''}" data-prov="${prov}">Save</button></div>`,'wide');
+}
 function adminSettings(){
-  const s=admin.settings; const M=admin.models;
-  $('#adminBody').innerHTML=`<div class="set-sec"><h3>AI models</h3><p>Which models people can choose, and the default. Canopus Prime is the most capable and the most expensive.</p>
-      ${Object.values(M).map(m=>`<div class="set-row"><div><b>${esc(m.label)}</b><small>${esc(m.api)} · ${esc(m.d)}</small></div><span class="checks"><label><input type="radio" name="defModel" value="${m.id}" ${s.defaultModel===m.id?'checked':''}>Default</label></span><button class="switch ${s.models.includes(m.id)?'on':''}" data-setmodel="${m.id}" role="switch" aria-checked="${s.models.includes(m.id)}" aria-label="${esc(m.label)}"></button></div>`).join('')}</div>
-    <div class="set-sec"><h3>Privacy & safety</h3><p>How data is handled before anything is sent to the AI service.</p>
-      <div class="set-row"><div><b>Mask sensitive data</b><small>Replace NIK, NIP, NPWP, emails, phone numbers and the terms below with placeholders before sending; restored only on screen. PDFs are converted to text so they can be masked.</small></div><button class="switch ${s.redaction.enabled?'on':''}" data-settoggle="redaction" role="switch" aria-checked="${s.redaction.enabled}"></button></div>
-      <div style="padding:6px 0 4px"><b style="font-size:14px">Extra terms to mask</b><div class="help" style="margin:2px 0 8px">One per line — names of people, project codenames, locations… (at least 3 characters).</div><textarea id="setTerms" placeholder="Budi Santoso\nProyek Garuda">${esc(s.redaction.terms.join('\n'))}</textarea></div>
+  const s=admin.settings;
+  $('#adminBody').innerHTML=`<div class="set-sec"><h3>Privacy & safety</h3><p>How data is handled before anything is sent to an AI provider.</p>
+      <div class="set-row"><div><b>Mask sensitive data</b><small>Replace NIK, NIP, NPWP, emails, phone numbers, values from personal-data columns in spreadsheets, and the terms below with placeholders before sending; restored only on screen. PDFs are converted to text so they can be masked.</small></div><button class="switch ${s.redaction.enabled?'on':''}" data-settoggle="redaction" role="switch" aria-checked="${s.redaction.enabled}"></button></div>
+      <div style="padding:6px 0 4px"><b style="font-size:14px">Extra terms to mask</b><div class="help" style="margin:2px 0 8px">One per line — names of people, project codenames, locations… (at least 3 characters).</div><textarea id="setTerms">${esc(s.redaction.terms.join('\n'))}</textarea></div>
+      <div style="padding:6px 0 4px"><b style="font-size:14px">Extra spreadsheet columns to mask</b><div class="help" style="margin:2px 0 8px">Names, NIK, No RM, address, phone, email and date of birth are detected automatically. Add other column names whose values must never reach cloud AI, one per line (e.g. Diagnosa, Riwayat Penyakit). Applies to files uploaded after saving.</div><textarea id="setCols" placeholder="Diagnosa">${esc((s.redaction.columns||[]).join('\n'))}</textarea></div>
       <div class="set-row"><div><b>Allow image uploads</b><small>Images cannot be masked; turn off if screenshots may contain sensitive data.</small></div><button class="switch ${s.imageUploads?'on':''}" data-settoggle="imageUploads" role="switch" aria-checked="${s.imageUploads}"></button></div>
-      <div class="set-row"><div><b>Allow web search</b><small>Lets Canopus search the public web. Search queries are sent to the search provider.</small></div><button class="switch ${s.webSearch?'on':''}" data-settoggle="webSearch" role="switch" aria-checked="${s.webSearch}"></button></div></div>
-    <div class="set-sec"><h3>Budget</h3><p>Default monthly AI budget per user (estimated from list prices). Set to 0 for unlimited. Individual users can have their own budget.</p><div class="set-row"><div><b>Default monthly budget (USD)</b></div><input type="number" id="setBudget" min="0" step="1" value="${s.monthlyBudgetUsd}" style="width:120px"></div></div>
-    <div class="set-sec"><h3>Organization skills</h3><p>Always-on instructions for everyone (for example your house style or letter formats).</p><div id="orgSkills">${s.orgSkills.map((k,i)=>`<div class="set-row"><div><b>${esc(k.name)}</b><small>${esc(k.description||k.content.slice(0,90))}</small></div><button class="icon-btn" data-editorgskill="${i}">${ic('edit')}</button><button class="icon-btn" data-delorgskill="${i}">${ic('trash')}</button></div>`).join('')||'<div class="help">None yet.</div>'}</div><button class="btn sm" style="margin-top:10px" data-editorgskill="-1">${ic('plus')}Add skill</button></div>
-    <div class="set-sec"><h3>Organization prompts</h3><p>Prompt templates everyone sees first in Prompts and on the home screen.</p><div id="orgPrompts">${s.orgPrompts.map((k,i)=>`<div class="set-row"><div><b>${esc(k.title)}</b><small>${esc(k.body.slice(0,100))}</small></div><button class="icon-btn" data-editorgprompt="${i}">${ic('edit')}</button><button class="icon-btn" data-delorgprompt="${i}">${ic('trash')}</button></div>`).join('')||'<div class="help">None yet.</div>'}</div><button class="btn sm" style="margin-top:10px" data-editorgprompt="-1">${ic('plus')}Add prompt</button></div>
+      <div class="set-row"><div><b>Allow web search</b><small>For public information, with source links (Claude models). Search queries go to the search provider.</small></div><button class="switch ${s.webSearch?'on':''}" data-settoggle="webSearch" role="switch" aria-checked="${s.webSearch}"></button></div>
+      <div class="set-row"><div><b>Allow canvases (dashboards, infographics)</b><small>Off = text answers only, which also uses fewer tokens.</small></div><button class="switch ${s.canvas?'on':''}" data-settoggle="canvas" role="switch" aria-checked="${!!s.canvas}"></button></div></div>
+    <div class="set-sec"><h3>Budgets & limits</h3><p>Estimated from list prices. 0 = unlimited. Individual users and groups can have their own budgets.</p>
+      <div class="set-row"><div><b>Default monthly budget per user (USD)</b></div><input type="number" id="setBudget" min="0" step="0.5" value="${s.monthlyBudgetUsd}" style="width:120px"></div>
+      <div class="set-row"><div><b>Requests per minute per user</b></div><input type="number" id="setPerMin" min="0" value="${s.rateLimits.perMinute}" style="width:120px"></div>
+      <div class="set-row"><div><b>Requests per day per user</b></div><input type="number" id="setPerDay" min="0" value="${s.rateLimits.perDay}" style="width:120px"></div></div>
+    <div class="set-sec"><h3>Organization skills</h3><p>Always-on instructions for everyone (house style, letter formats…).</p><div>${s.orgSkills.map((k,i)=>`<div class="set-row"><div><b>${esc(k.name)}</b><small>${esc(k.description||k.content.slice(0,90))}</small></div><button class="icon-btn" data-editorgskill="${i}">${ic('edit')}</button><button class="icon-btn" data-delorgskill="${i}">${ic('trash')}</button></div>`).join('')||'<div class="help">None yet.</div>'}</div><button class="btn sm" style="margin-top:10px" data-editorgskill="-1">${ic('plus')}Add skill</button></div>
+    <div class="set-sec"><h3>Organization prompts</h3><p>Templates everyone sees first.</p><div>${s.orgPrompts.map((k,i)=>`<div class="set-row"><div><b>${esc(k.title)}</b><small>${esc(k.body.slice(0,100))}</small></div><button class="icon-btn" data-editorgprompt="${i}">${ic('edit')}</button><button class="icon-btn" data-delorgprompt="${i}">${ic('trash')}</button></div>`).join('')||'<div class="help">None yet.</div>'}</div><button class="btn sm" style="margin-top:10px" data-editorgprompt="-1">${ic('plus')}Add prompt</button></div>
     <div class="save-bar"><button class="btn primary" data-act="savesettingsadmin">Save settings</button></div>`;
+}
+const SCOPE_LABEL={'ask':'Ask questions','knowledge:read':'List knowledge','knowledge:write':'Upload knowledge'};
+const WEBHOOK_EVENTS={'budget.warning':'A user reached 80% of their budget','budget.exhausted':'A user used their whole budget','group_budget.warning':'A group reached 80% of its budget','group_budget.exhausted':'A group used its whole budget','knowledge.upload_refused':'A confidential upload was refused','user.created':'A user was invited'};
+function adminIntegrations(){
+  const s=admin.settings; const base=location.origin;
+  $('#adminBody').innerHTML=`<div class="set-sec"><h3>API tokens (n8n, scripts)</h3><p>Let automations ask Canopus questions or add knowledge. A token acts as the user you choose, with that user's groups, budget and limits. The AI provider keys are never exposed.</p>
+      ${admin.tokens.length?`<div class="tblwrap" style="margin-bottom:10px"><table class="tbl"><thead><tr><th>Name</th><th>Acts as</th><th>Permissions</th><th>Last used</th><th></th></tr></thead><tbody>${admin.tokens.map(t=>`<tr><td><b>${esc(t.name)}</b><div class="muted mono">${esc(t.prefix)}…</div></td><td>${esc(t.email)}</td><td>${t.scopes.map(x=>`<span class="gchip">${esc(SCOPE_LABEL[x]||x)}</span>`).join('')}</td><td class="muted">${t.revoked?'<span class="cls error">Revoked</span>':t.last_used?ago(t.last_used):'never'}</td><td class="r">${t.revoked?'':`<button class="icon-btn" data-revoketoken="${t.id}" title="Revoke">${ic('trash')}</button>`}</td></tr>`).join('')}</tbody></table></div>`:''}
+      <button class="btn sm" data-act="addtoken">${ic('plus')}Create token</button>
+      <details style="margin-top:14px"><summary class="help" style="cursor:pointer">How to call it from n8n</summary><pre class="quote mono" style="white-space:pre-wrap">POST ${esc(base)}/api/v1/ask
+Authorization: Bearer cnp_…
+Content-Type: application/json
+
+{"question": "Ringkas isu utama minggu ini", "model": "auto", "knowledge": true}
+
+→ {"answer": "…", "model": {…}, "citations": [{"title": "…", "text": "…"}], "usage": {…}}
+
+POST ${esc(base)}/api/v1/collections/&lt;collection-id&gt;/docs   (body = the file)
+X-Filename: laporan.pdf
+X-Classification: biasa</pre></details></div>
+    <div class="set-sec"><h3>Webhook notifications</h3><p>Canopus POSTs JSON to this URL when the selected events happen (for example an n8n “Webhook” node that sends email or chat messages). Each request is signed: <span class="mono">X-Canopus-Signature: sha256=HMAC(secret, body)</span>.</p>
+      <label class="help" for="whUrl" style="display:block;margin-bottom:6px">URL</label><input type="url" id="whUrl" value="${esc(s.webhook.url)}" placeholder="https://n8n.kantor.go.id/webhook/canopus" style="width:100%;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:9px 11px;color:var(--fg)">
+      <div class="checks" id="whEvents" style="margin:12px 0">${Object.entries(WEBHOOK_EVENTS).map(([k,l])=>`<label><input type="checkbox" value="${k}" ${s.webhook.events.includes(k)?'checked':''}>${esc(l)}</label>`).join('')}</div>
+      ${s.webhook.url?`<div class="set-row"><div><b>Signing secret</b><small class="mono">${esc(s.webhook.secret)}</small></div><button class="btn sm" data-act="showsecret">Show</button><button class="btn sm" data-act="rotatesecret">Rotate</button><button class="btn sm" data-act="testwebhook">Send test</button></div>`:''}
+      <div class="save-bar"><button class="btn primary" data-act="savewebhook">Save webhook</button></div></div>`;
 }
 let usageMonth=new Date().toISOString().slice(0,7);
 async function adminUsage(){
@@ -700,13 +808,14 @@ async function adminUsage(){
   $('#adminBody').innerHTML=`<div class="bar"><label class="set-sec" style="margin:0;padding:8px 12px;display:flex;gap:10px;align-items:center">Month <input type="month" id="usageMonth" value="${u.month}"></label><div class="stat" style="flex:0 1 220px"><small>Estimated total</small><b>${usd(u.total)}</b></div></div>
     <div class="tblwrap" style="margin-bottom:16px"><table class="tbl"><thead><tr><th>User</th><th class="r">Requests</th><th class="r">Input tokens</th><th class="r">Output tokens</th><th class="r">Estimated cost</th></tr></thead><tbody>${u.rows.map(r=>`<tr><td><b>${esc(r.name||'—')}</b><div class="muted">${esc(r.email||'deleted user')}</div></td><td class="r">${r.requests}</td><td class="r">${fmtTok(r.input)}</td><td class="r">${fmtTok(r.output)}</td><td class="r">${usd(r.cost)}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">No usage this month.</td></tr>'}</tbody></table></div>
     <div class="tblwrap"><table class="tbl"><thead><tr><th>Model</th><th class="r">Requests</th><th class="r">Estimated cost</th></tr></thead><tbody>${u.byModel.map(r=>`<tr><td>${esc(r.model)}</td><td class="r">${r.requests}</td><td class="r">${usd(r.cost)}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">—</td></tr>'}</tbody></table></div>
-    <div class="help" style="margin-top:10px">Estimates use Anthropic list prices including prompt-cache discounts. Your Anthropic Console shows the billed amount.</div>`;
+    ${admin.groups.some(g=>g.budget_usd>0||g.spent>0)?`<div class="tblwrap" style="margin-top:16px"><table class="tbl"><thead><tr><th>Group (this month)</th><th class="r">Spent</th><th class="r">Budget</th></tr></thead><tbody>${admin.groups.map(g=>`<tr><td>${esc(g.name)}</td><td class="r">${usd(g.spent)}</td><td class="r">${g.budget_usd>0?usd(g.budget_usd):'—'}</td></tr>`).join('')}</tbody></table></div>`:''}
+    <div class="help" style="margin-top:10px">Estimates use list prices (Claude built in, OpenAI as entered in Models), including prompt-cache discounts. Your Anthropic Console and OpenAI dashboard show the billed amounts.</div>`;
   $('#usageMonth').onchange=e=>{ usageMonth=e.target.value; adminUsage(); };
 }
 let auditFilter='';
 async function adminAudit(){
   const rows=await api('/api/admin/audit?limit=300'+(auditFilter?'&action='+auditFilter:''));
-  const label={'auth.login':'Signed in','auth.login_failed':'Failed sign-in','auth.logout':'Signed out','auth.password_set':'Set password','auth.password_changed':'Changed password','knowledge.search':'Knowledge search','knowledge.open':'Opened document','knowledge.upload':'Uploaded document','knowledge.upload_refused':'Upload refused','knowledge.delete':'Deleted document','redaction.applied':'Data masked','admin.user_created':'Invited user','admin.user_updated':'Changed user','admin.user_reset':'New sign-in link','admin.group_created':'Created group','admin.group_deleted':'Deleted group','admin.collection_created':'Created collection','admin.collection_updated':'Changed collection','admin.collection_deleted':'Deleted collection','admin.settings_updated':'Changed settings'};
+  const label={'auth.login':'Signed in','auth.login_failed':'Failed sign-in','auth.logout':'Signed out','auth.password_set':'Set password','auth.password_changed':'Changed password','knowledge.search':'Knowledge search','knowledge.open':'Opened document','knowledge.upload':'Uploaded document','knowledge.upload_refused':'Upload refused','knowledge.delete':'Deleted document','redaction.applied':'Data masked','admin.user_created':'Invited user','admin.user_updated':'Changed user','admin.user_reset':'New sign-in link','admin.group_created':'Created group','admin.group_deleted':'Deleted group','admin.collection_created':'Created collection','admin.collection_updated':'Changed collection','admin.collection_deleted':'Deleted collection','admin.settings_updated':'Changed settings','admin.group_updated':'Changed group','admin.project_created':'Created project','admin.project_updated':'Changed project','admin.project_deleted':'Deleted project','admin.token_created':'Created API token','admin.token_revoked':'Revoked API token','api.ask':'API question','ai.failover':'Switched AI provider','budget.warning':'Budget 80%','budget.exhausted':'Budget used up','group_budget.warning':'Group budget 80%','group_budget.exhausted':'Group budget used up','webhook.failed':'Webhook failed'};
   const detail=r=>{ const d=r.detail||{}; if(r.action==='knowledge.search') return `“${esc(d.query)}” → ${d.results?.length||0} passage(s)`; if(d.title) return esc(d.title)+(d.classification?` (${esc(d.classification)})`:''); if(d.user) return esc(d.user); if(d.count) return `${d.count} value(s) masked`; if(d.file) return esc(d.file)+` (${esc(d.classification)})`; return esc(Object.entries(d).map(([k,v])=>`${k}: ${Array.isArray(v)?v.join(', '):v}`).join(' · ')).slice(0,160); };
   $('#adminBody').innerHTML=`<div class="bar"><div class="pills">${[['','All'],['auth','Sign-ins'],['knowledge','Knowledge'],['admin','Admin changes'],['redaction','Masking']].map(([k,l])=>`<button class="pill ${auditFilter===k?'on':''}" data-afilter="${k}">${l}</button>`).join('')}</div></div>
     <div class="tblwrap"><table class="tbl"><thead><tr><th>Time</th><th>User</th><th>Event</th><th>Detail</th><th>IP</th></tr></thead><tbody>${rows.map(r=>`<tr><td class="muted" style="white-space:nowrap">${fmtDT(r.ts)}</td><td>${esc(r.email||'—')}</td><td>${esc(label[r.action]||r.action)}</td><td>${detail(r)}</td><td class="muted">${esc(r.ip||'')}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">No events.</td></tr>'}</tbody></table></div>`;
@@ -770,7 +879,7 @@ const checked=sel=>[...document.querySelectorAll(sel+' input[type=checkbox]:chec
 
 document.addEventListener('click',async e=>{
   if(e.target.id==='modal'){ closeModal(); return; }
-  const t=e.target.closest('button,[data-open],[data-go],[data-space],[data-copen],[data-fuse],[data-useprompt],[data-act],.scrim');
+  const t=e.target.closest('button,[data-open],[data-go],[data-space],[data-project],[data-copen],[data-fuse],[data-useprompt],[data-act],.scrim');
   document.querySelectorAll('.float-menu').forEach(x=>x.remove());
   if(!t){ closeMenus(); return; }
   const d=t.dataset;
@@ -796,6 +905,7 @@ document.addEventListener('click',async e=>{
   if(d.movechat!==undefined){ const c=state.chats.find(x=>x.id===d.movechat); c.spaceId=d.to||null; save(); closeModal(); route(); return; }
   if(d.open){ openChat(d.open); return; }
   if(d.space){ go('space/'+d.space); return; }
+  if(d.project){ state.current=null; pendingProject=d.project; pendingSpace=null; editing=-1; closePanel(); save(); if(curView()==='home') route(); else go('home'); setTimeout(()=>input.focus(),30); return; }
   if(d.copen){ closeModal(); const c=state.canvases.find(x=>x.id===d.copen); if(!c) return; if(!(curView()==='home'&&curChat())) panel.full=true; openCanvas(c.id, d.v!=null?+d.v:undefined); return; }
   if(d.ptab){ panel.tab=d.ptab; renderPanel(); return; }
   if(d.cchat){ const c=state.canvases.find(x=>x.id===d.cchat); if(c&&state.chats.some(x=>x.id===c.chatId)){ state.current=c.chatId; save(); panel.full=false; if(curView()==='home') route(); else go('home'); setTimeout(()=>openCanvas(c.id),30); } return; }
@@ -803,6 +913,7 @@ document.addEventListener('click',async e=>{
   if(d.crename){ const c=state.canvases.find(x=>x.id===d.crename); const n=await ask('Rename',{value:c.title}); if(n&&n.trim()){ c.title=n.trim(); save(); renderPage(); if(panel.cid===c.id) renderPanel(); } return; }
   if(d.cdel){ if(await confirmBox('Delete from Studio?','All versions will be removed.')){ state.canvases=state.canvases.filter(c=>c.id!==d.cdel); if(panel.cid===d.cdel) closePanel(); save(); renderPage(); renderSide(); } return; }
   if(d.cite){ const [i,j]=d.cite.split(':').map(Number); const c=curChat().msgs[i].citations[j]; const r=docRef(c.source); showPassage(c.title, c.text, r?.docId, r?.page); return; }
+  if(d.dshit!==undefined){ const h=dsHits[+d.dshit]; showPassage(h.title, h.text, h.docId, h.page); return; }
   if(d.found){ const [i,j]=d.found.split(':').map(Number); const f=curChat().msgs[i].found[j]; showPassage(f.title, f.text, f.docId, f.page); return; }
   if(d.askcol){ const c=knowledge.find(x=>x.id===d.askcol); state.current=null; go('home'); setTimeout(()=>{ input.value=`Using the internal documents in “${c.name}”, `; autosize(); input.focus(); },30); return; }
   if(d.ftype){ fType=d.ftype; renderSources(); return; }
@@ -835,6 +946,12 @@ document.addEventListener('click',async e=>{
   if(d.editorgprompt!==undefined){ const i=+d.editorgprompt; const k=i>=0?admin.settings.orgPrompts[i]:{title:'',body:''}; modalDone=null; openModal(`<h3>${i>=0?'Edit':'Add'} organization prompt</h3><p class="s">Use {{blanks}} for parts people fill in.</p><label for="opTitle">Title</label><input type="text" id="opTitle" value="${esc(k.title)}" autofocus><label for="opBody">Prompt</label><textarea id="opBody" style="min-height:200px">${esc(k.body)}</textarea><div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="saveorgprompt" data-i="${i}">Save</button></div>`,'wide'); return; }
   if(d.delorgprompt!==undefined){ admin.settings.orgPrompts.splice(+d.delorgprompt,1); await saveAdminSettings(); return; }
   if(d.afilter!==undefined){ auditFilter=d.afilter; adminAudit(); return; }
+  if(d.editgroup){ groupModal(admin.groups.find(g=>g.id===d.editgroup)); return; }
+  if(d.editproject){ projectModal(admin.projects.find(p=>p.id===d.editproject)); return; }
+  if(d.delproject){ if(await confirmBox('Delete project?','Chats that used it keep their history, but can no longer use its instructions.')){ await api('/api/admin/projects/'+d.delproject,{method:'DELETE'}); closeModal(); await refreshMe(); renderAdmin(); } return; }
+  if(d.editoa!==undefined){ oaModal(d.editoa?admin.models.find(m=>m.id===d.editoa):null, t.dataset.prov||'openai'); return; }
+  if(d.deloa){ const key=d.deloa.startsWith('local:')?'localModels':'openaiModels'; admin.settings[key]=admin.settings[key].filter(m=>m.id!==d.deloa); admin.settings.models=admin.settings.models.filter(x=>x!==d.deloa); closeModal(); await saveAdminSettings(adminModels); return; }
+  if(d.revoketoken){ if(await confirmBox('Revoke token?','Automations using it will stop working immediately.','Revoke')){ await api('/api/admin/tokens/'+d.revoketoken,{method:'DELETE'}); renderAdmin(); } return; }
 
   switch(d.act){
     case 'toggle': $('#app').classList.toggle('collapsed'); break;
@@ -888,22 +1005,45 @@ document.addEventListener('click',async e=>{
     case 'copylink': navigator.clipboard.writeText($('#linkIn').value).then(()=>toast('Link copied')); $('#linkIn').select(); break;
     case 'addgroup': { const n=await ask('New group',{placeholder:'e.g. Deputi Bidang Polhukam', ok:'Create'}); if(n&&n.trim()){ await api('/api/admin/groups',{method:'POST', body:{name:n.trim()}}); renderAdmin(); } break; }
     case 'addcol': colModal(null); break;
-    case 'savecol': { const cid=t.dataset.cid; const body={name:$('#cName').value.trim(), description:$('#cDesc').value.trim(), groups:checked('#cGroups')}; if(!body.name){ toast('Name required'); break; } await api(cid?'/api/admin/collections/'+cid:'/api/admin/collections',{method:cid?'PATCH':'POST', body}); closeModal(); refreshKnowledge(); renderAdmin(); break; }
+    case 'savecol': { const cid=t.dataset.cid; const body={name:$('#cName').value.trim(), description:$('#cDesc').value.trim(), groups:checked('#cGroups'), local_only:$('#cLocal').checked}; if(!body.name){ toast('Name required'); break; } await api(cid?'/api/admin/collections/'+cid:'/api/admin/collections',{method:cid?'PATCH':'POST', body}); closeModal(); refreshKnowledge(); renderAdmin(); break; }
     case 'douploaddocs': { const files=[...$('#docFiles').files]; const cls=$('#docCls').value; if(!files.length){ toast('Choose files first'); break; } const log=$('#upLog'); t.disabled=true; log.innerHTML='';
       for(const f of files){ log.innerHTML+=`<div>${esc(f.name)}: uploading…</div>`; try{ const r=await api(`/api/admin/collections/${t.dataset.cid}/docs`,{method:'POST', raw:f, headers:{'content-type':f.type||'application/octet-stream','x-filename':encodeURIComponent(f.name),'x-classification':cls}}); log.lastChild.textContent=`${f.name}: ${r.status==='ready'?`indexed (${r.chunks} passages)`:'error — '+r.error}`; }catch(err){ log.lastChild.textContent=`${f.name}: ${err.message}`; log.lastChild.style.color='var(--red)'; } }
       t.disabled=false; refreshKnowledge(); await loadAdmin(); adminKnowledge(); break; }
     case 'savesettingsadmin': { const s=admin.settings;
+      s.redaction={...s.redaction, enabled:document.querySelector('[data-settoggle=redaction]').classList.contains('on'), terms:$('#setTerms').value.split('\n').map(x=>x.trim()).filter(Boolean)};
+      s.imageUploads=document.querySelector('[data-settoggle=imageUploads]').classList.contains('on'); s.webSearch=document.querySelector('[data-settoggle=webSearch]').classList.contains('on'); s.canvas=document.querySelector('[data-settoggle=canvas]').classList.contains('on');
+      s.redaction.columns=($('#setCols')?.value||'').split('\n').map(x=>x.trim()).filter(Boolean);
+      s.monthlyBudgetUsd=+$('#setBudget').value||0; s.rateLimits={perMinute:+$('#setPerMin').value||0, perDay:+$('#setPerDay').value||0}; await saveAdminSettings(); break; }
+    case 'savemodels': { const s=admin.settings;
       s.models=[...document.querySelectorAll('[data-setmodel]')].filter(b=>b.classList.contains('on')).map(b=>b.dataset.setmodel);
-      s.defaultModel=document.querySelector('input[name=defModel]:checked')?.value||s.defaultModel;
-      s.redaction={enabled:document.querySelector('[data-settoggle=redaction]').classList.contains('on'), terms:$('#setTerms').value.split('\n').map(x=>x.trim()).filter(Boolean)};
-      s.imageUploads=document.querySelector('[data-settoggle=imageUploads]').classList.contains('on'); s.webSearch=document.querySelector('[data-settoggle=webSearch]').classList.contains('on');
-      s.monthlyBudgetUsd=+$('#setBudget').value||0; await saveAdminSettings(); break; }
+      s.defaultModel=$('#defModel').value; s.routing={failover:document.querySelector('[data-settoggle=failover]').classList.contains('on'), rules:Object.fromEntries([...document.querySelectorAll('[data-rule]')].map(x=>[x.dataset.rule,x.value]))};
+      await saveAdminSettings(adminModels); break; }
+    case 'listoa': { const ids=await api('/api/admin/openai/models'); $('#oaList').innerHTML=`<div style="margin-top:8px">${ids.length} model IDs available: <span class="mono">${esc(ids.slice(0,80).join(', '))}</span></div>`; break; }
+    case 'saveoa': { const prov=t.dataset.prov||'openai'; const key=prov==='local'?'localModels':'openaiModels'; const api_=$('#oaApi').value.trim(); if(!api_){ toast('Enter the model ID'); break; }
+      const m={id:t.dataset.mid||`${prov}:${api_.toLowerCase().replace(/[^\w.-]+/g,'-').slice(0,40)}`, api:api_, label:$('#oaLabel').value.trim()||api_, tier:$('#oaTier').value, vision:$('#oaVision').checked, reasoning:$('#oaReason')?.checked||false, priceIn:prov==='local'?0:$('#oaIn').value, priceOut:prov==='local'?0:$('#oaOut').value, priceCached:prov==='local'?'':$('#oaCached').value};
+      const list=admin.settings[key]||[]; const i=list.findIndex(x=>x.id===m.id); if(i>=0) list[i]=m; else list.push(m); admin.settings[key]=list; if(!admin.settings.models.includes(m.id)) admin.settings.models.push(m.id);
+      closeModal(); await saveAdminSettings(adminModels); break; }
+    case 'savegroup': { const ms=checked('#gModels'); await api('/api/admin/groups/'+t.dataset.gid,{method:'PATCH', body:{name:$('#gName').value, budget_usd:$('#gBudget').value.trim()===''?null:+$('#gBudget').value, models:ms.includes('__all')||!ms.length?null:ms}}); closeModal(); renderAdmin(); break; }
+    case 'addproject': projectModal(null); break;
+    case 'saveproject': { const pid=t.dataset.pid; const body={name:$('#pjName').value.trim(), description:$('#pjDesc').value.trim(), instructions:$('#pjInstr').value, model:$('#pjModel').value, collections:checked('#pjCols'), groups:checked('#pjGroups')};
+      if(!body.name){ toast('Name required'); break; } t.disabled=true;
+      const files=[...($('#pjFiles')?.files||[])];
+      if(files.length){ const log=$('#pjLog'); const col=await api('/api/admin/collections',{method:'POST', body:{name:body.name, description:'Files for the project '+body.name, groups:body.groups}});
+        for(const f of files){ log.innerHTML+=`<div>${esc(f.name)}: uploading…</div>`; try{ const r=await api(`/api/admin/collections/${col.id}/docs`,{method:'POST', raw:f, headers:{'content-type':f.type||'application/octet-stream','x-filename':encodeURIComponent(f.name),'x-classification':$('#pjCls').value}}); log.lastChild.textContent=`${f.name}: ${r.status==='ready'?'indexed':'error — '+r.error}`; }catch(err){ log.lastChild.textContent=`${f.name}: ${err.message}`; } }
+        body.collections=[...body.collections, col.id]; refreshKnowledge(); }
+      await api(pid?'/api/admin/projects/'+pid:'/api/admin/projects',{method:pid?'PUT':'POST', body}); closeModal(); await refreshMe(); await loadAdmin(); renderAdmin(); toast('Project saved'); break; }
+    case 'addtoken': modalDone=null; openModal(`<h3>Create API token</h3><p class="s">The token is shown once. Store it in your automation tool's credentials, not in a document.</p><label for="tkName">Name</label><input type="text" id="tkName" placeholder="e.g. n8n daily brief" autofocus><label for="tkUser">Acts as</label><select id="tkUser">${admin.users.filter(u=>!u.disabled&&u.active).map(u=>`<option value="${u.id}" ${u.id===me.user.id?'selected':''}>${esc(u.name||u.email)} (${esc(u.email)})</option>`).join('')}</select><label>Permissions</label><div class="checks" id="tkScopes">${Object.entries(SCOPE_LABEL).map(([k,l])=>`<label><input type="checkbox" value="${k}" ${k==='ask'?'checked':''}>${l}</label>`).join('')}</div><div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="savetoken">Create</button></div>`,'wide'); break;
+    case 'savetoken': { const r=await api('/api/admin/tokens',{method:'POST', body:{name:$('#tkName').value.trim()||'Integration', user_id:$('#tkUser').value, scopes:checked('#tkScopes')}}); await loadAdmin(); renderAdmin(); modalDone=null; openModal(`<h3>Token created</h3><p class="s">Copy it now — it will not be shown again.</p><div class="linkbox"><input type="text" id="linkIn" value="${esc(r.token)}" readonly><button class="btn primary" data-act="copylink">${ic('copy')}Copy</button></div><div class="dlg-actions"><button class="btn" data-dlg="cancel">Done</button></div>`,'wide'); break; }
+    case 'savewebhook': { admin.settings.webhook={url:$('#whUrl').value.trim(), events:checked('#whEvents')}; await saveAdminSettings(adminIntegrations); break; }
+    case 'testwebhook': { const r=await api('/api/admin/webhook/test',{method:'POST'}); toast(r.status?`Webhook answered HTTP ${r.status}`:r.error?'Webhook failed: '+r.error:'Webhook not configured',4000); break; }
+    case 'showsecret': { const r=await api('/api/admin/webhook/secret'); t.closest('.set-row').querySelector('small').textContent=r.secret; break; }
+    case 'rotatesecret': { if(await confirmBox('Rotate secret?','The receiving workflow must be updated with the new secret.','Rotate')){ await api('/api/admin/webhook/rotate',{method:'POST'}); await loadAdmin(); adminIntegrations(); toast('Secret rotated'); } break; }
     case 'saveorgskill': { const i=+t.dataset.i; const k={name:$('#oskName').value.trim(), description:$('#oskDesc').value.trim(), content:$('#oskBody').value.trim(), enabled:true}; if(!k.name||!k.content){ toast('Add a name and instructions'); break; } if(i>=0) admin.settings.orgSkills[i]={...admin.settings.orgSkills[i],...k}; else admin.settings.orgSkills.push({id:uid(),...k}); closeModal(); await saveAdminSettings(); break; }
     case 'saveorgprompt': { const i=+t.dataset.i; const k={title:$('#opTitle').value.trim(), body:$('#opBody').value.trim()}; if(!k.title||!k.body){ toast('Add a title and a prompt'); break; } if(i>=0) admin.settings.orgPrompts[i]={...admin.settings.orgPrompts[i],...k}; else admin.settings.orgPrompts.push({id:uid(),...k}); closeModal(); await saveAdminSettings(); break; }
   }
   }catch(err){ if(err.status!==401) toast(err.message,4500); }
 });
-async function saveAdminSettings(){ admin.settings=await api('/api/admin/settings',{method:'PUT', body:admin.settings}); await refreshMe(); adminSettings(); toast('Settings saved'); }
+async function saveAdminSettings(view=adminSettings){ const {webhook, ...rest}=admin.settings; const body={...rest, webhook:{url:webhook.url, events:webhook.events}}; await api('/api/admin/settings',{method:'PUT', body}); await loadAdmin(); await refreshMe(); view(); toast('Saved'); }
 async function refreshKnowledge(){ knowledge=await api('/api/knowledge').catch(()=>knowledge); renderSide(); }
 document.addEventListener('change',e=>{ if(e.target.id==='vsel'){ panel.v=+e.target.value; renderPanel(); } });
 document.addEventListener('toggle',e=>{ const d=e.target.closest?.('[data-think]'); if(d){ const m=curChat()?.msgs[+d.dataset.think]; if(m) m.thinkOpen=d.open; } },true);

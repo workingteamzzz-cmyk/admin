@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { config, ROOT, MODELS, CLASSIFICATIONS, CATEGORIES, TIERS } from './config.mjs';
-import { db, one, all, run, id, now, tx, sha256, getSettings, saveSettings, audit, userGroups, groupSpent, allowedCollections, spentThisMonth, budgetFor, monthStart } from './db.mjs';
+import { db, one, all, run, id, now, tx, sha256, getSettings, saveSettings, audit, userGroups, groupSpent, allowedCollections, spentThisMonth, budgetFor, monthStart, projectsFor } from './db.mjs';
 import { hashPassword, verifyPassword, passwordProblem, createInvite, inviteUser, consumeInvite, createSession, destroySession, sessionUser, clientIp, loginBlocked, loginFailed, loginOk, createUser, publicUser } from './auth.mjs';
-import { ingestDoc, deleteDoc, deleteCollection, classificationProblem } from './knowledge.mjs';
+import { ingestDoc, deleteDoc, deleteCollection, classificationProblem, search } from './knowledge.mjs';
 import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels } from './ai.mjs';
 import { emit as emitWebhook } from './webhooks.mjs';
 import { bootstrapAdmin } from './cli.mjs';
@@ -43,15 +43,16 @@ function setGroups(table, col, ownerId, groupIds) {
 }
 function knowledgeFor(user) {
   return allowedCollections(user).map(c => ({ ...c, groups: all(`SELECT g.id,g.name FROM groups g JOIN collection_groups cg ON cg.group_id=g.id WHERE cg.collection_id=?`, c.id),
-    docs: all(`SELECT id,title,filename,size,classification,status,error,chunks,pages,created FROM docs WHERE collection_id=? ORDER BY created DESC`, c.id) }));
+    docs: all(`SELECT id,title,filename,size,classification,status,error,chunks,pages,sensitive,created FROM docs WHERE collection_id=? ORDER BY created DESC`, c.id) }));
 }
 function mePayload(u) {
   const s = getSettings(); const ms = modelsFor(u, s);
   const groups = userGroups(u.id);
   return { user: publicUser(u), groups: groups.map(g => ({ id: g.id, name: g.name })),
     config: { models: ms.map(m => ({ id: m.id, label: m.label, d: m.d, provider: m.provider, tier: m.tier, vision: m.vision })), auto: ms.length > 1, defaultModel: s.defaultModel === 'auto' && ms.length > 1 ? 'auto' : (ms.find(m => m.id === s.defaultModel) || ms[0])?.id,
-      webSearch: s.webSearch && ms.some(m => m.provider === 'anthropic'), imageUploads: s.imageUploads, redaction: s.redaction.enabled, maxUploadMb: config.maxUploadMb, classifications: CLASSIFICATIONS, categories: CATEGORIES, apiConfigured: ms.length > 0, rateLimits: s.rateLimits },
+      webSearch: s.webSearch && ms.some(m => m.provider === 'anthropic'), canvas: !!s.canvas, imageUploads: s.imageUploads, redaction: s.redaction.enabled, maxUploadMb: config.maxUploadMb, classifications: CLASSIFICATIONS, categories: CATEGORIES, apiConfigured: ms.length > 0, rateLimits: s.rateLimits },
     budget: { limit: budgetFor(u), spent: +spentThisMonth(u.id).toFixed(4), groups: groups.filter(g => g.budget_usd > 0).map(g => ({ name: g.name, limit: g.budget_usd, spent: +groupSpent(g.id).toFixed(4) })) },
+    projects: projectsFor(u).map(p => ({ id: p.id, name: p.name, description: p.description, model: p.model, collections: p.collections.length })),
     orgSkills: s.orgSkills.filter(k => k.enabled !== false).map(({ id, name, description }) => ({ id, name, description })),
     orgPrompts: s.orgPrompts };
 }
@@ -67,7 +68,7 @@ function blobKind(name, mime) {
 const routes = [];
 const route = (method, pattern, handler, opts = {}) => routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), handler, ...opts });
 
-route('GET', '/api/health', (req, res) => json(res, 200, { ok: true, anthropic: providerReady('anthropic'), openai: providerReady('openai') }), { public: true });
+route('GET', '/api/health', (req, res) => json(res, 200, { ok: true, anthropic: providerReady('anthropic'), openai: providerReady('openai'), local: providerReady('local') }), { public: true });
 
 route('POST', '/api/auth/login', async (req, res) => {
   const { email, password } = await readJson(req, 10e3);
@@ -150,6 +151,13 @@ route('POST', '/api/quick', async (req, res, u) => {
 });
 
 route('GET', '/api/knowledge', (req, res, u) => json(res, 200, knowledgeFor(u)));
+// Direct document search: no AI involved, nothing leaves the server, no cost.
+route('POST', '/api/knowledge/search', async (req, res, u) => {
+  const { query, collection } = await readJson(req, 10e3); const q = String(query || '').trim().slice(0, 300); if (!q) throw new HttpError(400, 'Type something to search for');
+  const hits = search(u, q, { limit: 20, includeLocalOnly: true, collections: collection ? [String(collection)] : null });
+  audit(u.id, 'knowledge.direct_search', { query: q.slice(0, 100), results: hits.length }, clientIp(req));
+  json(res, 200, hits.map(h => ({ title: h.title, page: h.page, collection: h.collection, docId: h.docId, text: h.text, localOnly: h.localOnly })));
+});
 route('GET', '/api/knowledge/docs/:id/file', (req, res, u, p) => {
   const d = one(`SELECT * FROM docs WHERE id=?`, p.id);
   if (!d || !allowedCollections(u).some(c => c.id === d.collection_id)) throw new HttpError(404, 'Not found');
@@ -166,7 +174,7 @@ route('GET', '/api/admin/overview', (req, res, u) => {
   const s = getSettings(); const webhook = { ...s.webhook, secret: s.webhook.secret ? s.webhook.secret.slice(0, 6) + '…' : '' };
   const groups = all(`SELECT g.*, (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id=g.id) members FROM groups g ORDER BY name`).map(g => ({ ...g, models: g.models ? JSON.parse(g.models) : null, spent: +groupSpent(g.id).toFixed(4) }));
   const tokens = all(`SELECT t.id, t.name, t.prefix, t.scopes, t.created, t.last_used, t.revoked, u2.email FROM api_tokens t JOIN users u2 ON u2.id=t.user_id ORDER BY t.created DESC`).map(t => ({ ...t, scopes: JSON.parse(t.scopes) }));
-  json(res, 200, { users, groups, collections: knowledgeFor(u), settings: { ...s, webhook }, classifications: CLASSIFICATIONS, categories: CATEGORIES, tiers: TIERS, models: allModels(s), providers: { anthropic: providerReady('anthropic'), openai: providerReady('openai') }, tokens, apiConfigured: providerReady('anthropic') || providerReady('openai') });
+  json(res, 200, { users, groups, projects: projectsFor(u), collections: knowledgeFor(u), settings: { ...s, webhook }, classifications: CLASSIFICATIONS, categories: CATEGORIES, tiers: TIERS, models: allModels(s), providers: { anthropic: providerReady('anthropic'), openai: providerReady('openai'), local: providerReady('local') }, tokens, apiConfigured: ['anthropic', 'openai', 'local'].some(providerReady) });
 });
 route('POST', '/api/admin/users', async (req, res, u) => {
   requireAdmin(u); const b = await readJson(req, 20e3);
@@ -209,13 +217,14 @@ route('PATCH', '/api/admin/groups/:id', async (req, res, u, p) => {
 route('DELETE', '/api/admin/groups/:id', (req, res, u, p) => { requireAdmin(u); run(`DELETE FROM groups WHERE id=?`, p.id); audit(u.id, 'admin.group_deleted', { id: p.id }, clientIp(req)); json(res, 200, { ok: true }); });
 route('POST', '/api/admin/collections', async (req, res, u) => {
   requireAdmin(u); const b = await readJson(req, 20e3); const n = String(b.name || '').trim().slice(0, 80); if (!n) throw new HttpError(400, 'Name required');
-  const cid = id(); run(`INSERT INTO collections(id,name,description,created) VALUES(?,?,?,?)`, cid, n, String(b.description || '').slice(0, 300), now());
+  const cid = id(); run(`INSERT INTO collections(id,name,description,created,local_only) VALUES(?,?,?,?,?)`, cid, n, String(b.description || '').slice(0, 300), now(), b.local_only ? 1 : 0);
   setGroups('collection_groups', 'collection_id', cid, b.groups); audit(u.id, 'admin.collection_created', { name: n, groups: b.groups || [] }, clientIp(req)); json(res, 200, { id: cid });
 });
 route('PATCH', '/api/admin/collections/:id', async (req, res, u, p) => {
   requireAdmin(u); const b = await readJson(req, 20e3); if (!one(`SELECT 1 FROM collections WHERE id=?`, p.id)) throw new HttpError(404, 'Not found');
   if (b.name !== undefined) run(`UPDATE collections SET name=? WHERE id=?`, String(b.name).trim().slice(0, 80) || 'Untitled', p.id);
   if (b.description !== undefined) run(`UPDATE collections SET description=? WHERE id=?`, String(b.description).slice(0, 300), p.id);
+  if (b.local_only !== undefined) run(`UPDATE collections SET local_only=? WHERE id=?`, b.local_only ? 1 : 0, p.id);
   if (Array.isArray(b.groups)) setGroups('collection_groups', 'collection_id', p.id, b.groups);
   audit(u.id, 'admin.collection_updated', { id: p.id, changes: Object.keys(b) }, clientIp(req)); json(res, 200, { ok: true });
 });
@@ -235,6 +244,7 @@ route('PUT', '/api/admin/settings', async (req, res, u) => {
   requireAdmin(u); const b = await readJson(req, 500e3); const s = getSettings();
   if (Array.isArray(b.openaiModels)) s.openaiModels = b.openaiModels.slice(0, 30).map(m => ({ id: /^openai:[\w.-]{1,40}$/.test(m.id) ? m.id : 'openai:' + String(m.api || 'model').toLowerCase().replace(/[^\w.-]+/g, '-').slice(0, 40), api: String(m.api || '').trim().slice(0, 80), label: String(m.label || m.api || '').trim().slice(0, 60),
     tier: TIERS.includes(m.tier) ? m.tier : 'standard', vision: !!m.vision, reasoning: !!m.reasoning, priceIn: Math.max(0, +m.priceIn || 0), priceOut: Math.max(0, +m.priceOut || 0), priceCached: m.priceCached === '' || m.priceCached == null ? '' : Math.max(0, +m.priceCached || 0) })).filter(m => m.api);
+  if (Array.isArray(b.localModels)) s.localModels = b.localModels.slice(0, 20).map(m => ({ id: /^local:[\w.-]{1,40}$/.test(m.id) ? m.id : 'local:' + String(m.api || 'model').toLowerCase().replace(/[^\w.-]+/g, '-').slice(0, 40), api: String(m.api || '').trim().slice(0, 80), label: String(m.label || m.api || '').trim().slice(0, 60), tier: TIERS.includes(m.tier) ? m.tier : 'standard', vision: !!m.vision })).filter(m => m.api);
   const known = new Set(allModels(s).map(m => m.id));
   if (Array.isArray(b.models)) { const m = b.models.filter(x => known.has(x)); if (!m.length) throw new HttpError(400, 'Enable at least one model'); s.models = m; }
   s.models = s.models.filter(x => known.has(x));
@@ -244,8 +254,8 @@ route('PUT', '/api/admin/settings', async (req, res, u) => {
   if (b.rateLimits) s.rateLimits = { perMinute: Math.max(0, Math.min(1000, +b.rateLimits.perMinute || 0)), perDay: Math.max(0, Math.min(100000, +b.rateLimits.perDay || 0)) };
   if (b.webhook) { const url = String(b.webhook.url || '').trim(); if (url && !/^https?:\/\//.test(url)) throw new HttpError(400, 'Webhook URL must start with http(s)://');
     s.webhook.url = url; if (Array.isArray(b.webhook.events)) s.webhook.events = b.webhook.events.map(String).slice(0, 20); if (url && !s.webhook.secret) s.webhook.secret = crypto.randomBytes(24).toString('base64url'); }
-  for (const k of ['webSearch', 'imageUploads']) if (typeof b[k] === 'boolean') s[k] = b[k];
-  if (b.redaction) s.redaction = { enabled: !!b.redaction.enabled, terms: (b.redaction.terms || []).map(t => String(t).trim()).filter(Boolean).slice(0, 500) };
+  for (const k of ['webSearch', 'imageUploads', 'canvas']) if (typeof b[k] === 'boolean') s[k] = b[k];
+  if (b.redaction) s.redaction = { enabled: !!b.redaction.enabled, terms: (b.redaction.terms || []).map(t => String(t).trim()).filter(Boolean).slice(0, 500), columns: (b.redaction.columns || s.redaction.columns || []).map(t => String(t).trim()).filter(Boolean).slice(0, 100) };
   if (b.monthlyBudgetUsd !== undefined) s.monthlyBudgetUsd = clampBudget(b.monthlyBudgetUsd) ?? 0;
   if (Array.isArray(b.orgSkills)) s.orgSkills = b.orgSkills.slice(0, 50).map(k => ({ id: String(k.id || id()), name: String(k.name || '').slice(0, 80), description: String(k.description || '').slice(0, 200), content: String(k.content || '').slice(0, 20000), enabled: k.enabled !== false })).filter(k => k.name && k.content);
   if (Array.isArray(b.orgPrompts)) s.orgPrompts = b.orgPrompts.slice(0, 100).map(k => ({ id: String(k.id || id()), title: String(k.title || '').slice(0, 80), body: String(k.body || '').slice(0, 8000), icon: 'bolt' })).filter(k => k.title && k.body);
@@ -267,6 +277,24 @@ route('GET', '/api/admin/audit', (req, res, u) => {
   json(res, 200, rows.map(r => ({ ...r, detail: JSON.parse(r.detail || '{}') })));
 });
 
+function cleanProject(b) {
+  const cols = new Set(all(`SELECT id FROM collections`).map(c => c.id)); const grps = new Set(all(`SELECT id FROM groups`).map(g => g.id));
+  const models = new Set(['auto', ...allModels().map(m => m.id)]);
+  return { name: String(b.name || '').trim().slice(0, 80), description: String(b.description || '').slice(0, 300), instructions: String(b.instructions || '').slice(0, 20000),
+    collections: JSON.stringify((b.collections || []).filter(c => cols.has(c))), groups: JSON.stringify((b.groups || []).filter(g => grps.has(g))), model: models.has(b.model) ? b.model : 'auto' };
+}
+route('POST', '/api/admin/projects', async (req, res, u) => {
+  requireAdmin(u); const p = cleanProject(await readJson(req, 100e3)); if (!p.name) throw new HttpError(400, 'Name required');
+  const pid = id(); run(`INSERT INTO projects(id,name,description,instructions,collections,groups,model,created,updated) VALUES(?,?,?,?,?,?,?,?,?)`, pid, p.name, p.description, p.instructions, p.collections, p.groups, p.model, now(), now());
+  audit(u.id, 'admin.project_created', { name: p.name }, clientIp(req)); json(res, 200, { id: pid });
+});
+route('PUT', '/api/admin/projects/:id', async (req, res, u, prm) => {
+  requireAdmin(u); if (!one(`SELECT 1 FROM projects WHERE id=?`, prm.id)) throw new HttpError(404, 'Project not found');
+  const p = cleanProject(await readJson(req, 100e3)); if (!p.name) throw new HttpError(400, 'Name required');
+  run(`UPDATE projects SET name=?,description=?,instructions=?,collections=?,groups=?,model=?,updated=? WHERE id=?`, p.name, p.description, p.instructions, p.collections, p.groups, p.model, now(), prm.id);
+  audit(u.id, 'admin.project_updated', { name: p.name }, clientIp(req)); json(res, 200, { ok: true });
+});
+route('DELETE', '/api/admin/projects/:id', (req, res, u, prm) => { requireAdmin(u); const p = one(`SELECT name FROM projects WHERE id=?`, prm.id); run(`DELETE FROM projects WHERE id=?`, prm.id); audit(u.id, 'admin.project_deleted', { name: p?.name }, clientIp(req)); json(res, 200, { ok: true }); });
 route('POST', '/api/admin/webhook/test', async (req, res, u) => { requireAdmin(u); const r = await emitWebhook('test', { by: u.email, message: 'Canopus webhook test' }, { force: true }); json(res, 200, r); });
 route('POST', '/api/admin/webhook/rotate', (req, res, u) => { requireAdmin(u); const s = getSettings(); s.webhook.secret = crypto.randomBytes(24).toString('base64url'); saveSettings(s); audit(u.id, 'admin.webhook_secret_rotated', {}, clientIp(req)); json(res, 200, { secret: s.webhook.secret }); });
 route('GET', '/api/admin/webhook/secret', (req, res, u) => { requireAdmin(u); json(res, 200, { secret: getSettings().webhook.secret }); });

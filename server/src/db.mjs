@@ -37,9 +37,12 @@ CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT NOT NULL, t
 CREATE TABLE IF NOT EXISTS chat_requests(user_id TEXT NOT NULL, ts INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS chat_requests_user_ts ON chat_requests(user_id, ts);
 CREATE TABLE IF NOT EXISTS notices(key TEXT PRIMARY KEY, ts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS doc_sensitive(doc_id TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(doc_id, value));
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '',
+  collections TEXT NOT NULL DEFAULT '[]', groups TEXT NOT NULL DEFAULT '[]', model TEXT NOT NULL DEFAULT 'auto', created INTEGER NOT NULL, updated INTEGER NOT NULL);
 `);
 // Columns added after the first release.
-for (const sql of [`ALTER TABLE groups ADD COLUMN budget_usd REAL`, `ALTER TABLE groups ADD COLUMN models TEXT`, `ALTER TABLE usage ADD COLUMN provider TEXT`]) { try { db.exec(sql); } catch {} }
+for (const sql of [`ALTER TABLE collections ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE docs ADD COLUMN sensitive INTEGER DEFAULT 0`, `ALTER TABLE groups ADD COLUMN budget_usd REAL`, `ALTER TABLE groups ADD COLUMN models TEXT`, `ALTER TABLE usage ADD COLUMN provider TEXT`]) { try { db.exec(sql); } catch {} }
 
 export const id = () => crypto.randomBytes(9).toString('base64url');
 export const now = () => Date.now();
@@ -76,4 +79,12 @@ export function allowedCollections(user) {
   if (user.role === 'admin') return all(`SELECT * FROM collections ORDER BY name`);
   return all(`SELECT c.* FROM collections c WHERE NOT EXISTS (SELECT 1 FROM collection_groups cg WHERE cg.collection_id=c.id)
     OR EXISTS (SELECT 1 FROM collection_groups cg JOIN user_groups ug ON ug.group_id=cg.group_id WHERE cg.collection_id=c.id AND ug.user_id=?) ORDER BY c.name`, user.id);
+}
+
+// Shared projects a user may use: no group restriction, or sharing a group with the user (admins see all).
+export function projectsFor(user) {
+  const rows = all(`SELECT * FROM projects ORDER BY name`).map(p => ({ ...p, collections: JSON.parse(p.collections), groups: JSON.parse(p.groups) }));
+  if (user.role === 'admin') return rows;
+  const mine = new Set(userGroups(user.id).map(g => g.id));
+  return rows.filter(p => !p.groups.length || p.groups.some(g => mine.has(g)));
 }

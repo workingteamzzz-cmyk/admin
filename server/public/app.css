@@ -543,3 +543,9 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 .save-bar{position:sticky;bottom:0;display:flex;justify-content:flex-end;gap:10px;padding:12px 0;background:linear-gradient(transparent,var(--page) 30%)}
 .notice.info{border-color:rgba(124,196,255,.35);background:rgba(124,196,255,.07)}
 .notice.info svg{color:var(--sky)}
+
+.cn{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 4px;margin:0 1px;border-radius:5px;background:var(--chip);color:var(--gold);font:600 11px var(--font);vertical-align:super;line-height:1}
+.cn:hover{background:var(--gold);color:#1d1405}
+.cls svg{width:12px;height:12px;margin-right:4px}
+.rt td select{background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:6px 8px;color:var(--fg);font-size:13.5px}
+.mono{font-family:var(--mono);font-size:12.5px}

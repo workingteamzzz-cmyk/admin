@@ -29,6 +29,9 @@ export const config = {
   // Only for tests or a corporate gateway. Deliberately NOT the SDK's own ANTHROPIC_BASE_URL variable,
   // so an unrelated environment setting can never redirect traffic.
   anthropicBaseUrl: env.CANOPUS_ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
+  // Optional AI model running on your own server (OpenAI-compatible API, e.g. Ollama or vLLM). Nothing sent to it leaves your network.
+  localBaseUrl: (env.CANOPUS_LOCAL_BASE_URL || '').replace(/\/+$/, ''),
+  localKey: env.CANOPUS_LOCAL_API_KEY || 'local',
   outboundProxy: env.CANOPUS_OUTBOUND_PROXY || '', // e.g. http://proxy.kantor.go.id:8080
   adminEmail: env.CANOPUS_ADMIN_EMAIL || '',
   sessionHours: +(env.SESSION_HOURS || 12),
@@ -74,12 +77,14 @@ export const DEFAULT_SETTINGS = {
   models: ['core', 'swift', 'prime'],
   defaultModel: 'auto',
   openaiModels: [], // {id, api, label, tier, vision, reasoning, priceIn, priceOut, priceCached}
+  localModels: [],  // same shape; run on CANOPUS_LOCAL_BASE_URL
   routing: { rules: { light: 'swift', knowledge: 'core', writing: 'core', analysis: 'prime', visual: 'prime' }, failover: true },
   rateLimits: { perMinute: 15, perDay: 400 },
   webhook: { url: '', secret: '', events: ['budget.warning', 'budget.exhausted', 'group_budget.warning', 'group_budget.exhausted', 'knowledge.upload_refused', 'user.created'] },
-  webSearch: false,
+  webSearch: true,
+  canvas: false, // text-first: dashboards/infographics off unless the admin enables them
   imageUploads: true,
-  redaction: { enabled: true, terms: [] },
+  redaction: { enabled: true, terms: [], columns: [] }, // columns: extra spreadsheet column names whose values are always masked
   monthlyBudgetUsd: 10,
   orgSkills: [],
   orgPrompts: [],

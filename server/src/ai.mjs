@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { config, MODELS, HELPER_MODEL, EFFORT, EFFORT_OPENAI, PRICES, CATEGORIES, TIERS } from './config.mjs';
-import { one, all, run, now, getSettings, audit, spentThisMonth, budgetFor, userGroups, groupSpent, monthStart } from './db.mjs';
-import { search, extractText } from './knowledge.mjs';
+import { one, all, run, now, getSettings, audit, spentThisMonth, budgetFor, userGroups, groupSpent, monthStart, projectsFor } from './db.mjs';
+import { search, extractDoc, sensitiveValues } from './knowledge.mjs';
 import { Redactor, SYSTEM_NOTE } from './redact.mjs';
 import { emitOnce } from './webhooks.mjs';
 
@@ -22,13 +22,16 @@ async function httpFetch(url, opts) {
   if (!proxyFetch) { const u = await import('undici'); const agent = new u.ProxyAgent(config.outboundProxy); proxyFetch = (a, b) => u.fetch(a, { ...b, dispatcher: agent }); }
   return proxyFetch(url, opts);
 }
-export const providerReady = p => (p === 'anthropic' ? !!config.apiKey : p === 'openai' ? !!config.openaiKey : false);
+export const providerReady = p => (p === 'anthropic' ? !!config.apiKey : p === 'openai' ? !!config.openaiKey : p === 'local' ? !!config.localBaseUrl : false);
+const oaStyle = p => p === 'openai' || p === 'local'; // both speak the OpenAI chat format
+const endpoint = p => (p === 'local' ? { base: config.localBaseUrl, key: config.localKey, name: 'the local AI server' } : { base: config.openaiBaseUrl, key: config.openaiKey, name: 'OpenAI' });
 
 /* ================= model registry & access ================= */
 export function allModels(settings = getSettings()) {
   const list = Object.values(MODELS).map(m => ({ ...m, price: PRICES[m.api] }));
   for (const m of settings.openaiModels || []) list.push({ id: m.id, provider: 'openai', tier: m.tier, label: m.label, api: m.api, d: `OpenAI · ${m.api}`, vision: !!m.vision, reasoning: !!m.reasoning,
     price: { in: +m.priceIn || 0, out: +m.priceOut || 0, cacheRead: m.priceCached === '' || m.priceCached == null ? +m.priceIn || 0 : +m.priceCached } });
+  for (const m of settings.localModels || []) list.push({ id: m.id, provider: 'local', tier: m.tier, label: m.label, api: m.api, d: `On this server · ${m.api} · data never leaves`, vision: !!m.vision, reasoning: false, price: { in: 0, out: 0, cacheRead: 0 } });
   return list;
 }
 // Models a user may use: enabled by the admin, provider configured, and allowed by the user's groups.
@@ -86,7 +89,7 @@ function budgetNotices(user) {
 const VISUAL_RE = /\b(dashboard|infogra(fis|phic)|canvas|chart|grafik|diagram|visuali[sz]|one-?pager|presentasi|presentation|slide|halaman (laporan|interaktif)|interactive (page|tool))/i;
 const LIGHT_RE = /^\s*(hai|halo|hello|hi|hey|terima kasih|thanks|thank you|makasih|selamat (pagi|siang|sore|malam)|good (morning|afternoon|evening)|ok(e|ay)?|sip)\b[\s!.?]*$/i;
 async function classify(user, text, hasFiles, settings, red) {
-  if (VISUAL_RE.test(text)) return { category: 'visual', reason: 'asks for a visual deliverable', how: 'rule' };
+  if (settings.canvas && VISUAL_RE.test(text)) return { category: 'visual', reason: 'asks for a visual deliverable', how: 'rule' };
   if (LIGHT_RE.test(text) && !hasFiles) return { category: 'light', reason: 'short conversational message', how: 'rule' };
   // Ask the cheapest available model. The question is masked first.
   const prompt = `Classify the user's request into exactly one category:\n${Object.entries(CATEGORIES).map(([k, v]) => `- ${k}: ${v.d}`).join('\n')}\n${hasFiles ? 'The user attached files.\n' : ''}Reply with the category name only.`;
@@ -115,7 +118,8 @@ export async function chooseModel(user, requested, text, hasImages, hasFiles, se
   return { model: m, route: { auto: true, category: c.category, reason: c.reason, how: c.how, wanted: want.id !== m.id ? want.label : null } };
 }
 function failoverFor(model, user, settings, tried, needVision) {
-  const pool = modelsFor(user, settings).filter(m => !tried.has(m.id) && m.provider !== model.provider && (!needVision || m.vision));
+  if (model.provider === 'local') return null; // never move a local conversation to a cloud provider
+  const pool = modelsFor(user, settings).filter(m => !tried.has(m.id) && m.provider !== model.provider && m.provider !== 'local' && (!needVision || m.vision));
   return pool.sort((a, b) => Math.abs(tierRank(a.tier) - tierRank(model.tier)) - Math.abs(tierRank(b.tier) - tierRank(model.tier)))[0] || null;
 }
 
@@ -123,14 +127,15 @@ function failoverFor(model, user, settings, tried, needVision) {
 const KNOWLEDGE_DESC = 'Search the organization’s internal knowledge base: policies, regulations, reports, program data, meeting notes and other documents this user is allowed to read. Use it whenever the question could be answered from internal documents, before relying on general knowledge. Use specific keywords in the documents’ language (usually Indonesian); search again with different keywords if the results are not relevant.';
 const KNOWLEDGE_SCHEMA = { type: 'object', properties: { query: { type: 'string', description: 'Keywords to search for, e.g. "anggaran program makan bergizi 2026"' } }, required: ['query'], additionalProperties: false };
 
-function systemPrompt(user, body, settings, useKnowledge, red, provider) {
+function systemPrompt(user, body, settings, useKnowledge, red, provider, project) {
   const s = body.system || {}; const clip = (t, n) => String(t || '').slice(0, n);
-  const parts = [`You are Canopus, the AI assistant of this organization: capable, warm and precise, for research, writing, analysis, planning and document work.
+  const parts = [`You are Canopus, the AI assistant of this organization: capable, warm and precise, for research, reading internal knowledge, writing and analysis.
 
-Style: answer directly. Use Markdown (headings, lists, tables) when it helps; keep simple answers short. Reply in the language the user writes in — if they write in Indonesian, reply in Indonesian.
-
-Canvases: when the user asks for a visual deliverable — a report page, dashboard, infographic, one-pager, chart or small interactive tool — build it as ONE complete, self-contained HTML document (inline CSS and JS; Chart.js may be loaded from cdn.jsdelivr.net) inside a single \`\`\`html code block, with a descriptive <title>. Canvases run offline in a sandbox: do not fetch data from the network. Outside the block, add one or two sentences about what you built. When asked to change an existing canvas, output the complete updated HTML again with the same <title>.`];
-  if (useKnowledge) parts.push(`Internal knowledge: you have a search_knowledge tool over the organization's documents. For questions about the organization, its programs, policies, data or documents, search first and base your answer on what you find. If the documents do not contain the answer, say so plainly instead of guessing; only then add general knowledge, clearly labelled as such. Never present information as coming from internal documents unless a search result supports it.${provider === 'openai' ? ' Search results are numbered like [1], [2]. Cite them inline with the same number in square brackets right after the sentence that uses them, e.g. "... Rp71 triliun [1]." Only cite numbers that appear in the results.' : ''}`);
+Style: answer directly in well-structured text. Use Markdown (headings, lists, tables) when it helps; keep simple answers short. Reply in the language the user writes in — if they write in Indonesian, reply in Indonesian.`];
+  if (settings.canvas) parts.push(`Canvases: when the user asks for a visual deliverable — a report page, dashboard, infographic, one-pager, chart or small interactive tool — build it as ONE complete, self-contained HTML document (inline CSS and JS; Chart.js may be loaded from cdn.jsdelivr.net) inside a single \`\`\`html code block, with a descriptive <title>. Canvases run offline in a sandbox: do not fetch data from the network. Outside the block, add one or two sentences about what you built. When asked to change an existing canvas, output the complete updated HTML again with the same <title>.`);
+  else parts.push(`Answer in text only. Do not produce HTML pages, dashboards or code for visualizations; when data would suit a chart, present it as a clear Markdown table instead.`);
+  if (project) parts.push(`This chat uses the shared project "${clip(project.name, 100)}".${project.instructions ? `\n<project_instructions>\n${red.mask(clip(project.instructions, 20000))}\n</project_instructions>` : ''}`);
+  if (useKnowledge) parts.push(`Internal knowledge: you have a search_knowledge tool over the organization's documents${project?.collections?.length ? ' (limited to this project\'s collections)' : ''}. Table files are indexed row by row as "Column: value" lines, so search for names, record numbers or values directly. For questions about the organization, its programs, policies, data or documents, search first and base your answer on what you find. If the documents do not contain the answer, say so plainly instead of guessing; only then add general knowledge, clearly labelled as such. Never present information as coming from internal documents unless a search result supports it.${oaStyle(provider) ? ' Search results are numbered like [1], [2]. Cite them inline with the same number in square brackets right after the sentence that uses them, e.g. "... Rp71 triliun [1]." Only cite numbers that appear in the results.' : ''}`);
   if (red.enabled) parts.push(SYSTEM_NOTE);
   if (user.name?.trim()) parts.push(`The user's name is ${user.name.trim()}.`);
   if (s.instructions) parts.push(`<user_instructions>\n${red.mask(clip(s.instructions, 8000))}\n</user_instructions>`);
@@ -154,16 +159,16 @@ async function resolveBlock(user, blk, red, settings, pdfNative) {
   }
   if (b.kind === 'pdf' && pdfNative) return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') }, title: b.name };
   let text;
-  try { text = (await extractText(buf, b.name, b.mime)).map((t, i, a) => (a.length > 1 ? `[Page ${i + 1}]\n${t}` : t)).join('\n\n'); }
+  try { const d = await extractDoc(buf, b.name, b.mime); red.addValues(d.sensitive); text = d.pages.map((t, i, a) => (a.length > 1 && !d.table ? `[Page ${i + 1}]\n${t}` : t)).join('\n\n'); }
   catch (e) { text = `[Could not read this file: ${e.message}]`; }
   return { type: 'document', source: { type: 'text', media_type: 'text/plain', data: red.mask(text) || ' ' }, title: b.name };
 }
 function finalText(provider, turn) {
-  if (provider === 'openai') return turn.filter(m => m.role === 'assistant' && typeof m.content === 'string').map(m => m.content).join('');
+  if (oaStyle(provider)) return turn.filter(m => m.role === 'assistant' && typeof m.content === 'string').map(m => m.content).join('');
   return turn.filter(m => m.role === 'assistant').flatMap(m => m.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
 }
 function remask(provider, m, red) {
-  if (provider === 'openai') return m.role === 'tool' ? { ...m, content: red.mask(String(m.content)) } : m;
+  if (oaStyle(provider)) return m.role === 'tool' ? { ...m, content: red.mask(String(m.content)) } : m;
   if (m.role !== 'user' || !Array.isArray(m.content)) return m;
   return { ...m, content: m.content.map(b => b.type !== 'tool_result' || !Array.isArray(b.content) ? b : { ...b, content: b.content.map(c => c.type === 'search_result' ? { ...c, content: (c.content || []).map(t => ({ type: 'text', text: red.mask(t.text) })) } : c.type === 'text' ? { ...c, text: red.mask(c.text) } : c) }) };
 }
@@ -179,10 +184,10 @@ async function buildMessages(user, items, red, settings, provider) {
       if (blocks.length) pushUser(blocks);
     } else if (it.role === 'turn' && Array.isArray(it.messages) && it.messages.length) {
       if (it.provider === provider) for (const m of it.messages) { if (provider === 'anthropic' && m.role === 'user') pushUser(remask(provider, m, red).content); else out.push(remask(provider, m, red)); }
-      else { const t = finalText(it.provider, it.messages); if (t) out.push({ role: 'assistant', content: provider === 'openai' ? t : [{ type: 'text', text: t }] }); }
+      else { const t = finalText(it.provider, it.messages); if (t) out.push({ role: 'assistant', content: oaStyle(provider) ? t : [{ type: 'text', text: t }] }); }
     }
   }
-  if (provider !== 'openai') return out;
+  if (!oaStyle(provider)) return out;
   // Anthropic-style user blocks → OpenAI chat parts.
   return out.map(m => {
     if (m.role !== 'user' || !Array.isArray(m.content)) return m;
@@ -194,6 +199,7 @@ async function buildMessages(user, items, red, settings, provider) {
 
 /* ================= providers ================= */
 async function runAnthropic({ model, system, messages, useKnowledge, useWeb, mode, emit, signal, doSearch }) {
+  if (model.provider !== 'anthropic') throw new Error('Internal routing error: non-Claude model sent to the Claude API');
   const tools = [];
   if (useKnowledge) tools.push({ name: 'search_knowledge', description: KNOWLEDGE_DESC, input_schema: KNOWLEDGE_SCHEMA, strict: true, eager_input_streaming: true });
   if (useWeb && model.search) tools.push({ type: model.search, name: 'web_search', max_uses: 5 });
@@ -227,7 +233,7 @@ async function runAnthropic({ model, system, messages, useKnowledge, useWeb, mod
     for (const b of fin.content.filter(b => b.type === 'tool_use')) {
       if (b.name !== 'search_knowledge' || typeof b.input?.query !== 'string' || !b.input.query.trim()) { results.push({ type: 'tool_result', tool_use_id: b.id, is_error: true, content: 'Invalid tool call: provide a non-empty "query" string.' }); continue; }
       if (++searches > 6) { results.push({ type: 'tool_result', tool_use_id: b.id, is_error: true, content: 'Search limit reached for this answer. Answer with what you have.' }); continue; }
-      const hits = doSearch(b.input.query);
+      const hits = doSearch(b.input.query).filter(h => !h.localOnly); // defence in depth: on-premise passages never go to a cloud API
       results.push({ type: 'tool_result', tool_use_id: b.id, content: hits.length
         ? hits.map(h => ({ type: 'search_result', source: h.source, title: h.label, content: [{ type: 'text', text: h.masked }], citations: { enabled: true } }))
         : [{ type: 'text', text: 'No matching passages in the internal knowledge base for this query.' }] });
@@ -242,8 +248,9 @@ async function runOpenAI({ model, system, messages, useKnowledge, mode, emit, si
   const tools = useKnowledge ? [{ type: 'function', function: { name: 'search_knowledge', description: KNOWLEDGE_DESC, parameters: KNOWLEDGE_SCHEMA, strict: true } }] : null;
   for (let step = 0; step < 8; step++) {
     const body = { model: model.api, messages: [{ role: 'system', content: system }, ...messages, ...turn], stream: true, stream_options: { include_usage: true }, ...(tools ? { tools } : {}), ...(model.reasoning ? { reasoning_effort: EFFORT_OPENAI[mode] || 'medium' } : {}) };
-    const res = await httpFetch(config.openaiBaseUrl + '/chat/completions', { method: 'POST', signal, headers: { 'content-type': 'application/json', authorization: 'Bearer ' + config.openaiKey }, body: JSON.stringify(body) });
-    if (!res.ok) { let msg = ''; try { const j = await res.json(); msg = j.error?.message || JSON.stringify(j).slice(0, 300); } catch {} throw Object.assign(new Error(msg || 'HTTP ' + res.status), { status: res.status, provider: 'openai' }); }
+    const ep = endpoint(model.provider); const fetcher = model.provider === 'local' ? fetch : httpFetch; // local server: no outbound proxy
+    const res = await fetcher(ep.base + '/chat/completions', { method: 'POST', signal, headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ep.key }, body: JSON.stringify(body) });
+    if (!res.ok) { let msg = ''; try { const j = await res.json(); msg = j.error?.message || JSON.stringify(j).slice(0, 300); } catch {} throw Object.assign(new Error(msg || 'HTTP ' + res.status), { status: res.status, provider: model.provider }); }
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '', text = '', finish = null; const calls = [];
     outer: while (true) {
       const { done, value } = await reader.read(); if (done) break;
@@ -269,7 +276,7 @@ async function runOpenAI({ model, system, messages, useKnowledge, mode, emit, si
       let q = null; try { q = JSON.parse(c.args).query; } catch {}
       if (c.name !== 'search_knowledge' || typeof q !== 'string' || !q.trim()) { turn.push({ role: 'tool', tool_call_id: c.id, content: 'Invalid tool call: provide a non-empty "query" string.' }); continue; }
       if (++searches > 6) { turn.push({ role: 'tool', tool_call_id: c.id, content: 'Search limit reached for this answer. Answer with what you have.' }); continue; }
-      const hits = doSearch(q);
+      const hits = doSearch(q).filter(h => model.provider === 'local' || !h.localOnly); // on-premise passages only to the local model
       const lines = hits.map(h => { sources.push(h); return `[${sources.length}] ${h.label}\n${h.masked}`; });
       turn.push({ role: 'tool', tool_call_id: c.id, content: lines.length ? lines.join('\n\n') : 'No matching passages in the internal knowledge base for this query.' });
     }
@@ -282,8 +289,9 @@ async function runOpenAI({ model, system, messages, useKnowledge, mode, emit, si
 
 // Short non-streaming completion (titles, prompt polishing, routing).
 async function complete(user, model, system, text, purpose, maxTokens = 1024) {
-  if (model.provider === 'openai') {
-    const res = await httpFetch(config.openaiBaseUrl + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + config.openaiKey }, body: JSON.stringify({ model: model.api, messages: [{ role: 'system', content: system }, { role: 'user', content: text }] }), signal: AbortSignal.timeout(60e3) });
+  if (oaStyle(model.provider)) {
+    const ep = endpoint(model.provider);
+    const res = await (model.provider === 'local' ? fetch : httpFetch)(ep.base + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ep.key }, body: JSON.stringify({ model: model.api, messages: [{ role: 'system', content: system }, { role: 'user', content: text }] }), signal: AbortSignal.timeout(60e3) });
     if (!res.ok) throw Object.assign(new Error('HTTP ' + res.status), { status: res.status });
     const j = await res.json(); const u = j.usage || {};
     recordUsage(user, model, { input: u.prompt_tokens, output: u.completion_tokens }, purpose);
@@ -300,26 +308,38 @@ export async function converse(user, body, emit, signal, ip) {
   const settings = getSettings();
   const fail = (message, code) => { emit({ t: 'error', message, code }); return { error: message, code }; };
   const limit = limitProblem(user, settings); if (limit) return fail(limit.message, limit.code);
-  const red = new Redactor({ userId: user.id, chatId: body.chatId, enabled: settings.redaction.enabled, terms: settings.redaction.terms });
+  const red = new Redactor({ userId: user.id, chatId: body.chatId, enabled: settings.redaction.enabled, terms: settings.redaction.terms, values: settings.redaction.enabled ? sensitiveValues() : [] });
   const items = Array.isArray(body.messages) ? body.messages : [];
+  const project = body.projectId ? projectsFor(user).find(p => p.id === body.projectId) : null;
+  if (body.projectId && !project) return fail('You do not have access to this project.', 'project');
   const lastUser = [...items].reverse().find(i => i.role === 'user');
   if (!lastUser) return fail('Nothing to send.');
   const lastText = (lastUser.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
   const blobKinds = (lastUser.content || []).filter(b => b.type === 'blob').map(b => one(`SELECT kind FROM blobs WHERE id=? AND user_id=?`, String(b.id), user.id)?.kind);
   const anyImages = items.some(i => i.role === 'user' && (i.content || []).some(b => b.type === 'blob' && one(`SELECT kind FROM blobs WHERE id=? AND user_id=?`, String(b.id), user.id)?.kind === 'image'));
-  const pick = await chooseModel(user, body.model, lastText, anyImages, blobKinds.length > 0, settings, red);
+  const requested = project && project.model !== 'auto' && (!body.model || body.model === 'auto') ? project.model : body.model;
+  // A conversation that already used a local model (and so possibly local-only knowledge) stays on local models.
+  const lockedLocal = items.some(i => i.role === 'turn' && i.provider === 'local');
+  let pick;
+  if (lockedLocal) {
+    const locals = modelsFor(user, settings).filter(m => m.provider === 'local');
+    const m = locals.find(x => x.id === requested) || locals[0];
+    if (!m) return fail('This conversation used confidential on-premise knowledge, so it can only continue with the local AI model, which is not available right now.', 'model');
+    if (requested && requested !== 'auto' && requested !== m.id) emit({ t: 'status', d: 'This conversation stays on the local model to keep on-premise data inside the server.' });
+    pick = { model: m, route: { auto: false, reason: 'conversation contains on-premise knowledge', how: 'rule', locked: true } };
+  } else pick = await chooseModel(user, requested, lastText, anyImages, blobKinds.length > 0, settings, red);
   if (pick.error) return fail(pick.error, 'model');
   countRequest(user);
-  const useKnowledge = body.knowledge !== false; const useWeb = !!body.web && settings.webSearch;
+  const useKnowledge = body.knowledge !== false; const useWeb = !!body.web && settings.webSearch; let model;
   const doSearch = q => {
-    const query = red.unmask(q).slice(0, 300); const hits = search(user, query);
-    audit(user.id, 'knowledge.search', { query: red.mask(query), results: hits.map(h => ({ doc: h.docId, page: h.page })) }, ip);
+    const query = red.unmask(q).slice(0, 300); const hits = search(user, query, { collections: project?.collections, includeLocalOnly: model.provider === 'local' });
+    audit(user.id, 'knowledge.search', { query: red.mask(query), project: project?.name, results: hits.map(h => ({ doc: h.docId, page: h.page })) }, ip);
     emit({ t: 'status', d: `Found ${hits.length} passage${hits.length === 1 ? '' : 's'} in internal knowledge` });
     emit({ t: 'sources', d: hits.map(h => ({ title: h.title, page: h.page, collection: h.collection, docId: h.docId, text: h.text.slice(0, 600) })) });
     return hits.map(h => ({ ...h, source: `canopus:doc/${h.docId}${h.page ? '#page=' + h.page : ''}`, label: `${h.title}${h.page ? ' — page ' + h.page : ''} (${h.collection})`, masked: red.mask(h.text) }));
   };
 
-  let model = pick.model; let route = pick.route; const tried = new Set();
+  model = pick.model; let route = pick.route; const tried = new Set();
   for (let attempt = 0; attempt < 2; attempt++) {
     tried.add(model.id);
     emit({ t: 'route', model: { id: model.id, label: model.label, provider: model.provider }, route });
@@ -329,8 +349,9 @@ export async function converse(user, body, emit, signal, ip) {
     try {
       const messages = await buildMessages(user, items, red, settings, model.provider);
       if (!messages.length || messages.at(-1).role !== 'user') return fail('Nothing to send.');
-      const system = systemPrompt(user, body, settings, useKnowledge, red, model.provider);
-      const run_ = model.provider === 'openai' ? runOpenAI : runAnthropic;
+      const system = systemPrompt(user, body, settings, useKnowledge, red, model.provider, project);
+      const run_ = model.provider === 'anthropic' ? runAnthropic : oaStyle(model.provider) ? runOpenAI : null;
+      if (!run_) return fail('Unknown model provider.', 'model');
       const r = await run_({ model, system, messages, useKnowledge, useWeb, mode: body.mode, emit: out, signal, doSearch });
       const tail = unmask.flush(); if (tail) { display += tail; emit({ t: 'text', d: tail }); }
       const cost = recordUsage(user, model, r.usage, 'chat');
@@ -351,7 +372,7 @@ export async function converse(user, body, emit, signal, ip) {
         route = { ...(route || {}), failover: { from: model.label, reason: status ? `HTTP ${status}` : 'connection error' } };
         model = alt; continue;
       }
-      const who = model.provider === 'openai' ? 'OpenAI' : 'Anthropic';
+      const who = model.provider === 'openai' ? 'OpenAI' : model.provider === 'local' ? 'The local AI server' : 'Anthropic';
       const msg = status === 401 ? `The server’s ${who} API key was rejected. Ask the administrator.`
         : status === 429 ? `${who} is rate-limiting requests right now. Try again in a moment.`
         : status >= 500 ? `${who} is busy or unavailable. Please try again shortly.`
@@ -366,7 +387,7 @@ export async function converse(user, body, emit, signal, ip) {
 export async function quick(user, purpose, text, chatId) {
   const settings = getSettings();
   const lim = limitProblem(user, settings); if (lim && lim.code !== 'rate') throw Object.assign(new Error(lim.message), { status: 402 });
-  const red = new Redactor({ userId: user.id, chatId: chatId || 'quick', enabled: settings.redaction.enabled, terms: settings.redaction.terms });
+  const red = new Redactor({ userId: user.id, chatId: chatId || 'quick', enabled: settings.redaction.enabled, terms: settings.redaction.terms, values: settings.redaction.enabled ? sensitiveValues() : [] });
   const helper = modelsFor(user, settings).sort((a, b) => tierRank(a.tier) - tierRank(b.tier) || (a.provider === 'anthropic' ? -1 : 1))[0];
   if (!helper) throw Object.assign(new Error('No AI model available'), { status: 503 });
   const model = helper.provider === 'anthropic' ? { ...helper, api: HELPER_MODEL, price: PRICES[HELPER_MODEL] } : helper;

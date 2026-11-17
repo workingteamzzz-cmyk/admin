@@ -1,4 +1,4 @@
-# Canopus — Server Edition
+# Canopus 2 — Server Edition
 
 Canopus is an AI workspace for organizations, powered by Claude. One API key lives on the server; everyone signs in with their own account. Internal knowledge stays on the server, and only the relevant excerpts are sent to Claude.
 
@@ -32,6 +32,38 @@ Browser (login)  ──HTTPS──▶  Canopus server  ──only relevant excer
 > - The relevant excerpts (after masking) are still sent to the Claude API in the United States. Make sure your internal policy allows processing **Biasa/Terbatas** documents this way. Data sent through the API is not used to train models under Anthropic's commercial terms; *Zero Data Retention* can be requested from Anthropic for an organization account.
 > - Masking uses patterns and a term list, so it is not perfect. Names that aren't on the term list are not masked automatically.
 > - Images cannot be masked. Turn off "Allow image uploads" in Admin → Settings if screenshots may contain sensitive data.
+
+## What's new in version 2
+
+- **Claude + GPT + an on-premise model** in one place, with **Auto** mode: a quick check picks the right model for each question (the rules are set by the admin), plus **automatic failover** if a provider is down.
+- **Shared Projects** (like Claude Projects): instructions + knowledge + model, chosen by the admin, so you don't need everyone to have their own AI account. They can be copied from a Claude project.
+- **Knowledge for spreadsheets** (XLSX/CSV): read row by row. Personal-data columns (Name, NIK, Medical record no. (No RM), Address, Phone, Date of birth, plus extra columns set by the admin such as Diagnosis) are **always masked** before reaching cloud AI.
+- **Text mode**: canvases/dashboards are off by default (cheaper and more focused). Web search is available for public information.
+- **Limits**: budgets per user and per group, models allowed per group, requests per minute/day, warnings at 80%/100%.
+- **Integrations**: an API with scoped tokens (for n8n), and signed webhooks.
+
+## Protecting patient data and hospital data
+
+| Level | Where it applies | What reaches the AI |
+|---|---|---|
+| **1. On this server only** (local-only collection) | Patient records, medical records, highly sensitive data | **Nothing reaches cloud AI.** Can only be read by the on-premise model (`CANOPUS_LOCAL_BASE_URL`) or by **direct document search** (no AI, zero tokens). Conversations that have used the local model are locked and cannot move to cloud AI. |
+| **2. Regular collection + masking** | Internal documents, statistics, regulations | Only the relevant passages; NIK/Medical record no./names/addresses/diagnoses (personal-data columns) are replaced with codes such as `⟦NAME_1⟧`. |
+| **3. Refused** | Rahasia / Sangat Rahasia documents | Not stored at all. |
+
+Also note:
+- Data sent through the Claude/OpenAI APIs is not used for training under their commercial terms; *Zero Data Retention* can be requested for an organization account.
+- Under UU 27/2022 (Personal Data Protection), health data is specific personal data. Consult the data protection officer or legal team before using patient data with **cloud** AI. The safest option for patient data is level 1.
+- The test suite (`harness/server-run.mjs`) checks every request to Claude and GPT and **fails** if a patient name, medical record number, diagnosis, NIK or the contents of a local-only collection is found.
+
+### Setting up an on-premise model (optional)
+
+Example with [Ollama](https://ollama.com) on a server with a GPU:
+```bash
+ollama pull <model-name>          # choose an open model that fits your server's capacity
+# in Canopus's .env:
+CANOPUS_LOCAL_BASE_URL=http://<ollama-server-address>:11434/v1
+```
+Then in **Admin → Models → On-premise model**, add the model name exactly as `ollama list` shows it.
 
 ## Installation
 
