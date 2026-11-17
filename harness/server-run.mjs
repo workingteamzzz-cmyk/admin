@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -110,6 +111,18 @@ async function startClaudeEndpoint() {
   await new Promise(r => srv.listen(0, '127.0.0.1', r)); return srv;
 }
 
+/* ---------------- TOTP (same algorithm as authenticator apps) ---------------- */
+function totp(secret, offset = 0) {
+  const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'; let bits = ''; for (const c of secret.replace(/\s/g, '')) bits += B32.indexOf(c).toString(2).padStart(5, '0');
+  const key = Buffer.from(bits.match(/.{8}/g).map(b => parseInt(b, 2))); const msg = Buffer.alloc(8); msg.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000) + offset));
+  const h = crypto.createHmac('sha1', key).update(msg).digest(); const o = h[h.length - 1] & 15; return String(((h.readUInt32BE(o) & 0x7fffffff) % 1e6)).padStart(6, '0');
+}
+const SECRET2FA = {};
+async function enroll2fa(p, who) {
+  await p.waitForSelector('#totpSecret', { timeout: 10000 }); const secret = (await p.textContent('#totpSecret')).replace(/\s/g, ''); SECRET2FA[who] = secret;
+  await p.fill('#tCode', totp(secret)); await p.click('#totpForm button'); await p.waitForSelector('#app:not([hidden])', { timeout: 10000 });
+}
+
 /* ---------------- fixtures ---------------- */
 function pdf(lines) {
   const content = 'BT /F1 18 Tf 72 720 Td 24 TL ' + lines.map(l => `(${l.replace(/[()\\]/g, '\\$&')}) Tj T*`).join(' ') + ' ET';
@@ -133,6 +146,7 @@ async function startCanopus(claudeUrl) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'canopus-data-'));
   const env = { ...process.env, PORT: String(port), HOST: '127.0.0.1', PUBLIC_URL: `http://127.0.0.1:${port}`, DATA_DIR: dataDir, CANOPUS_ADMIN_EMAIL: 'admin@kantor.go.id',
     ANTHROPIC_API_KEY: LIVE ? (process.env.ANTHROPIC_API_KEY || 'proxy-injected') : 'sk-ant-simulated', CANOPUS_ANTHROPIC_BASE_URL: claudeUrl,
+    TRUST_PROXY: 'true', CANOPUS_ALLOWED_IPS: '127.0.0.1,::1,::ffff:127.0.0.1',
     OPENAI_API_KEY: LIVE ? (process.env.OPENAI_API_KEY || '') : 'sk-openai-simulated', CANOPUS_OPENAI_BASE_URL: LIVE ? (process.env.CANOPUS_OPENAI_BASE_URL || claudeUrl + '/oa/v1') : claudeUrl + '/oa/v1', CANOPUS_LOCAL_BASE_URL: claudeUrl + '/local/v1' };
   const proc = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'src/server.mjs'], { cwd: SERVER_DIR, env });
   let log = ''; proc.stdout.on('data', d => log += d); proc.stderr.on('data', d => log += d);
@@ -183,7 +197,7 @@ let inviteB = null;
 try {
   await step(A, 'onboard', 'Administrator sets a password from the one-time link', async () => {
     await A.goto(canopus.invite); await A.fill('#iName', 'Admin Satu'); await A.fill('#iPw', 'KataSandi2026'); await A.fill('#iPw2', 'KataSandi2026');
-    await A.click('#invForm button'); await A.waitForSelector('#app:not([hidden])', { timeout: 10000 });
+    await A.click('#invForm button'); await enroll2fa(A, 'admin');
     const reuse = await apiCall(A, '/api/auth/invite?token=' + canopus.invite.split('invite=')[1]);
     return ok(await A.isVisible('#navAdmin') && reuse.status === 404, `admin nav visible; invite link reusable: ${reuse.status !== 404}`);
   });
@@ -292,7 +306,7 @@ try {
   });
   await step(B, 'user-onboard', 'User sets a password and signs in', async () => {
     await B.goto(inviteB); await B.fill('#iName', 'Staf Ekonomi'); await B.fill('#iPw', 'PasswordStaf99'); await B.fill('#iPw2', 'PasswordStaf99'); await B.click('#invForm button');
-    await B.waitForSelector('#app:not([hidden])', { timeout: 10000 }); return ok(!(await B.isVisible('#navAdmin')), 'no admin menu for normal users');
+    await enroll2fa(B, 'staff'); return ok(!(await B.isVisible('#navAdmin')), 'no admin menu for normal users');
   });
   await step(B, 'acl', 'A user cannot retrieve documents outside their groups', async () => {
     const before = recorded.length;
@@ -350,8 +364,27 @@ try {
   await step(B, 'persist', 'Chats are stored on the server (survive reload and other devices)', async () => {
     await B.evaluate(() => window.__canopus.flush()); const n = await B.evaluate(() => window.__canopus.state.chats.length);
     const C = await browser.newContext(); const pc = await C.newPage(); await pc.goto(canopus.url); await pc.fill('#lEmail', 'staf@kantor.go.id'); await pc.fill('#lPw', 'PasswordStaf99'); await pc.click('#loginForm button');
-    await pc.waitForSelector('#app:not([hidden])'); const m = await pc.evaluate(() => window.__canopus.state.chats.length); await C.close();
+    await pc.waitForSelector('#tCode'); await pc.fill('#tCode', totp(SECRET2FA.staff, 1)); await pc.click('#totpForm button'); await pc.waitForSelector('#app:not([hidden])'); const m = await pc.evaluate(() => window.__canopus.state.chats.length); await C.close();
     return ok(n > 0 && n === m, `chats here ${n}, on a second device ${m}`);
+  });
+  await step(null, 'twofa', 'Two-step verification: password alone is not enough; wrong and reused codes are rejected', async () => {
+    const post = (path, body) => fetch(canopus.url + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-canopus': '1' }, body: JSON.stringify(body) });
+    const r1 = await (await post('api/auth/login', { email: 'admin@kantor.go.id', password: 'KataSandi2026' })).json();
+    const wrong = await post('api/auth/totp', { ticket: r1.ticket, code: '000000' });
+    const good = await post('api/auth/totp', { ticket: r1.ticket, code: totp(SECRET2FA.admin, 1) });
+    const r2 = await (await post('api/auth/login', { email: 'admin@kantor.go.id', password: 'KataSandi2026' })).json();
+    const replay = await post('api/auth/totp', { ticket: r2.ticket, code: totp(SECRET2FA.admin, 1) });
+    const cookieOnly = !(r1.user); // password step returns no session
+    return ok(r1.step === 'totp' && cookieOnly && wrong.status === 401 && good.status === 200 && replay.status === 401, `after password: ${r1.step} · wrong code ${wrong.status} · right code ${good.status} · same code reused ${replay.status}`);
+  });
+  await step(null, 'ip-allowlist', 'Requests from outside the allowed networks are refused', async () => {
+    const out = await fetch(canopus.url + 'api/health', { headers: { 'x-forwarded-for': '203.0.113.9' } }); const inside = await fetch(canopus.url + 'api/health');
+    return ok(out.status === 403 && inside.status === 200, `outside ${out.status} · inside ${inside.status}`);
+  });
+  await step(A, 'security-panel', 'Admin security checklist reflects the hardening', async () => {
+    const r = JSON.parse((await apiCall(A, '/api/admin/security')).body); const by = Object.fromEntries(r.checks.map(c => [c.id, c.ok]));
+    await A.goto(canopus.url + '#admin'); await A.click('[data-atab=security]'); await A.waitForTimeout(400);
+    return ok(by['2fa'] && by.ip && by.idle && by.mask, r.checks.map(c => `${c.id}:${c.ok ? 'ok' : 'no'}`).join(' '));
   });
   await step(null, 'throttle', 'Repeated wrong passwords lock the account temporarily', async () => {
     let last; for (let i = 0; i < 6; i++) last = await fetch(canopus.url + 'api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-canopus': '1' }, body: JSON.stringify({ email: 'staf@kantor.go.id', password: 'wrong' + i }) });
@@ -393,7 +426,7 @@ try {
   await step(null, 'no-leaks', 'No sensitive value ever reached a cloud AI provider', async () => ok(cloud().length > 0 && !leaks().length, `${cloud().length} cloud requests inspected (Claude + GPT) · ${recorded.length - cloud().length} on-premise · leaks: ${leaks().length}`));
   await step(A, 'tour', 'Every page renders (screenshots for review)', async () => {
     for (const v of ['home', 'knowledge', 'studio', 'prompts', 'skills']) { await A.goto(canopus.url + '#' + v); if (v === 'home') await A.click('[data-go=home]'); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, `server-page-${v}.png`) }); }
-    await A.goto(canopus.url + '#admin'); for (const t of ['users', 'groups', 'projects', 'knowledge', 'models', 'settings', 'integrations', 'usage', 'audit']) { await A.click(`[data-atab=${t}]`); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, `server-admin-${t}.png`) }); }
+    await A.goto(canopus.url + '#admin'); for (const t of ['security', 'users', 'groups', 'projects', 'knowledge', 'models', 'settings', 'integrations', 'usage', 'audit']) { await A.click(`[data-atab=${t}]`); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, `server-admin-${t}.png`) }); }
     const M = await browser.newContext({ viewport: { width: 390, height: 844 } }); const pm = await M.newPage(); await pm.goto(canopus.url); await pm.waitForTimeout(500); await pm.screenshot({ path: path.join(OUT, 'server-page-mobile-login.png') }); await M.close();
     return ok(!pageErrors.length, pageErrors.join(' | ') || 'no page errors');
   });

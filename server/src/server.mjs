@@ -9,6 +9,7 @@ import { ingestDoc, deleteDoc, deleteCollection, classificationProblem, search }
 import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels } from './ai.mjs';
 import { emit as emitWebhook } from './webhooks.mjs';
 import { bootstrapAdmin } from './cli.mjs';
+import { newTicket, useTicket, dropTicket, twoFactorRequired, newTotpSecret, verifyTotp, otpauthUrl, qrSvg, seal, unseal, ipAllowed, purge } from './security.mjs';
 
 const PUBLIC = path.join(ROOT, 'public');
 const MB = 1024 * 1024;
@@ -48,7 +49,7 @@ function knowledgeFor(user) {
 function mePayload(u) {
   const s = getSettings(); const ms = modelsFor(u, s);
   const groups = userGroups(u.id);
-  return { user: publicUser(u), groups: groups.map(g => ({ id: g.id, name: g.name })),
+  return { user: { ...publicUser(u), twoFactor: !!u.totp_secret }, groups: groups.map(g => ({ id: g.id, name: g.name })),
     config: { models: ms.map(m => ({ id: m.id, label: m.label, d: m.d, provider: m.provider, tier: m.tier, vision: m.vision })), auto: ms.length > 1, defaultModel: s.defaultModel === 'auto' && ms.length > 1 ? 'auto' : (ms.find(m => m.id === s.defaultModel) || ms[0])?.id,
       webSearch: s.webSearch && ms.some(m => m.provider === 'anthropic'), canvas: !!s.canvas, imageUploads: s.imageUploads, redaction: s.redaction.enabled, maxUploadMb: config.maxUploadMb, classifications: CLASSIFICATIONS, categories: CATEGORIES, apiConfigured: ms.length > 0, rateLimits: s.rateLimits },
     budget: { limit: budgetFor(u), spent: +spentThisMonth(u.id).toFixed(4), groups: groups.filter(g => g.budget_usd > 0).map(g => ({ name: g.name, limit: g.budget_usd, spent: +groupSpent(g.id).toFixed(4) })) },
@@ -77,8 +78,35 @@ route('POST', '/api/auth/login', async (req, res) => {
   const u = one(`SELECT * FROM users WHERE email=?`, String(email || '').trim().toLowerCase());
   const ok = u && !u.disabled && await verifyPassword(String(password || ''), u.pw_hash);
   if (!ok) { loginFailed(key); audit(u?.id || null, 'auth.login_failed', { email: String(email).slice(0, 100) }, clientIp(req)); throw new HttpError(401, 'Wrong email or password.'); }
-  loginOk(key); createSession(res, u, req); audit(u.id, 'auth.login', {}, clientIp(req));
+  loginOk(key);
+  const second = await secondStep(u);
+  if (second) { audit(u.id, 'auth.password_ok', { next: second.step }, clientIp(req)); return json(res, 200, second); }
+  createSession(res, u, req); audit(u.id, 'auth.login', {}, clientIp(req));
   json(res, 200, mePayload(u));
+}, { public: true });
+// After a correct password: ask for the authenticator code, or set up the authenticator first.
+async function secondStep(u) {
+  if (u.totp_secret) return { step: 'totp', ticket: newTicket({ userId: u.id, purpose: 'totp' }) };
+  if (!twoFactorRequired(u)) return null;
+  const secret = newTotpSecret(); const url = otpauthUrl(secret, u.email);
+  return { step: 'enroll', ticket: newTicket({ userId: u.id, purpose: 'enroll', secret }), secret, otpauth: url, qr: await qrSvg(url) };
+}
+route('POST', '/api/auth/totp', async (req, res) => {
+  const { ticket, code } = await readJson(req, 5e3); const t = useTicket(ticket);
+  if (!t || t.purpose !== 'totp') throw new HttpError(401, 'Your sign-in expired. Start again with your password.');
+  const u = one(`SELECT * FROM users WHERE id=?`, t.userId); if (!u || u.disabled || !u.totp_secret) throw new HttpError(401, 'Sign-in not possible.');
+  const step = verifyTotp(unseal(u.totp_secret), code, u.totp_last);
+  if (!step) { audit(u.id, 'auth.totp_failed', {}, clientIp(req)); throw new HttpError(401, 'Wrong or expired code. Use the current 6-digit code from your authenticator app.'); }
+  dropTicket(ticket); run(`UPDATE users SET totp_last=? WHERE id=?`, step, u.id);
+  createSession(res, u, req); audit(u.id, 'auth.login', { twoFactor: true }, clientIp(req)); json(res, 200, mePayload(u));
+}, { public: true });
+route('POST', '/api/auth/enroll', async (req, res) => {
+  const { ticket, code } = await readJson(req, 5e3); const t = useTicket(ticket);
+  if (!t || t.purpose !== 'enroll') throw new HttpError(401, 'Your sign-in expired. Start again with your password.');
+  const step = verifyTotp(t.secret, code, 0); if (!step) throw new HttpError(400, 'That code did not match. Make sure the time on your phone is correct and enter the current code.');
+  const u = one(`SELECT * FROM users WHERE id=?`, t.userId); if (!u || u.disabled) throw new HttpError(401, 'Sign-in not possible.');
+  dropTicket(ticket); run(`UPDATE users SET totp_secret=?, totp_last=? WHERE id=?`, seal(t.secret), step, u.id);
+  createSession(res, u, req); audit(u.id, 'auth.totp_enrolled', {}, clientIp(req)); json(res, 200, mePayload(u));
 }, { public: true });
 route('POST', '/api/auth/logout', (req, res, u) => { destroySession(req, res); audit(u.id, 'auth.logout', {}, clientIp(req)); json(res, 200, { ok: true }); });
 route('GET', '/api/auth/invite', (req, res) => {
@@ -91,11 +119,11 @@ route('POST', '/api/auth/accept', async (req, res) => {
   const inv = inviteUser(token); if (!inv) throw new HttpError(404, 'This link is invalid or has expired.');
   const p = passwordProblem(password); if (p) throw new HttpError(400, p);
   const pw = await hashPassword(password);
-  tx(() => { run(`UPDATE users SET pw_hash=?, name=COALESCE(NULLIF(?,''),name) WHERE id=?`, pw, String(name || '').trim().slice(0, 80), inv.user_id); run(`DELETE FROM sessions WHERE user_id=?`, inv.user_id); });
+  tx(() => { run(`UPDATE users SET pw_hash=?, totp_secret=NULL, totp_last=0, name=COALESCE(NULLIF(?,''),name) WHERE id=?`, pw, String(name || '').trim().slice(0, 80), inv.user_id); run(`DELETE FROM sessions WHERE user_id=?`, inv.user_id); });
   consumeInvite(token);
-  const u = one(`SELECT * FROM users WHERE id=?`, inv.user_id);
-  createSession(res, u, req); audit(u.id, 'auth.password_set', {}, clientIp(req));
-  json(res, 200, mePayload(u));
+  const u = one(`SELECT * FROM users WHERE id=?`, inv.user_id); audit(u.id, 'auth.password_set', {}, clientIp(req));
+  const second = await secondStep(u); if (second) return json(res, 200, second);
+  createSession(res, u, req); json(res, 200, mePayload(u));
 }, { public: true });
 
 route('GET', '/api/me', (req, res, u) => json(res, 200, mePayload(u)));
@@ -170,7 +198,7 @@ route('GET', '/api/knowledge/docs/:id/file', (req, res, u, p) => {
 /* ---------- admin ---------- */
 route('GET', '/api/admin/overview', (req, res, u) => {
   requireAdmin(u);
-  const users = all(`SELECT id,email,name,role,disabled,budget_usd,created,last_login, (pw_hash IS NOT NULL) active FROM users ORDER BY created`).map(x => ({ ...x, groups: userGroups(x.id).map(g => g.id), spent: +spentThisMonth(x.id).toFixed(4), budget: budgetFor(x) }));
+  const users = all(`SELECT id,email,name,role,disabled,budget_usd,created,last_login, (pw_hash IS NOT NULL) active, (totp_secret IS NOT NULL) twofa FROM users ORDER BY created`).map(x => ({ ...x, groups: userGroups(x.id).map(g => g.id), spent: +spentThisMonth(x.id).toFixed(4), budget: budgetFor(x) }));
   const s = getSettings(); const webhook = { ...s.webhook, secret: s.webhook.secret ? s.webhook.secret.slice(0, 6) + '…' : '' };
   const groups = all(`SELECT g.*, (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id=g.id) members FROM groups g ORDER BY name`).map(g => ({ ...g, models: g.models ? JSON.parse(g.models) : null, spent: +groupSpent(g.id).toFixed(4) }));
   const tokens = all(`SELECT t.id, t.name, t.prefix, t.scopes, t.created, t.last_used, t.revoked, u2.email FROM api_tokens t JOIN users u2 ON u2.id=t.user_id ORDER BY t.created DESC`).map(t => ({ ...t, scopes: JSON.parse(t.scopes) }));
@@ -196,6 +224,11 @@ route('PATCH', '/api/admin/users/:id', async (req, res, u, p) => {
     if (Array.isArray(b.groups)) setGroups('user_groups', 'user_id', t.id, b.groups);
   });
   audit(u.id, 'admin.user_updated', { user: t.email, changes: Object.keys(b) }, clientIp(req)); json(res, 200, { ok: true });
+});
+route('POST', '/api/admin/users/:id/reset2fa', (req, res, u, p) => {
+  requireAdmin(u); const t = one(`SELECT * FROM users WHERE id=?`, p.id); if (!t) throw new HttpError(404, 'User not found');
+  run(`UPDATE users SET totp_secret=NULL, totp_last=0 WHERE id=?`, t.id); run(`DELETE FROM sessions WHERE user_id=?`, t.id);
+  audit(u.id, 'admin.user_2fa_reset', { user: t.email }, clientIp(req)); json(res, 200, { ok: true });
 });
 route('POST', '/api/admin/users/:id/reset', (req, res, u, p) => {
   requireAdmin(u); const t = one(`SELECT * FROM users WHERE id=?`, p.id); if (!t) throw new HttpError(404, 'User not found');
@@ -251,6 +284,8 @@ route('PUT', '/api/admin/settings', async (req, res, u) => {
   if (b.defaultModel && (b.defaultModel === 'auto' || known.has(b.defaultModel))) s.defaultModel = b.defaultModel;
   if (s.defaultModel !== 'auto' && !s.models.includes(s.defaultModel)) s.defaultModel = 'auto';
   if (b.routing) { s.routing.failover = b.routing.failover !== false; for (const k of Object.keys(CATEGORIES)) if (b.routing.rules?.[k] && known.has(b.routing.rules[k])) s.routing.rules[k] = b.routing.rules[k]; }
+  if (b.security) s.security = { require2fa: ['all', 'admins', 'off'].includes(b.security.require2fa) ? b.security.require2fa : s.security.require2fa,
+    maskingRetentionDays: Math.max(0, Math.min(3650, +b.security.maskingRetentionDays || 0)), logRetentionDays: Math.max(0, Math.min(3650, +b.security.logRetentionDays || 0)) };
   if (b.rateLimits) s.rateLimits = { perMinute: Math.max(0, Math.min(1000, +b.rateLimits.perMinute || 0)), perDay: Math.max(0, Math.min(100000, +b.rateLimits.perDay || 0)) };
   if (b.webhook) { const url = String(b.webhook.url || '').trim(); if (url && !/^https?:\/\//.test(url)) throw new HttpError(400, 'Webhook URL must start with http(s)://');
     s.webhook.url = url; if (Array.isArray(b.webhook.events)) s.webhook.events = b.webhook.events.map(String).slice(0, 20); if (url && !s.webhook.secret) s.webhook.secret = crypto.randomBytes(24).toString('base64url'); }
@@ -295,6 +330,25 @@ route('PUT', '/api/admin/projects/:id', async (req, res, u, prm) => {
   audit(u.id, 'admin.project_updated', { name: p.name }, clientIp(req)); json(res, 200, { ok: true });
 });
 route('DELETE', '/api/admin/projects/:id', (req, res, u, prm) => { requireAdmin(u); const p = one(`SELECT name FROM projects WHERE id=?`, prm.id); run(`DELETE FROM projects WHERE id=?`, prm.id); audit(u.id, 'admin.project_deleted', { name: p?.name }, clientIp(req)); json(res, 200, { ok: true }); });
+route('GET', '/api/admin/security', (req, res, u) => {
+  requireAdmin(u); const s = getSettings();
+  const users = one(`SELECT COUNT(*) n, SUM(totp_secret IS NOT NULL) tf FROM users WHERE disabled=0 AND pw_hash IS NOT NULL`);
+  let dirMode = null; try { dirMode = (fs.statSync(config.dataDir).mode & 0o777).toString(8); } catch {}
+  const checks = [
+    { id: 'https', ok: config.publicUrl.startsWith('https://') && config.cookieSecure, label: 'HTTPS with secure cookies', fix: 'Serve Canopus over HTTPS and set PUBLIC_URL to the https:// address.' },
+    { id: '2fa', ok: s.security.require2fa === 'all', warn: s.security.require2fa === 'admins', label: `Two-step verification required for ${s.security.require2fa === 'all' ? 'everyone' : s.security.require2fa === 'admins' ? 'administrators only' : 'nobody'} (${users.tf || 0} of ${users.n} active users enrolled)`, fix: 'Require two-step verification for everyone below.' },
+    { id: 'ip', ok: config.allowedIps.length > 0, label: config.allowedIps.length ? `Access limited to ${config.allowedIps.join(', ')}` : 'Reachable from any IP address', fix: 'Set CANOPUS_ALLOWED_IPS to your office network / VPN range, or put Canopus behind a VPN.' },
+    { id: 'idle', ok: config.idleMinutes > 0 && config.idleMinutes <= 30, label: `Sign-out after ${config.idleMinutes} minutes of inactivity, ${config.sessionHours} hours at most`, fix: 'Set SESSION_IDLE_MINUTES to 30 or less.' },
+    { id: 'mask', ok: s.redaction.enabled, label: s.redaction.enabled ? 'Personal data is masked before reaching cloud AI' : 'Masking is OFF', fix: 'Turn on masking in Settings.' },
+    { id: 'local', ok: all(`SELECT COUNT(*) c FROM collections WHERE local_only=1`)[0].c > 0 || !s.models.some(m => m.startsWith('openai') || ['prime', 'core', 'swift'].includes(m)), warn: true, label: `${all(`SELECT COUNT(*) c FROM collections WHERE local_only=1`)[0].c} collection(s) kept on this server only${providerReady('local') ? ' · on-premise model connected' : ''}`, fix: 'Mark patient-record collections “On this server only”.' },
+    { id: 'web', ok: !s.webSearch, warn: s.webSearch, label: s.webSearch ? 'Web search is on (search queries go to the search provider)' : 'Web search is off', fix: 'Turn off web search if questions may contain sensitive context.' },
+    { id: 'img', ok: !s.imageUploads, warn: s.imageUploads, label: s.imageUploads ? 'Image uploads allowed (images cannot be masked)' : 'Image uploads blocked', fix: 'Turn off image uploads if screenshots may contain patient data.' },
+    { id: 'budget', ok: s.monthlyBudgetUsd > 0, label: s.monthlyBudgetUsd > 0 ? `Default budget $${s.monthlyBudgetUsd} per user per month` : 'No default budget', fix: 'Set a default monthly budget.' },
+    { id: 'files', ok: dirMode === '700', warn: dirMode !== '700', label: `Data folder permissions: ${dirMode ?? 'unknown'}`, fix: 'Run: chmod 700 on the data folder.' },
+    { id: 'retention', ok: s.security.maskingRetentionDays > 0 && s.security.maskingRetentionDays <= 365, label: `Masking table kept ${s.security.maskingRetentionDays || 'forever'} days · logs ${s.security.logRetentionDays || 'forever'}`, fix: 'Set how long masking data is kept.' },
+  ];
+  json(res, 200, { checks, settings: s.security });
+});
 route('POST', '/api/admin/webhook/test', async (req, res, u) => { requireAdmin(u); const r = await emitWebhook('test', { by: u.email, message: 'Canopus webhook test' }, { force: true }); json(res, 200, r); });
 route('POST', '/api/admin/webhook/rotate', (req, res, u) => { requireAdmin(u); const s = getSettings(); s.webhook.secret = crypto.randomBytes(24).toString('base64url'); saveSettings(s); audit(u.id, 'admin.webhook_secret_rotated', {}, clientIp(req)); json(res, 200, { secret: s.webhook.secret }); });
 route('GET', '/api/admin/webhook/secret', (req, res, u) => { requireAdmin(u); json(res, 200, { secret: getSettings().webhook.secret }); });
@@ -357,6 +411,7 @@ function serveStatic(req, res) {
 const expectedOrigin = new URL(config.publicUrl).origin;
 const server = http.createServer(async (req, res) => {
   baseHeaders(res);
+  if (!ipAllowed(clientIp(req))) { res.writeHead(403, { 'content-type': 'text/plain' }); return res.end('Access from this network is not allowed.'); }
   const url = new URL(req.url, 'http://x');
   try {
     if (!url.pathname.startsWith('/api/')) { if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed'); return serveStatic(req, res); }
@@ -379,6 +434,7 @@ server.requestTimeout = 0; // chat streams can be long; individual reads have th
 server.headersTimeout = 30e3;
 
 bootstrapAdmin();
+purge(); setInterval(purge, 3600e3).unref();
 server.listen(config.port, config.host, () => {
   console.log(`Canopus is running on ${config.publicUrl} (listening on ${config.host}:${config.port})`);
   if (!config.apiKey && !config.openaiKey) console.warn('WARNING: neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set. Chat will not work until one is.');

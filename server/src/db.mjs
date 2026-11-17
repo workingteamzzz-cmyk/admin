@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, des
   collections TEXT NOT NULL DEFAULT '[]', groups TEXT NOT NULL DEFAULT '[]', model TEXT NOT NULL DEFAULT 'auto', created INTEGER NOT NULL, updated INTEGER NOT NULL);
 `);
 // Columns added after the first release.
-for (const sql of [`ALTER TABLE collections ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE docs ADD COLUMN sensitive INTEGER DEFAULT 0`, `ALTER TABLE groups ADD COLUMN budget_usd REAL`, `ALTER TABLE groups ADD COLUMN models TEXT`, `ALTER TABLE usage ADD COLUMN provider TEXT`]) { try { db.exec(sql); } catch {} }
+for (const sql of [`ALTER TABLE users ADD COLUMN totp_secret TEXT`, `ALTER TABLE users ADD COLUMN totp_last INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE sessions ADD COLUMN last_seen INTEGER`, `ALTER TABLE redactions ADD COLUMN created INTEGER`, `ALTER TABLE collections ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE docs ADD COLUMN sensitive INTEGER DEFAULT 0`, `ALTER TABLE groups ADD COLUMN budget_usd REAL`, `ALTER TABLE groups ADD COLUMN models TEXT`, `ALTER TABLE usage ADD COLUMN provider TEXT`]) { try { db.exec(sql); } catch {} }
 
 export const id = () => crypto.randomBytes(9).toString('base64url');
 export const now = () => Date.now();
@@ -59,6 +59,7 @@ export function getSettings() {
   s.routing = { ...DEFAULT_SETTINGS.routing, ...(s.routing || {}), rules: { ...DEFAULT_SETTINGS.routing.rules, ...(s.routing?.rules || {}) } };
   s.rateLimits = { ...DEFAULT_SETTINGS.rateLimits, ...(s.rateLimits || {}) };
   s.webhook = { ...DEFAULT_SETTINGS.webhook, ...(s.webhook || {}) };
+  s.security = { ...DEFAULT_SETTINGS.security, ...(s.security || {}) };
   return s;
 }
 export function saveSettings(s) { run(`INSERT INTO settings(key,json) VALUES('org',?) ON CONFLICT(key) DO UPDATE SET json=excluded.json`, JSON.stringify(s)); }

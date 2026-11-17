@@ -35,6 +35,8 @@ export const config = {
   outboundProxy: env.CANOPUS_OUTBOUND_PROXY || '', // e.g. http://proxy.kantor.go.id:8080
   adminEmail: env.CANOPUS_ADMIN_EMAIL || '',
   sessionHours: +(env.SESSION_HOURS || 12),
+  idleMinutes: +(env.SESSION_IDLE_MINUTES || 30), // sign out after this much inactivity
+  allowedIps: (env.CANOPUS_ALLOWED_IPS || '').split(',').map(s => s.trim()).filter(Boolean), // e.g. 10.0.0.0/8,203.0.113.7
   cookieSecure: bool(env.COOKIE_SECURE, !/^http:\/\/(localhost|127\.0\.0\.1)/.test(env.PUBLIC_URL || 'http://localhost')),
   trustProxy: bool(env.TRUST_PROXY, false),
   maxUploadMb: +(env.MAX_UPLOAD_MB || 25),
@@ -81,12 +83,12 @@ export const DEFAULT_SETTINGS = {
   routing: { rules: { light: 'swift', knowledge: 'core', writing: 'core', analysis: 'prime', visual: 'prime' }, failover: true },
   rateLimits: { perMinute: 15, perDay: 400 },
   webhook: { url: '', secret: '', events: ['budget.warning', 'budget.exhausted', 'group_budget.warning', 'group_budget.exhausted', 'knowledge.upload_refused', 'user.created'] },
-  webSearch: true,
+  webSearch: false, // off by default: search queries leave the server
   canvas: false, // text-first: dashboards/infographics off unless the admin enables them
-  imageUploads: true,
+  imageUploads: false, // off by default: images cannot be masked
   redaction: { enabled: true, terms: [], columns: [] }, // columns: extra spreadsheet column names whose values are always masked
   monthlyBudgetUsd: 10,
   orgSkills: [],
   orgPrompts: [],
-  retentionDays: 0, // 0 = keep audit/usage forever
+  security: { require2fa: 'all', maskingRetentionDays: 90, logRetentionDays: 0 }, // 2FA: all | admins | off
 };

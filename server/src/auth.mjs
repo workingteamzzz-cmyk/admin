@@ -19,7 +19,7 @@ export async function verifyPassword(pw, stored) {
   return got.length === want.length && crypto.timingSafeEqual(got, want);
 }
 export function passwordProblem(pw) {
-  if (typeof pw !== 'string' || pw.length < 10) return 'Password must be at least 10 characters.';
+  if (typeof pw !== 'string' || pw.length < 12) return 'Password must be at least 12 characters.';
   if (pw.length > 200) return 'Password is too long.';
   if (!/[a-zA-Z]/.test(pw) || !/[0-9]/.test(pw)) return 'Use both letters and numbers.';
   return null;
@@ -42,7 +42,7 @@ export function consumeInvite(token) { run(`DELETE FROM invites WHERE token_hash
 /* ---------- sessions ---------- */
 export function createSession(res, user, req) {
   const sid = crypto.randomBytes(32).toString('base64url');
-  run(`INSERT INTO sessions(id_hash,user_id,expires,created,ip,ua) VALUES(?,?,?,?,?,?)`, sha256(sid), user.id, now() + config.sessionHours * 3600e3, now(), clientIp(req), String(req.headers['user-agent'] || '').slice(0, 200));
+  run(`INSERT INTO sessions(id_hash,user_id,expires,created,ip,ua,last_seen) VALUES(?,?,?,?,?,?,?)`, sha256(sid), user.id, now() + config.sessionHours * 3600e3, now(), clientIp(req), String(req.headers['user-agent'] || '').slice(0, 200), now());
   run(`UPDATE users SET last_login=? WHERE id=?`, now(), user.id);
   setCookie(res, sid, config.sessionHours * 3600);
 }
@@ -53,11 +53,11 @@ export function destroySession(req, res) {
 }
 export function sessionUser(req) {
   const sid = readCookie(req); if (!sid) return null;
-  const row = one(`SELECT u.*, s.expires FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=?`, sha256(sid));
-  if (!row || row.expires < now() || row.disabled) return null;
-  // sliding expiry, refreshed at most every 10 minutes
-  const fresh = now() + config.sessionHours * 3600e3;
-  if (fresh - row.expires > 600e3) run(`UPDATE sessions SET expires=? WHERE id_hash=?`, fresh, sha256(sid));
+  const row = one(`SELECT u.*, s.expires, s.last_seen FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=?`, sha256(sid));
+  if (!row || row.disabled) return null;
+  // Absolute lifetime (SESSION_HOURS) and an inactivity timeout (SESSION_IDLE_MINUTES).
+  if (row.expires < now() || (config.idleMinutes > 0 && now() - (row.last_seen || 0) > config.idleMinutes * 60e3)) { run(`DELETE FROM sessions WHERE id_hash=?`, sha256(sid)); return null; }
+  if (now() - (row.last_seen || 0) > 30e3) run(`UPDATE sessions SET last_seen=? WHERE id_hash=?`, now(), sha256(sid));
   return row;
 }
 const COOKIE = config.cookieSecure ? '__Host-canopus' : 'canopus_sid';

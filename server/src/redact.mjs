@@ -31,7 +31,7 @@ export class Redactor {
     if (hit) return hit.token;
     const n = one(`SELECT COUNT(*) c FROM redactions WHERE user_id=? AND chat_id=? AND kind=?`, this.userId, this.chatId, kind).c + 1;
     const token = `${OPEN}${kind}_${n}${CLOSE}`;
-    run(`INSERT INTO redactions(user_id,chat_id,kind,token,value) VALUES(?,?,?,?,?)`, this.userId, this.chatId, kind, token, value);
+    run(`INSERT INTO redactions(user_id,chat_id,kind,token,value,created) VALUES(?,?,?,?,?,?)`, this.userId, this.chatId, kind, token, value, Date.now());
     return token;
   }
   mask(text) {

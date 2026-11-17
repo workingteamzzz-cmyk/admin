@@ -65,6 +65,27 @@ CANOPUS_LOCAL_BASE_URL=http://<ollama-server-address>:11434/v1
 ```
 Then in **Admin → Models → On-premise model**, add the model name exactly as `ollama list` shows it.
 
+## Secure deployment (required for patient data)
+
+**Hosting location**
+- Use a **data center in Indonesia** (the Jakarta region of a large cloud provider, or a local cloud with ISO 27001 certification), or the hospital's own server room. Check with the legal/data protection team against UU 27/2022 (PDP), PP 71/2019 and the electronic medical records rules (Permenkes 24/2022).
+- Remember: the hosting location only covers Canopus and its documents. Calls to Claude/GPT still go to the provider (US). That is why patient data should go in **On this server only** collections.
+
+**Server**
+1. A dedicated VM (not shared hosting), with disk encryption **on** and automatic security updates for the OS.
+2. Firewall: open only port **443** (HTTPS). Close SSH to the internet: reach it through a VPN or bastion host.
+3. Fill in `CANOPUS_ALLOWED_IPS` with the office network/VPN, or put Canopus behind a VPN / zero-trust gateway. Then Canopus can't be opened from outside at all.
+4. HTTPS is required (`PUBLIC_URL=https://…`). Caddy in `docker-compose.yml` sets this up automatically.
+5. **Encrypted** daily backups of the `data/` folder to separate storage, plus regular restore tests.
+6. The cloud account itself: 2FA for every account, as few admins as possible, and alerts for suspicious logins.
+
+**In the app (on by default)**
+- Two-step verification (authenticator app) for every account, a 12-character minimum password, automatic sign-out after 30 minutes of inactivity, a lock after 5 failed sign-ins.
+- Masking of personal data, refusal of Rahasia documents, web search and image uploads **off**, data in `data/` with 700 permissions.
+- The **Admin → Security** page shows which items are already safe and which still need fixing.
+
+**Before go-live**: run `node harness/server-run.mjs` (it must pass with 0 leaks), then do an independent penetration test if possible.
+
 ## Installation
 
 ### Option A — Docker (recommended)

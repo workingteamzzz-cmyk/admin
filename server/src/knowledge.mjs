@@ -44,16 +44,46 @@ function parseDelimited(text, delim) {
   if (cell || row.length) { row.push(cell); rows.push(row); }
   return rows.filter(r => r.some(v => String(v).trim()));
 }
-async function readSheets(buf, filename) {
-  if (/\.xlsx$/i.test(filename)) {
-    const ExcelJS = (await import('exceljs')).default; const wb = new ExcelJS.Workbook(); await wb.xlsx.load(buf);
-    const sheets = [];
-    wb.eachSheet(ws => { const rows = [];
-      ws.eachRow({ includeEmpty: false }, r => { const vals = []; r.eachCell({ includeEmpty: true }, (c, i) => { let v = c.value; if (v instanceof Date) v = v.toISOString().slice(0, 10); else if (v && typeof v === 'object') v = v.text ?? v.result ?? (v.richText ? v.richText.map(t => t.text).join('') : ''); vals[i - 1] = v == null ? '' : String(v); }); rows.push(vals.map(v => v ?? '')); });
-      if (rows.length) sheets.push({ name: ws.name, rows }); });
-    return sheets;
+// Minimal, dependency-light XLSX reader (an .xlsx file is a zip of XML parts). Reads cell values, shared strings
+// and date formats; ignores formulas' logic (uses cached results), styles and charts.
+const XML_ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const unxml = t => String(t).replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (m, e) => e[0] === '#' ? String.fromCodePoint(e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : +e.slice(1)) : XML_ENT[e] ?? m);
+const attr = (tag, name) => tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1];
+function colIndex(ref) { const l = ref.match(/^[A-Z]+/)?.[0] || 'A'; let n = 0; for (const c of l) n = n * 26 + (c.charCodeAt(0) - 64); return n - 1; }
+function excelDate(serial) { const d = new Date(Math.round((serial - 25569) * 864e5)); return isNaN(d) ? String(serial) : d.toISOString().slice(0, 10); }
+async function readXlsx(buf) {
+  const JSZip = (await import('jszip')).default; const zip = await JSZip.loadAsync(buf);
+  const file = async n => { const f = zip.file(n); return f ? f.async('string') : ''; };
+  if (Object.keys(zip.files).length > 2000) throw new Error('Spreadsheet has too many parts');
+  const shared = [...(await file('xl/sharedStrings.xml')).matchAll(/<si>([\s\S]*?)<\/si>/g)].map(m => unxml([...m[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(t => t[1]).join('')));
+  const styles = await file('xl/styles.xml');
+  const customFmt = Object.fromEntries([...styles.matchAll(/<numFmt\s[^>]*>/g)].map(m => [attr(m[0], 'numFmtId'), unxml(attr(m[0], 'formatCode') || '')]));
+  const xfs = (styles.match(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/)?.[1] || '').match(/<xf\s[^>]*?\/?>/g) || [];
+  const isDateStyle = xfs.map(x => { const id = +attr(x, 'numFmtId'); return (id >= 14 && id <= 22) || (id >= 45 && id <= 47) || /(^|[^"\\])[dmy]/i.test((customFmt[id] || '').replace(/"[^"]*"/g, '')); });
+  const wb = await file('xl/workbook.xml'); const rels = await file('xl/_rels/workbook.xml.rels');
+  const relTarget = Object.fromEntries([...rels.matchAll(/<Relationship\s[^>]*>/g)].map(m => [attr(m[0], 'Id'), attr(m[0], 'Target')]));
+  const sheets = [];
+  for (const m of wb.matchAll(/<sheet\s[^>]*>/g)) {
+    const name = unxml(attr(m[0], 'name') || 'Sheet'); let target = relTarget[attr(m[0], 'r:id')] || ''; target = target.replace(/^\/?(xl\/)?/, 'xl/');
+    const xml = await file(target); const rows = [];
+    for (const r of xml.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)) {
+      const vals = [];
+      for (const c of r[1].matchAll(/<c\s([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+        const a = ' ' + c[1]; const t = attr(a, 't'); const sIdx = +(attr(a, 's') || 0); const inner = c[2] || '';
+        let v = inner.match(/<v>([\s\S]*?)<\/v>/)?.[1];
+        if (t === 's') v = shared[+v] ?? ''; else if (t === 'inlineStr') v = [...inner.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(x => unxml(x[1])).join('');
+        else if (t === 'b') v = v === '1' ? 'TRUE' : 'FALSE'; else if (v != null && t !== 'str' && t !== 'e' && isDateStyle[sIdx] && !isNaN(+v)) v = excelDate(+v); else v = v == null ? '' : unxml(v);
+        vals[colIndex(attr(a, 'r') || 'A')] = String(v);
+      }
+      if (vals.some(x => x && x.trim())) rows.push(Array.from(vals, x => x ?? ''));
+    }
+    if (rows.length) sheets.push({ name, rows });
   }
-  const text = buf.toString('utf8').replace(/^﻿/, '');
+  return sheets;
+}
+async function readSheets(buf, filename) {
+  if (/\.xlsx$/i.test(filename)) return readXlsx(buf);
+  const text = buf.toString('utf8').replace(/^\uFEFF/, '');
   const first = text.split('\n')[0]; const delim = /\.tsv$/i.test(filename) ? '\t' : (first.split(';').length > first.split(',').length ? ';' : ',');
   return [{ name: filename, rows: parseDelimited(text, delim) }];
 }

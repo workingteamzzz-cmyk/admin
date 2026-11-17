@@ -159,7 +159,7 @@ function showLogin(msg=''){
     <button class="btn primary" type="submit">Sign in</button><div class="auth-err" id="authErr">${esc(msg)}</div></form>
     <div class="auth-foot">No account or forgot your password? Ask your administrator for a new invitation link.</div>`);
   $('#loginForm').onsubmit=async e=>{ e.preventDefault(); const b=e.submitter; b.disabled=true; $('#authErr').textContent='';
-    try{ const r=await api('/api/auth/login',{method:'POST', body:{email:$('#lEmail').value, password:$('#lPw').value}}); await start(r); }
+    try{ const r=await api('/api/auth/login',{method:'POST', body:{email:$('#lEmail').value, password:$('#lPw').value}}); await afterPassword(r); }
     catch(err){ $('#authErr').textContent=err.message; b.disabled=false; } };
 }
 async function showInvite(token){
@@ -169,12 +169,25 @@ async function showInvite(token){
     <label for="iPw">New password</label><input id="iPw" type="password" autocomplete="new-password" minlength="10" required>
     <label for="iPw2">Repeat password</label><input id="iPw2" type="password" autocomplete="new-password" required>
     <button class="btn primary" type="submit">Continue</button><div class="auth-err" id="authErr"></div></form>
-    <div class="auth-foot">At least 10 characters, with letters and numbers.</div>`);
+    <div class="auth-foot">At least 12 characters, with letters and numbers.</div>`);
   $('#invForm').onsubmit=async e=>{ e.preventDefault(); const b=e.submitter; $('#authErr').textContent='';
     if($('#iPw').value!==$('#iPw2').value){ $('#authErr').textContent='The passwords do not match.'; return; }
     b.disabled=true;
-    try{ const r=await api('/api/auth/accept',{method:'POST', body:{token, name:$('#iName').value, password:$('#iPw').value}}); history.replaceState(null,'',location.pathname); await start(r); }
+    try{ const r=await api('/api/auth/accept',{method:'POST', body:{token, name:$('#iName').value, password:$('#iPw').value}}); history.replaceState(null,'',location.pathname); await afterPassword(r); }
     catch(err){ $('#authErr').textContent=err.message; b.disabled=false; } };
+}
+// Second sign-in step: a 6-digit code from an authenticator app (Google Authenticator, Microsoft Authenticator, …).
+async function afterPassword(r){
+  if(!r.step) return start(r);
+  const enroll=r.step==='enroll';
+  authCard(`<h2>${enroll?'Set up two-step verification':'Enter your code'}</h2><p class="s">${enroll?'Required for every account. Scan this code with an authenticator app (Google Authenticator, Microsoft Authenticator, Authy…), then enter the 6-digit code it shows.':'Open your authenticator app and enter the 6-digit code for Canopus.'}</p>
+    ${enroll?`<div style="background:#fff;border-radius:14px;padding:10px;width:200px;margin:0 auto 10px">${r.qr}</div><div class="auth-foot" style="margin:0 0 6px">Can't scan? Enter this key manually:</div><div class="mono" id="totpSecret" style="text-align:center;font-size:13px;word-break:break-all;user-select:all">${esc(r.secret.replace(/(.{4})/g,'$1 ').trim())}</div>`:''}
+    <form id="totpForm"><label for="tCode">6-digit code</label><input id="tCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" pattern="[0-9 ]*" required>
+    <button class="btn primary" type="submit">${enroll?'Turn on and continue':'Verify'}</button><div class="auth-err" id="authErr"></div></form>
+    <div class="auth-foot">${enroll?'Keep your phone safe: you will need this code every time you sign in. Lost your phone? Ask your administrator to reset two-step verification.':'Lost your phone? Ask your administrator to reset two-step verification.'}</div>`);
+  $('#totpForm').onsubmit=async e=>{ e.preventDefault(); const b=e.submitter; b.disabled=true; $('#authErr').textContent='';
+    try{ const me_=await api(enroll?'/api/auth/enroll':'/api/auth/totp',{method:'POST', body:{ticket:r.ticket, code:$('#tCode').value}}); await start(me_); }
+    catch(err){ $('#authErr').textContent=err.message; b.disabled=false; if(err.status===401&&/expired/i.test(err.message)) setTimeout(()=>showLogin(err.message),1500); } };
 }
 async function start(meData){
   me=meData;
@@ -651,23 +664,36 @@ function renderSpace(){
 }
 
 /* ================= Admin console ================= */
-let adminTab='users', admin=null;
+let adminTab='security', admin=null;
 async function loadAdmin(){ admin=await api('/api/admin/overview'); }
 async function renderAdmin(){
   const page=$('#adminPage');
   try{ await loadAdmin(); }catch(e){ page.innerHTML=`<div class="empty-box"><b>Could not load the admin console</b><p>${esc(e.message)}</p></div>`; return; }
-  const tabs=[['users','Users'],['groups','Groups'],['projects','Projects'],['knowledge','Knowledge'],['models','Models'],['settings','Settings'],['integrations','Integrations'],['usage','Usage'],['audit','Audit log']];
+  const tabs=[['security','Security'],['users','Users'],['groups','Groups'],['projects','Projects'],['knowledge','Knowledge'],['models','Models'],['settings','Settings'],['integrations','Integrations'],['usage','Usage'],['audit','Audit log']];
   page.innerHTML=`<div class="page-head"><div><h1><span class="h-ic c-pink"><svg data-ic="shield"></svg></span>Admin</h1><p class="sub">Manage who can use Canopus, what internal knowledge they can reach, the AI models and budgets, and review activity.</p></div></div>
     ${admin.apiConfigured?'':`<div class="notice" style="max-width:none">${ic('key')}<span>No AI provider is configured. Set <b>ANTHROPIC_API_KEY</b> and/or <b>OPENAI_API_KEY</b> in the server's .env file and restart it.</span></div>`}
     <div class="tabs">${tabs.map(([k,l])=>`<button class="tab ${adminTab===k?'on':''}" data-atab="${k}">${l}</button>`).join('')}</div><div id="adminBody" style="margin-top:18px"></div>`;
   hydrateIcons(page);
-  ({users:adminUsers, groups:adminGroups, projects:adminProjects, knowledge:adminKnowledge, models:adminModels, settings:adminSettings, integrations:adminIntegrations, usage:adminUsage, audit:adminAudit}[adminTab])();
+  ({security:adminSecurity, users:adminUsers, groups:adminGroups, projects:adminProjects, knowledge:adminKnowledge, models:adminModels, settings:adminSettings, integrations:adminIntegrations, usage:adminUsage, audit:adminAudit}[adminTab])();
 }
 const groupName=id=>admin.groups.find(g=>g.id===id)?.name||'?';
+async function adminSecurity(){
+  const r=await api('/api/admin/security'); const s=r.settings;
+  const okN=r.checks.filter(c=>c.ok).length;
+  $('#adminBody').innerHTML=`<div class="stat-row"><div class="stat"><small>Security checks passed</small><b>${okN} / ${r.checks.length}</b></div></div>
+    <div class="set-sec"><h3>Checklist</h3><p>What this server enforces right now. Items marked ⚠ are allowed but worth reviewing for patient or hospital data.</p>
+      ${r.checks.map(c=>`<div class="set-row"><div><b>${c.ok?'✅':c.warn?'⚠️':'❌'} ${esc(c.label)}</b>${c.ok?'':`<small>${esc(c.fix)}</small>`}</div></div>`).join('')}</div>
+    <div class="set-sec"><h3>Policies</h3><p>Two-step verification uses an authenticator app (6-digit codes). Masking data maps placeholders back to real values, so it is deleted after the period below.</p>
+      <div class="set-row"><div><b>Require two-step verification</b><small>Applies at the next sign-in.</small></div><select id="sec2fa">${[['all','Everyone (recommended)'],['admins','Administrators only'],['off','Not required']].map(([k,l])=>`<option value="${k}" ${s.require2fa===k?'selected':''}>${l}</option>`).join('')}</select></div>
+      <div class="set-row"><div><b>Delete masking data after (days)</b><small>0 = keep forever. After this, old chats may need to be started fresh.</small></div><input type="number" id="secMask" min="0" value="${s.maskingRetentionDays}" style="width:110px"></div>
+      <div class="set-row"><div><b>Delete audit log and usage after (days)</b><small>0 = keep forever (check your record-keeping rules first).</small></div><input type="number" id="secLogs" min="0" value="${s.logRetentionDays}" style="width:110px"></div>
+      <div class="save-bar"><button class="btn primary" data-act="savesecurity">Save policies</button></div></div>
+    <div class="set-sec"><h3>Server-level protections</h3><p>Set in the server's <span class="mono">.env</span> (restart required): <span class="mono">CANOPUS_ALLOWED_IPS</span> (office network / VPN only), <span class="mono">SESSION_IDLE_MINUTES</span>, <span class="mono">SESSION_HOURS</span>, <span class="mono">PUBLIC_URL</span> (https). See the deployment guide for disk encryption, backups and firewall.</p></div>`;
+}
 function adminUsers(){
   $('#adminBody').innerHTML=`<div class="bar"><div style="flex:1;color:var(--muted)">${admin.users.length} user${admin.users.length===1?'':'s'}</div><button class="cta" data-act="adduser">${ic('plus')}Invite user</button></div>
-    <div class="tblwrap"><table class="tbl"><thead><tr><th>User</th><th>Role</th><th>Groups</th><th class="r">This month</th><th>Status</th><th></th></tr></thead><tbody>
-    ${admin.users.map(u=>`<tr><td><b>${esc(u.name||'—')}</b><div class="muted">${esc(u.email)}</div></td><td>${u.role==='admin'?'<span class="badge gold">Admin</span>':'User'}</td><td>${u.groups.map(g=>`<span class="gchip">${esc(groupName(g))}</span>`).join('')||'<span class="muted">—</span>'}</td><td class="r">${usd(u.spent)}<div class="muted">of ${u.budget>0?usd(u.budget):'unlimited'}</div></td><td>${u.disabled?'<span class="cls error">Disabled</span>':u.active?'<span class="cls biasa">Active</span>':'<span class="cls processing">Invited</span>'}${u.last_login?`<div class="muted">${ago(u.last_login)}</div>`:''}</td>
+    <div class="tblwrap"><table class="tbl"><thead><tr><th>User</th><th>Role</th><th>Groups</th><th class="r">This month</th><th>Status</th><th>2FA</th><th></th></tr></thead><tbody>
+    ${admin.users.map(u=>`<tr><td><b>${esc(u.name||'—')}</b><div class="muted">${esc(u.email)}</div></td><td>${u.role==='admin'?'<span class="badge gold">Admin</span>':'User'}</td><td>${u.groups.map(g=>`<span class="gchip">${esc(groupName(g))}</span>`).join('')||'<span class="muted">—</span>'}</td><td class="r">${usd(u.spent)}<div class="muted">of ${u.budget>0?usd(u.budget):'unlimited'}</div></td><td>${u.disabled?'<span class="cls error">Disabled</span>':u.active?'<span class="cls biasa">Active</span>':'<span class="cls processing">Invited</span>'}${u.last_login?`<div class="muted">${ago(u.last_login)}</div>`:''}</td><td>${u.twofa?'<span class="cls biasa">On</span>':'<span class="muted">—</span>'}</td>
       <td class="r"><button class="icon-btn" data-edituser="${u.id}" title="Edit">${ic('edit')}</button><button class="icon-btn" data-resetuser="${u.id}" title="New sign-in link">${ic('key')}</button></td></tr>`).join('')}</tbody></table></div>`;
 }
 function groupChecks(selected=[]){ return admin.groups.length?`<div class="checks">${admin.groups.map(g=>`<label><input type="checkbox" value="${g.id}" ${selected.includes(g.id)?'checked':''}>${esc(g.name)}</label>`).join('')}</div>`:'<div class="help">No groups yet — create them in the Groups tab.</div>'; }
@@ -679,7 +705,7 @@ function userModal(u){
     <div class="row2"><div><label for="uRole">Role</label><select id="uRole"><option value="user" ${u?.role!=='admin'?'selected':''}>User</option><option value="admin" ${u?.role==='admin'?'selected':''}>Administrator</option></select></div>
     <div><label for="uBudget">Monthly AI budget (USD)</label><input type="text" id="uBudget" value="${u?.budget_usd??''}" placeholder="Default: ${usd(admin.settings.monthlyBudgetUsd)}"></div></div>
     <label>Groups <span style="font-weight:400;color:var(--dim)">— control which knowledge collections they can search</span></label><div id="uGroups">${groupChecks(u?.groups||[])}</div>
-    <div class="dlg-actions">${u?`<button class="btn ${u.disabled?'':'danger'}" data-act="toggleuser" data-uid="${u.id}" data-dis="${u.disabled?0:1}">${u.disabled?'Enable':'Disable'} account</button><span class="grow"></span>`:''}<button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="saveuser" data-uid="${u?.id||''}">${u?'Save':'Create invitation'}</button></div>`,'wide');
+    <div class="dlg-actions">${u?.twofa?`<button class="btn" data-act="reset2fa" data-uid="${u.id}">${ic('key')}Reset 2FA</button>`:''}${u?`<button class="btn ${u.disabled?'':'danger'}" data-act="toggleuser" data-uid="${u.id}" data-dis="${u.disabled?0:1}">${u.disabled?'Enable':'Disable'} account</button><span class="grow"></span>`:''}<button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="saveuser" data-uid="${u?.id||''}">${u?'Save':'Create invitation'}</button></div>`,'wide');
 }
 function showLink(title, link){ modalDone=null; openModal(`<h3>${esc(title)}</h3><p class="s">Copy this one-time link and send it to the user through a trusted internal channel. It expires in 72 hours and can be used once.</p><div class="linkbox"><input type="text" id="linkIn" value="${esc(link)}" readonly><button class="btn primary" data-act="copylink">${ic('copy')}Copy</button></div><div class="dlg-actions"><button class="btn" data-dlg="cancel">Done</button></div>`,'wide'); }
 function adminGroups(){
@@ -815,7 +841,7 @@ async function adminUsage(){
 let auditFilter='';
 async function adminAudit(){
   const rows=await api('/api/admin/audit?limit=300'+(auditFilter?'&action='+auditFilter:''));
-  const label={'auth.login':'Signed in','auth.login_failed':'Failed sign-in','auth.logout':'Signed out','auth.password_set':'Set password','auth.password_changed':'Changed password','knowledge.search':'Knowledge search','knowledge.open':'Opened document','knowledge.upload':'Uploaded document','knowledge.upload_refused':'Upload refused','knowledge.delete':'Deleted document','redaction.applied':'Data masked','admin.user_created':'Invited user','admin.user_updated':'Changed user','admin.user_reset':'New sign-in link','admin.group_created':'Created group','admin.group_deleted':'Deleted group','admin.collection_created':'Created collection','admin.collection_updated':'Changed collection','admin.collection_deleted':'Deleted collection','admin.settings_updated':'Changed settings','admin.group_updated':'Changed group','admin.project_created':'Created project','admin.project_updated':'Changed project','admin.project_deleted':'Deleted project','admin.token_created':'Created API token','admin.token_revoked':'Revoked API token','api.ask':'API question','ai.failover':'Switched AI provider','budget.warning':'Budget 80%','budget.exhausted':'Budget used up','group_budget.warning':'Group budget 80%','group_budget.exhausted':'Group budget used up','webhook.failed':'Webhook failed'};
+  const label={'auth.login':'Signed in','auth.login_failed':'Failed sign-in','auth.totp_failed':'Wrong 2FA code','auth.totp_enrolled':'Set up 2FA','auth.password_ok':'Password accepted','admin.user_2fa_reset':'Reset 2FA','knowledge.direct_search':'Direct search','auth.logout':'Signed out','auth.password_set':'Set password','auth.password_changed':'Changed password','knowledge.search':'Knowledge search','knowledge.open':'Opened document','knowledge.upload':'Uploaded document','knowledge.upload_refused':'Upload refused','knowledge.delete':'Deleted document','redaction.applied':'Data masked','admin.user_created':'Invited user','admin.user_updated':'Changed user','admin.user_reset':'New sign-in link','admin.group_created':'Created group','admin.group_deleted':'Deleted group','admin.collection_created':'Created collection','admin.collection_updated':'Changed collection','admin.collection_deleted':'Deleted collection','admin.settings_updated':'Changed settings','admin.group_updated':'Changed group','admin.project_created':'Created project','admin.project_updated':'Changed project','admin.project_deleted':'Deleted project','admin.token_created':'Created API token','admin.token_revoked':'Revoked API token','api.ask':'API question','ai.failover':'Switched AI provider','budget.warning':'Budget 80%','budget.exhausted':'Budget used up','group_budget.warning':'Group budget 80%','group_budget.exhausted':'Group budget used up','webhook.failed':'Webhook failed'};
   const detail=r=>{ const d=r.detail||{}; if(r.action==='knowledge.search') return `“${esc(d.query)}” → ${d.results?.length||0} passage(s)`; if(d.title) return esc(d.title)+(d.classification?` (${esc(d.classification)})`:''); if(d.user) return esc(d.user); if(d.count) return `${d.count} value(s) masked`; if(d.file) return esc(d.file)+` (${esc(d.classification)})`; return esc(Object.entries(d).map(([k,v])=>`${k}: ${Array.isArray(v)?v.join(', '):v}`).join(' · ')).slice(0,160); };
   $('#adminBody').innerHTML=`<div class="bar"><div class="pills">${[['','All'],['auth','Sign-ins'],['knowledge','Knowledge'],['admin','Admin changes'],['redaction','Masking']].map(([k,l])=>`<button class="pill ${auditFilter===k?'on':''}" data-afilter="${k}">${l}</button>`).join('')}</div></div>
     <div class="tblwrap"><table class="tbl"><thead><tr><th>Time</th><th>User</th><th>Event</th><th>Detail</th><th>IP</th></tr></thead><tbody>${rows.map(r=>`<tr><td class="muted" style="white-space:nowrap">${fmtDT(r.ts)}</td><td>${esc(r.email||'—')}</td><td>${esc(label[r.action]||r.action)}</td><td>${detail(r)}</td><td class="muted">${esc(r.ip||'')}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">No events.</td></tr>'}</tbody></table></div>`;
@@ -833,6 +859,7 @@ function openSettings(){
     <label for="sName">Your name</label><input type="text" id="sName" value="${esc(me.user.name)}">
     <label for="sInstr">Custom instructions</label><textarea id="sInstr" placeholder="Your role, preferred language, tone, formats…">${esc(state.instructions)}</textarea>
     <label>Theme</label><div class="seg"><button type="button" data-settheme="dark" class="${state.theme==='dark'?'on':''}">Dark</button><button type="button" data-settheme="light" class="${state.theme==='light'?'on':''}">Light</button></div>
+    <label>Two-step verification</label><div style="font-size:14px">${me.user.twoFactor?'✅ On (authenticator app)':'Off'}</div>
     <label>AI usage this month</label><div style="font-size:14px">${usd(b.spent)}${b.limit>0?` of ${usd(b.limit)}`:''}</div>${b.limit>0?`<div class="budget"><i style="width:${Math.min(100,b.spent/b.limit*100)}%"></i></div>`:''}
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px"><button class="btn sm" data-act="changepw">${ic('lock')}Change password</button><button class="btn sm" data-act="export">${ic('download')}Export my workspace</button><button class="btn sm danger" data-act="clear">${ic('trash')}Delete all chats</button><button class="btn sm" data-act="logout">${ic('logout')}Sign out</button></div>
     <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="savesettings">Save</button></div>`,'wide');
@@ -998,6 +1025,8 @@ document.addEventListener('click',async e=>{
     case 'clear': if(await confirmBox('Delete all chats?','Every chat will be permanently deleted. Studio, files, prompts and skills are kept.','Delete all')){ running.forEach(s=>s.abort()); state.chats=[]; state.current=null; closePanel(); save(); route(); } break;
     // ---- admin ----
     case 'adduser': userModal(null); break;
+    case 'reset2fa': if(await confirmBox('Reset two-step verification?','The user is signed out and must set up their authenticator again at the next sign-in. Use this only after verifying who is asking.','Reset')){ await api(`/api/admin/users/${t.dataset.uid}/reset2fa`,{method:'POST'}); renderAdmin(); toast('Two-step verification reset'); } break;
+    case 'savesecurity': await api('/api/admin/settings',{method:'PUT', body:{security:{require2fa:$('#sec2fa').value, maskingRetentionDays:+$('#secMask').value||0, logRetentionDays:+$('#secLogs').value||0}}}); await loadAdmin(); adminSecurity(); toast('Policies saved'); break;
     case 'saveuser': { const uid_=t.dataset.uid; const body={name:$('#uName').value.trim(), role:$('#uRole').value, budget_usd:$('#uBudget').value.trim()===''?null:+$('#uBudget').value, groups:checked('#uGroups')};
       if(uid_){ await api('/api/admin/users/'+uid_,{method:'PATCH', body}); closeModal(); renderAdmin(); toast('User updated'); }
       else { body.email=$('#uEmail').value.trim(); const r=await api('/api/admin/users',{method:'POST', body}); await loadAdmin(); renderAdmin(); showLink('Invitation created', r.invite); } break; }
