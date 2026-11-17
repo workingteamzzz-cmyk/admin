@@ -23,6 +23,9 @@ export const config = {
   publicUrl: (env.PUBLIC_URL || `http://localhost:${env.PORT || 8080}`).replace(/\/+$/, ''),
   dataDir: path.resolve(ROOT, env.DATA_DIR || 'data'),
   apiKey: env.ANTHROPIC_API_KEY || '',
+  openaiKey: env.OPENAI_API_KEY || '',
+  // Only for tests or an OpenAI-compatible gateway (e.g. a company proxy). Not the SDK's own OPENAI_BASE_URL.
+  openaiBaseUrl: (env.CANOPUS_OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, ''),
   // Only for tests or a corporate gateway. Deliberately NOT the SDK's own ANTHROPIC_BASE_URL variable,
   // so an unrelated environment setting can never redirect traffic.
   anthropicBaseUrl: env.CANOPUS_ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
@@ -34,11 +37,22 @@ export const config = {
   maxUploadMb: +(env.MAX_UPLOAD_MB || 25),
 };
 
+// Built-in Claude models. OpenAI models are added by the administrator (Admin → Models).
 export const MODELS = {
-  prime: { id: 'prime', label: 'Canopus Prime', api: 'claude-opus-5-5', d: 'Most capable, for complex work', fallback: true, search: 'web_search_20260209' },
-  core: { id: 'core', label: 'Canopus Core', api: 'claude-sonnet-5-5', d: 'Fast and smart for everyday work', fallback: true, search: 'web_search_20260209' },
-  swift: { id: 'swift', label: 'Canopus Swift', api: 'claude-haiku-5-5', d: 'Fastest and most economical', fallback: false, search: 'web_search_20250305' },
+  prime: { id: 'prime', provider: 'anthropic', tier: 'advanced', label: 'Claude Prime', api: 'claude-opus-5-5', d: 'Claude Opus 5.5 · most capable', fallback: true, search: 'web_search_20260209', vision: true },
+  core: { id: 'core', provider: 'anthropic', tier: 'standard', label: 'Claude Core', api: 'claude-sonnet-5-5', d: 'Claude Sonnet 5.5 · fast and smart', fallback: true, search: 'web_search_20260209', vision: true },
+  swift: { id: 'swift', provider: 'anthropic', tier: 'light', label: 'Claude Swift', api: 'claude-haiku-5-5', d: 'Claude Haiku 5.5 · fastest, lowest cost', fallback: false, search: 'web_search_20250305', vision: true },
 };
+export const TIERS = ['light', 'standard', 'advanced'];
+// What the Auto router decides between. The admin maps each category to a model.
+export const CATEGORIES = {
+  light: { label: 'Quick task', d: 'greetings, short translations, rewording, simple factual questions' },
+  knowledge: { label: 'Internal knowledge', d: 'questions about the organization, its programs, policies, data or documents' },
+  writing: { label: 'Writing', d: 'drafting letters, memos, reports, press releases, summaries of attached files' },
+  analysis: { label: 'Deep analysis', d: 'multi-step reasoning, comparisons, policy analysis, planning, long or complex documents' },
+  visual: { label: 'Visual / canvas', d: 'dashboards, infographics, charts, interactive pages, presentations' },
+};
+export const EFFORT_OPENAI = { auto: 'medium', fast: 'low', think: 'high' };
 export const HELPER_MODEL = 'claude-haiku-5-5';
 export const EFFORT = { auto: 'medium', fast: 'low', think: 'high' };
 
@@ -58,7 +72,11 @@ export const CLASSIFICATIONS = {
 
 export const DEFAULT_SETTINGS = {
   models: ['core', 'swift', 'prime'],
-  defaultModel: 'core',
+  defaultModel: 'auto',
+  openaiModels: [], // {id, api, label, tier, vision, reasoning, priceIn, priceOut, priceCached}
+  routing: { rules: { light: 'swift', knowledge: 'core', writing: 'core', analysis: 'prime', visual: 'prime' }, failover: true },
+  rateLimits: { perMinute: 15, perDay: 400 },
+  webhook: { url: '', secret: '', events: ['budget.warning', 'budget.exhausted', 'group_budget.warning', 'group_budget.exhausted', 'knowledge.upload_refused', 'user.created'] },
   webSearch: false,
   imageUploads: true,
   redaction: { enabled: true, terms: [] },

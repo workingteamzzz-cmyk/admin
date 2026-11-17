@@ -32,7 +32,14 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, us
 CREATE TABLE IF NOT EXISTS redactions(user_id TEXT NOT NULL, chat_id TEXT NOT NULL, kind TEXT NOT NULL, token TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id, chat_id, value));
 CREATE INDEX IF NOT EXISTS redactions_token ON redactions(user_id, chat_id, token);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, prefix TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scopes TEXT NOT NULL, created INTEGER NOT NULL, created_by TEXT, last_used INTEGER, revoked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS chat_requests(user_id TEXT NOT NULL, ts INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS chat_requests_user_ts ON chat_requests(user_id, ts);
+CREATE TABLE IF NOT EXISTS notices(key TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 `);
+// Columns added after the first release.
+for (const sql of [`ALTER TABLE groups ADD COLUMN budget_usd REAL`, `ALTER TABLE groups ADD COLUMN models TEXT`, `ALTER TABLE usage ADD COLUMN provider TEXT`]) { try { db.exec(sql); } catch {} }
 
 export const id = () => crypto.randomBytes(9).toString('base64url');
 export const now = () => Date.now();
@@ -46,6 +53,9 @@ export function getSettings() {
   const row = one(`SELECT json FROM settings WHERE key='org'`);
   const s = { ...structuredClone(DEFAULT_SETTINGS), ...(row ? JSON.parse(row.json) : {}) };
   s.redaction = { ...DEFAULT_SETTINGS.redaction, ...(s.redaction || {}) };
+  s.routing = { ...DEFAULT_SETTINGS.routing, ...(s.routing || {}), rules: { ...DEFAULT_SETTINGS.routing.rules, ...(s.routing?.rules || {}) } };
+  s.rateLimits = { ...DEFAULT_SETTINGS.rateLimits, ...(s.rateLimits || {}) };
+  s.webhook = { ...DEFAULT_SETTINGS.webhook, ...(s.webhook || {}) };
   return s;
 }
 export function saveSettings(s) { run(`INSERT INTO settings(key,json) VALUES('org',?) ON CONFLICT(key) DO UPDATE SET json=excluded.json`, JSON.stringify(s)); }
@@ -58,7 +68,8 @@ export function monthStart(d = new Date()) { return new Date(d.getFullYear(), d.
 export function spentThisMonth(userId) { return one(`SELECT COALESCE(SUM(cost),0) c FROM usage WHERE user_id=? AND ts>=?`, userId, monthStart()).c; }
 export function budgetFor(user) { return user.budget_usd ?? getSettings().monthlyBudgetUsd; }
 
-export function userGroups(userId) { return all(`SELECT g.id, g.name FROM groups g JOIN user_groups ug ON ug.group_id=g.id WHERE ug.user_id=?`, userId); }
+export function userGroups(userId) { return all(`SELECT g.id, g.name, g.budget_usd, g.models FROM groups g JOIN user_groups ug ON ug.group_id=g.id WHERE ug.user_id=?`, userId); }
+export function groupSpent(groupId) { return one(`SELECT COALESCE(SUM(us.cost),0) c FROM usage us JOIN user_groups ug ON ug.user_id=us.user_id WHERE ug.group_id=? AND us.ts>=?`, groupId, monthStart()).c; }
 
 // Collections a user may read: admins see all; otherwise collections with no group restriction, or sharing a group with the user.
 export function allowedCollections(user) {

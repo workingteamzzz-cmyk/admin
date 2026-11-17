@@ -1,11 +1,13 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { config, ROOT, MODELS, CLASSIFICATIONS } from './config.mjs';
-import { db, one, all, run, id, now, tx, getSettings, saveSettings, audit, userGroups, allowedCollections, spentThisMonth, budgetFor, monthStart } from './db.mjs';
+import crypto from 'node:crypto';
+import { config, ROOT, MODELS, CLASSIFICATIONS, CATEGORIES, TIERS } from './config.mjs';
+import { db, one, all, run, id, now, tx, sha256, getSettings, saveSettings, audit, userGroups, groupSpent, allowedCollections, spentThisMonth, budgetFor, monthStart } from './db.mjs';
 import { hashPassword, verifyPassword, passwordProblem, createInvite, inviteUser, consumeInvite, createSession, destroySession, sessionUser, clientIp, loginBlocked, loginFailed, loginOk, createUser, publicUser } from './auth.mjs';
 import { ingestDoc, deleteDoc, deleteCollection, classificationProblem } from './knowledge.mjs';
-import { chat, quick } from './claude.mjs';
+import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels } from './ai.mjs';
+import { emit as emitWebhook } from './webhooks.mjs';
 import { bootstrapAdmin } from './cli.mjs';
 
 const PUBLIC = path.join(ROOT, 'public');
@@ -44,10 +46,12 @@ function knowledgeFor(user) {
     docs: all(`SELECT id,title,filename,size,classification,status,error,chunks,pages,created FROM docs WHERE collection_id=? ORDER BY created DESC`, c.id) }));
 }
 function mePayload(u) {
-  const s = getSettings();
-  return { user: publicUser(u), groups: userGroups(u.id),
-    config: { models: s.models.filter(m => MODELS[m]).map(m => ({ id: m, label: MODELS[m].label, d: MODELS[m].d })), defaultModel: s.defaultModel, webSearch: s.webSearch, imageUploads: s.imageUploads, redaction: s.redaction.enabled, maxUploadMb: config.maxUploadMb, classifications: CLASSIFICATIONS, apiConfigured: !!config.apiKey },
-    budget: { limit: budgetFor(u), spent: +spentThisMonth(u.id).toFixed(4) },
+  const s = getSettings(); const ms = modelsFor(u, s);
+  const groups = userGroups(u.id);
+  return { user: publicUser(u), groups: groups.map(g => ({ id: g.id, name: g.name })),
+    config: { models: ms.map(m => ({ id: m.id, label: m.label, d: m.d, provider: m.provider, tier: m.tier, vision: m.vision })), auto: ms.length > 1, defaultModel: s.defaultModel === 'auto' && ms.length > 1 ? 'auto' : (ms.find(m => m.id === s.defaultModel) || ms[0])?.id,
+      webSearch: s.webSearch && ms.some(m => m.provider === 'anthropic'), imageUploads: s.imageUploads, redaction: s.redaction.enabled, maxUploadMb: config.maxUploadMb, classifications: CLASSIFICATIONS, categories: CATEGORIES, apiConfigured: ms.length > 0, rateLimits: s.rateLimits },
+    budget: { limit: budgetFor(u), spent: +spentThisMonth(u.id).toFixed(4), groups: groups.filter(g => g.budget_usd > 0).map(g => ({ name: g.name, limit: g.budget_usd, spent: +groupSpent(g.id).toFixed(4) })) },
     orgSkills: s.orgSkills.filter(k => k.enabled !== false).map(({ id, name, description }) => ({ id, name, description })),
     orgPrompts: s.orgPrompts };
 }
@@ -63,7 +67,7 @@ function blobKind(name, mime) {
 const routes = [];
 const route = (method, pattern, handler, opts = {}) => routes.push({ method, re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), handler, ...opts });
 
-route('GET', '/api/health', (req, res) => json(res, 200, { ok: true, apiConfigured: !!config.apiKey }), { public: true });
+route('GET', '/api/health', (req, res) => json(res, 200, { ok: true, anthropic: providerReady('anthropic'), openai: providerReady('openai') }), { public: true });
 
 route('POST', '/api/auth/login', async (req, res) => {
   const { email, password } = await readJson(req, 10e3);
@@ -132,7 +136,13 @@ route('DELETE', '/api/blobs/:id', (req, res, u, p) => {
   fs.rmSync(path.join(config.dataDir, 'blobs', u.id, b.id), { force: true }); run(`DELETE FROM blobs WHERE id=?`, b.id); json(res, 200, { ok: true });
 });
 
-route('POST', '/api/chat', async (req, res, u) => { const body = await readJson(req, 8 * MB); await chat(req, res, u, body, clientIp(req)); });
+route('POST', '/api/chat', async (req, res, u) => {
+  const body = await readJson(req, 8 * MB);
+  res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' });
+  const ac = new AbortController(); res.on('close', () => { if (!res.writableFinished) ac.abort(); });
+  await converse(u, body, ev => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(ev)}\n\n`); }, ac.signal, clientIp(req));
+  res.end();
+});
 route('POST', '/api/quick', async (req, res, u) => {
   const { purpose, text, chatId } = await readJson(req, 100e3);
   if (!['title', 'enhance'].includes(purpose)) throw new HttpError(400, 'Unknown purpose');
@@ -153,13 +163,16 @@ route('GET', '/api/knowledge/docs/:id/file', (req, res, u, p) => {
 route('GET', '/api/admin/overview', (req, res, u) => {
   requireAdmin(u);
   const users = all(`SELECT id,email,name,role,disabled,budget_usd,created,last_login, (pw_hash IS NOT NULL) active FROM users ORDER BY created`).map(x => ({ ...x, groups: userGroups(x.id).map(g => g.id), spent: +spentThisMonth(x.id).toFixed(4), budget: budgetFor(x) }));
-  json(res, 200, { users, groups: all(`SELECT g.*, (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id=g.id) members FROM groups g ORDER BY name`), collections: knowledgeFor(u), settings: getSettings(), classifications: CLASSIFICATIONS, models: MODELS, apiConfigured: !!config.apiKey });
+  const s = getSettings(); const webhook = { ...s.webhook, secret: s.webhook.secret ? s.webhook.secret.slice(0, 6) + '…' : '' };
+  const groups = all(`SELECT g.*, (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id=g.id) members FROM groups g ORDER BY name`).map(g => ({ ...g, models: g.models ? JSON.parse(g.models) : null, spent: +groupSpent(g.id).toFixed(4) }));
+  const tokens = all(`SELECT t.id, t.name, t.prefix, t.scopes, t.created, t.last_used, t.revoked, u2.email FROM api_tokens t JOIN users u2 ON u2.id=t.user_id ORDER BY t.created DESC`).map(t => ({ ...t, scopes: JSON.parse(t.scopes) }));
+  json(res, 200, { users, groups, collections: knowledgeFor(u), settings: { ...s, webhook }, classifications: CLASSIFICATIONS, categories: CATEGORIES, tiers: TIERS, models: allModels(s), providers: { anthropic: providerReady('anthropic'), openai: providerReady('openai') }, tokens, apiConfigured: providerReady('anthropic') || providerReady('openai') });
 });
 route('POST', '/api/admin/users', async (req, res, u) => {
   requireAdmin(u); const b = await readJson(req, 20e3);
   const nu = createUser({ email: b.email, name: b.name, role: b.role, budget_usd: clampBudget(b.budget_usd) });
   setGroups('user_groups', 'user_id', nu.id, b.groups);
-  const link = createInvite(nu.id); audit(u.id, 'admin.user_created', { user: nu.email, role: nu.role }, clientIp(req));
+  const link = createInvite(nu.id); audit(u.id, 'admin.user_created', { user: nu.email, role: nu.role }, clientIp(req)); emitWebhook('user.created', { user: nu.email, role: nu.role, by: u.email });
   json(res, 200, { id: nu.id, invite: link });
 });
 route('PATCH', '/api/admin/users/:id', async (req, res, u, p) => {
@@ -186,6 +199,13 @@ route('POST', '/api/admin/groups', async (req, res, u) => {
   if (!n) throw new HttpError(400, 'Name required'); if (one(`SELECT 1 FROM groups WHERE name=?`, n)) throw new HttpError(409, 'A group with this name exists');
   const gid = id(); run(`INSERT INTO groups(id,name) VALUES(?,?)`, gid, n); audit(u.id, 'admin.group_created', { name: n }, clientIp(req)); json(res, 200, { id: gid });
 });
+route('PATCH', '/api/admin/groups/:id', async (req, res, u, p) => {
+  requireAdmin(u); const b = await readJson(req, 20e3); if (!one(`SELECT 1 FROM groups WHERE id=?`, p.id)) throw new HttpError(404, 'Group not found');
+  if (b.name !== undefined) run(`UPDATE groups SET name=? WHERE id=?`, String(b.name).trim().slice(0, 60) || 'Group', p.id);
+  if (b.budget_usd !== undefined) run(`UPDATE groups SET budget_usd=? WHERE id=?`, clampBudget(b.budget_usd), p.id);
+  if (b.models !== undefined) run(`UPDATE groups SET models=? WHERE id=?`, Array.isArray(b.models) ? JSON.stringify(b.models.map(String).slice(0, 50)) : null, p.id);
+  audit(u.id, 'admin.group_updated', { id: p.id, changes: Object.keys(b) }, clientIp(req)); json(res, 200, { ok: true });
+});
 route('DELETE', '/api/admin/groups/:id', (req, res, u, p) => { requireAdmin(u); run(`DELETE FROM groups WHERE id=?`, p.id); audit(u.id, 'admin.group_deleted', { id: p.id }, clientIp(req)); json(res, 200, { ok: true }); });
 route('POST', '/api/admin/collections', async (req, res, u) => {
   requireAdmin(u); const b = await readJson(req, 20e3); const n = String(b.name || '').trim().slice(0, 80); if (!n) throw new HttpError(400, 'Name required');
@@ -204,7 +224,7 @@ route('POST', '/api/admin/collections/:id/docs', async (req, res, u, p) => {
   requireAdmin(u);
   const classification = String(req.headers['x-classification'] || '');
   const problem = classificationProblem(classification);
-  if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification }, clientIp(req)); throw new HttpError(422, problem); } // refused before the file is read or stored
+  if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification }, clientIp(req)); emitWebhook('knowledge.upload_refused', { file: fileName(req), classification, by: u.email }); throw new HttpError(422, problem); } // refused before the file is read or stored
   const buf = await readBody(req, config.maxUploadMb * MB);
   const doc = await ingestDoc({ collectionId: p.id, filename: fileName(req), mime: String(req.headers['content-type'] || '').split(';')[0], buf, classification, title: req.headers['x-title'] ? decodeURIComponent(req.headers['x-title']) : null, userId: u.id });
   audit(u.id, 'knowledge.upload', { doc: doc.id, title: doc.title, classification, status: doc.status }, clientIp(req));
@@ -213,9 +233,17 @@ route('POST', '/api/admin/collections/:id/docs', async (req, res, u, p) => {
 route('DELETE', '/api/admin/docs/:id', (req, res, u, p) => { requireAdmin(u); const d = one(`SELECT title FROM docs WHERE id=?`, p.id); deleteDoc(p.id); audit(u.id, 'knowledge.delete', { doc: p.id, title: d?.title }, clientIp(req)); json(res, 200, { ok: true }); });
 route('PUT', '/api/admin/settings', async (req, res, u) => {
   requireAdmin(u); const b = await readJson(req, 500e3); const s = getSettings();
-  if (Array.isArray(b.models)) { const m = b.models.filter(x => MODELS[x]); if (!m.length) throw new HttpError(400, 'Enable at least one model'); s.models = m; }
-  if (b.defaultModel && MODELS[b.defaultModel]) s.defaultModel = b.defaultModel;
-  if (!s.models.includes(s.defaultModel)) s.defaultModel = s.models[0];
+  if (Array.isArray(b.openaiModels)) s.openaiModels = b.openaiModels.slice(0, 30).map(m => ({ id: /^openai:[\w.-]{1,40}$/.test(m.id) ? m.id : 'openai:' + String(m.api || 'model').toLowerCase().replace(/[^\w.-]+/g, '-').slice(0, 40), api: String(m.api || '').trim().slice(0, 80), label: String(m.label || m.api || '').trim().slice(0, 60),
+    tier: TIERS.includes(m.tier) ? m.tier : 'standard', vision: !!m.vision, reasoning: !!m.reasoning, priceIn: Math.max(0, +m.priceIn || 0), priceOut: Math.max(0, +m.priceOut || 0), priceCached: m.priceCached === '' || m.priceCached == null ? '' : Math.max(0, +m.priceCached || 0) })).filter(m => m.api);
+  const known = new Set(allModels(s).map(m => m.id));
+  if (Array.isArray(b.models)) { const m = b.models.filter(x => known.has(x)); if (!m.length) throw new HttpError(400, 'Enable at least one model'); s.models = m; }
+  s.models = s.models.filter(x => known.has(x));
+  if (b.defaultModel && (b.defaultModel === 'auto' || known.has(b.defaultModel))) s.defaultModel = b.defaultModel;
+  if (s.defaultModel !== 'auto' && !s.models.includes(s.defaultModel)) s.defaultModel = 'auto';
+  if (b.routing) { s.routing.failover = b.routing.failover !== false; for (const k of Object.keys(CATEGORIES)) if (b.routing.rules?.[k] && known.has(b.routing.rules[k])) s.routing.rules[k] = b.routing.rules[k]; }
+  if (b.rateLimits) s.rateLimits = { perMinute: Math.max(0, Math.min(1000, +b.rateLimits.perMinute || 0)), perDay: Math.max(0, Math.min(100000, +b.rateLimits.perDay || 0)) };
+  if (b.webhook) { const url = String(b.webhook.url || '').trim(); if (url && !/^https?:\/\//.test(url)) throw new HttpError(400, 'Webhook URL must start with http(s)://');
+    s.webhook.url = url; if (Array.isArray(b.webhook.events)) s.webhook.events = b.webhook.events.map(String).slice(0, 20); if (url && !s.webhook.secret) s.webhook.secret = crypto.randomBytes(24).toString('base64url'); }
   for (const k of ['webSearch', 'imageUploads']) if (typeof b[k] === 'boolean') s[k] = b[k];
   if (b.redaction) s.redaction = { enabled: !!b.redaction.enabled, terms: (b.redaction.terms || []).map(t => String(t).trim()).filter(Boolean).slice(0, 500) };
   if (b.monthlyBudgetUsd !== undefined) s.monthlyBudgetUsd = clampBudget(b.monthlyBudgetUsd) ?? 0;
@@ -238,6 +266,50 @@ route('GET', '/api/admin/audit', (req, res, u) => {
   const rows = all(`SELECT a.ts, a.action, a.detail, a.ip, us.email FROM audit a LEFT JOIN users us ON us.id=a.user_id ${act ? 'WHERE a.action LIKE ?' : ''} ORDER BY a.id DESC LIMIT ?`, ...(act ? [act + '%', lim] : [lim]));
   json(res, 200, rows.map(r => ({ ...r, detail: JSON.parse(r.detail || '{}') })));
 });
+
+route('POST', '/api/admin/webhook/test', async (req, res, u) => { requireAdmin(u); const r = await emitWebhook('test', { by: u.email, message: 'Canopus webhook test' }, { force: true }); json(res, 200, r); });
+route('POST', '/api/admin/webhook/rotate', (req, res, u) => { requireAdmin(u); const s = getSettings(); s.webhook.secret = crypto.randomBytes(24).toString('base64url'); saveSettings(s); audit(u.id, 'admin.webhook_secret_rotated', {}, clientIp(req)); json(res, 200, { secret: s.webhook.secret }); });
+route('GET', '/api/admin/webhook/secret', (req, res, u) => { requireAdmin(u); json(res, 200, { secret: getSettings().webhook.secret }); });
+route('GET', '/api/admin/openai/models', async (req, res, u) => { requireAdmin(u); try { json(res, 200, await listOpenAIModels()); } catch (e) { throw new HttpError(e.status || 502, e.message); } });
+const SCOPES = ['ask', 'knowledge:read', 'knowledge:write'];
+route('POST', '/api/admin/tokens', async (req, res, u) => {
+  requireAdmin(u); const b = await readJson(req, 20e3);
+  const owner = one(`SELECT * FROM users WHERE id=? AND disabled=0`, String(b.user_id || u.id)); if (!owner) throw new HttpError(400, 'Choose an active user for the token to act as');
+  const scopes = (b.scopes || []).filter(x => SCOPES.includes(x)); if (!scopes.length) throw new HttpError(400, 'Choose at least one permission');
+  const token = 'cnp_' + crypto.randomBytes(24).toString('base64url'); const tid = id();
+  run(`INSERT INTO api_tokens(id,name,token_hash,prefix,user_id,scopes,created,created_by) VALUES(?,?,?,?,?,?,?,?)`, tid, String(b.name || 'Integration').slice(0, 60), sha256(token), token.slice(0, 10), owner.id, JSON.stringify(scopes), now(), u.id);
+  audit(u.id, 'admin.token_created', { name: b.name, as: owner.email, scopes }, clientIp(req)); json(res, 200, { id: tid, token });
+});
+route('DELETE', '/api/admin/tokens/:id', (req, res, u, p) => { requireAdmin(u); run(`UPDATE api_tokens SET revoked=1 WHERE id=?`, p.id); audit(u.id, 'admin.token_revoked', { id: p.id }, clientIp(req)); json(res, 200, { ok: true }); });
+
+/* ---------- integration API (n8n, scripts): Authorization: Bearer cnp_… ---------- */
+function tokenUser(req, scope) {
+  const m = String(req.headers.authorization || '').match(/^Bearer\s+(cnp_[\w-]+)$/); if (!m) throw new HttpError(401, 'Missing API token');
+  const t = one(`SELECT * FROM api_tokens WHERE token_hash=? AND revoked=0`, sha256(m[1])); if (!t) throw new HttpError(401, 'Invalid or revoked API token');
+  if (!JSON.parse(t.scopes).includes(scope)) throw new HttpError(403, `This token does not have the “${scope}” permission`);
+  const u = one(`SELECT * FROM users WHERE id=? AND disabled=0`, t.user_id); if (!u) throw new HttpError(403, 'The token’s user is disabled');
+  run(`UPDATE api_tokens SET last_used=? WHERE id=?`, now(), t.id); return { u, t };
+}
+route('POST', '/api/v1/ask', async (req, res) => {
+  const { u, t } = tokenUser(req, 'ask'); const b = await readJson(req, 200e3);
+  const question = String(b.question || '').trim(); if (!question) throw new HttpError(400, 'Provide "question"');
+  const events = []; const ac = new AbortController(); res.on('close', () => { if (!res.writableFinished) ac.abort(); });
+  const r = await converse(u, { chatId: 'api-' + t.id, model: b.model || 'auto', mode: b.mode || 'auto', knowledge: b.knowledge !== false, web: !!b.web, system: { instructions: String(b.instructions || '').slice(0, 8000) }, messages: [{ role: 'user', content: [{ type: 'text', text: question.slice(0, 50000) }] }] }, ev => events.push(ev), ac.signal, clientIp(req));
+  audit(u.id, 'api.ask', { token: t.name, model: r?.model?.id }, clientIp(req));
+  if (r?.error) throw new HttpError(r.code === 'budget' || r.code === 'group_budget' ? 402 : r.code === 'rate' ? 429 : 502, r.error);
+  json(res, 200, { answer: r.display, model: r.model, route: r.route, citations: r.citations.map(c => ({ title: c.title, text: c.text, url: c.url || null })), usage: r.usage });
+}, { public: true, token: true });
+route('GET', '/api/v1/collections', (req, res) => { const { u } = tokenUser(req, 'knowledge:read'); json(res, 200, knowledgeFor(u).map(c => ({ id: c.id, name: c.name, documents: c.docs.map(d => ({ id: d.id, title: d.title, status: d.status, classification: d.classification })) }))); }, { public: true, token: true });
+route('POST', '/api/v1/collections/:id/docs', async (req, res, _u, p) => {
+  const { u, t } = tokenUser(req, 'knowledge:write');
+  if (!allowedCollections(u).some(c => c.id === p.id)) throw new HttpError(404, 'Collection not found');
+  const classification = String(req.headers['x-classification'] || ''); const problem = classificationProblem(classification);
+  if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification, via: t.name }, clientIp(req)); emitWebhook('knowledge.upload_refused', { file: fileName(req), classification, via: t.name }); throw new HttpError(422, problem); }
+  const buf = await readBody(req, config.maxUploadMb * MB);
+  const doc = await ingestDoc({ collectionId: p.id, filename: fileName(req), mime: String(req.headers['content-type'] || '').split(';')[0], buf, classification, title: req.headers['x-title'] ? decodeURIComponent(req.headers['x-title']) : null, userId: u.id });
+  audit(u.id, 'knowledge.upload', { doc: doc.id, title: doc.title, classification, status: doc.status, via: t.name }, clientIp(req));
+  json(res, 200, { id: doc.id, title: doc.title, status: doc.status, error: doc.error, passages: doc.chunks });
+}, { public: true, token: true });
 
 /* ---------- static files ---------- */
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json' };
@@ -262,7 +334,7 @@ const server = http.createServer(async (req, res) => {
     if (!url.pathname.startsWith('/api/')) { if (req.method !== 'GET' && req.method !== 'HEAD') throw new HttpError(405, 'Method not allowed'); return serveStatic(req, res); }
     const r = routes.find(r => r.method === req.method && r.re.test(url.pathname));
     if (!r) throw new HttpError(404, 'Not found');
-    if (req.method !== 'GET') { // CSRF: custom header (forces a CORS preflight we never allow) + same-origin check
+    if (req.method !== 'GET' && !r.token) { // CSRF: custom header (forces a CORS preflight we never allow) + same-origin check
       if (req.headers['x-canopus'] !== '1') throw new HttpError(403, 'Missing request header');
       const origin = req.headers.origin; if (origin && origin !== expectedOrigin && origin !== `http://${req.headers.host}` && origin !== `https://${req.headers.host}`) throw new HttpError(403, 'Cross-origin request blocked');
     }
@@ -281,6 +353,7 @@ server.headersTimeout = 30e3;
 bootstrapAdmin();
 server.listen(config.port, config.host, () => {
   console.log(`Canopus is running on ${config.publicUrl} (listening on ${config.host}:${config.port})`);
-  if (!config.apiKey) console.warn('WARNING: ANTHROPIC_API_KEY is not set. Chat will not work until it is.');
+  if (!config.apiKey && !config.openaiKey) console.warn('WARNING: neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set. Chat will not work until one is.');
+  console.log(`Providers: Anthropic ${config.apiKey ? 'configured' : 'not configured'} · OpenAI ${config.openaiKey ? 'configured' : 'not configured'}`);
 });
 export default server;

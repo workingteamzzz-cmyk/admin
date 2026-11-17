@@ -142,7 +142,7 @@ const isAdmin=()=>me?.user.role==='admin';
 function ftypeOf(name){ const t=FTYPES.find(t=>t.ext&&t.ext.test(name)); return t?t.id:'doc'; }
 const allSkills=()=>[...BUILTIN_SKILLS.map(b=>({...b, enabled:state.skills.find(s=>s.id===b.id)?.enabled ?? false})), ...state.skills.filter(s=>!s.builtin)];
 const allPrompts=()=>[...(me?.orgPrompts||[]).map(p=>({...p, org:true})), ...state.prompts, ...BUILTIN_PROMPTS.filter(b=>!state.prompts.some(p=>p.id===b.id))];
-function currentModel(){ const ms=me?.config.models||[]; return ms.find(m=>m.id===state.model) || ms.find(m=>m.id===me?.config.defaultModel) || ms[0] || null; }
+function currentModel(){ const ms=me?.config.models||[]; return ms.find(m=>m.id===state.model) || ms.find(m=>m.id===me?.config.defaultModel) || ms[0] || null; } // Auto selection UI: in progress
 function downloadText(name,text,type='text/html'){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type})); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000); }
 const safeName=s=>(String(s).replace(/[^\w\- ]+/g,'').trim()||'canopus').slice(0,60);
 document.addEventListener('error', e=>{ if(e.target.tagName==='IMG' && e.target.closest('.src')) e.target.remove(); }, true);
@@ -460,7 +460,7 @@ function historyFor(chat, upto){
   const out=[]; const pre=spaceRefs(chat); let first=true;
   for(const m of chat.msgs.slice(0,upto)){
     if(m.r==='user'){ const content=[...(first?pre:[]), ...(m.refs||[]).map(id=>({type:'blob', id})), ...(m.text?[{type:'text', text:m.text}]:[])]; first=false; if(content.length) out.push({role:'user', content}); }
-    else if(!m.streaming&&m.turn?.length&&m.stop!=='refusal') out.push(...m.turn);
+    else if(!m.streaming&&m.turn?.length&&m.stop!=='refusal') out.push({role:'turn', provider:m.provider||'anthropic', messages:m.turn});
   }
   return out;
 }
@@ -489,7 +489,8 @@ async function respond(chat){
         else if(ev.t==='status') bot.status=ev.d;
         else if(ev.t==='sources') bot.found.push(...ev.d);
         else if(ev.t==='error'){ bot.error=ev.message; }
-        else if(ev.t==='done'){ bot.turn=ev.turn; bot.display=ev.display; bot.citations=ev.citations; bot.usage=ev.usage; bot.stop=ev.stop; }
+        else if(ev.t==='route'){ bot.modelName=ev.model.label; bot.provider=ev.model.provider; bot.route=ev.route; }
+        else if(ev.t==='done'){ bot.provider=ev.provider; bot.turn=ev.turn; bot.display=ev.display; bot.citations=ev.citations; bot.usage=ev.usage; bot.stop=ev.stop; }
         paint(chat, idx);
       }
     }
