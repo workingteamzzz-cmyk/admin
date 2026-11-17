@@ -181,7 +181,7 @@ async function afterPassword(r){
   if(!r.step) return start(r);
   const enroll=r.step==='enroll';
   authCard(`<h2>${enroll?'Set up two-step verification':'Enter your code'}</h2><p class="s">${enroll?'Required for every account. Scan this code with an authenticator app (Google Authenticator, Microsoft Authenticator, Authy…), then enter the 6-digit code it shows.':'Open your authenticator app and enter the 6-digit code for Canopus.'}</p>
-    ${enroll?`<div style="background:#fff;border-radius:14px;padding:10px;width:200px;margin:0 auto 10px">${r.qr}</div><div class="auth-foot" style="margin:0 0 6px">Can't scan? Enter this key manually:</div><div class="mono" id="totpSecret" style="text-align:center;font-size:13px;word-break:break-all;user-select:all">${esc(r.secret.replace(/(.{4})/g,'$1 ').trim())}</div>`:''}
+    ${enroll?`<div class="qrbox">${r.qr}</div><div class="auth-foot" style="margin:0 0 6px">Can't scan? Enter this key manually:</div><div class="mono" id="totpSecret" style="text-align:center;font-size:13px;word-break:break-all;user-select:all">${esc(r.secret.replace(/(.{4})/g,'$1 ').trim())}</div>`:''}
     <form id="totpForm"><label for="tCode">6-digit code</label><input id="tCode" inputmode="numeric" autocomplete="one-time-code" maxlength="7" pattern="[0-9 ]*" required>
     <button class="btn primary" type="submit">${enroll?'Turn on and continue':'Verify'}</button><div class="auth-err" id="authErr"></div></form>
     <div class="auth-foot">${enroll?'Keep your phone safe: you will need this code every time you sign in. Lost your phone? Ask your administrator to reset two-step verification.':'Lost your phone? Ask your administrator to reset two-step verification.'}</div>`);

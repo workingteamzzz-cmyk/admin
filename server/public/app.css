@@ -549,3 +549,5 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 .cls svg{width:12px;height:12px;margin-right:4px}
 .rt td select{background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:6px 8px;color:var(--fg);font-size:13.5px}
 .mono{font-family:var(--mono);font-size:12.5px}
+.qrbox{background:#fff;border-radius:14px;padding:10px;width:210px;height:210px;margin:0 auto 12px}
+.qrbox svg{width:100%!important;height:100%!important;display:block}
