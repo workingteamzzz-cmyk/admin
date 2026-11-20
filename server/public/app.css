@@ -617,3 +617,13 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 .thumb169 .act div{display:grid;grid-template-columns:2fr 1fr 1fr;gap:4px;padding:2px 4px;border-bottom:1px solid #e3e7ee;font-size:8.5px}
 .thumb169 .act div:first-child{color:#fff;font-weight:700;border-radius:3px 3px 0 0}
 .thumb169 .act span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rp-clientbar{display:flex;align-items:center;gap:8px;flex:none;padding-top:8px}
+.rp-clientbar label{margin:0!important}
+.rp-clientbar .vsel{min-width:180px}
+.rp-recipes{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+.rp-group{font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:18px 0 10px}
+.rp-guide{white-space:pre-wrap;font-size:14px;line-height:1.6;background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:8px}
+.rp-clients .card{cursor:pointer}
+.rp-clients .card:hover{border-color:var(--gold)}
+#repPage .doc-row .t{flex:1;min-width:0}
+@media (max-width:820px){ .rp-clientbar{width:100%} .rp-clientbar .vsel{flex:1} }

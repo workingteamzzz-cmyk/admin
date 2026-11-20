@@ -397,16 +397,31 @@ route('POST', '/api/v1/collections/:id/docs', async (req, res, _u, p) => {
 /* ---------- reports: curated spreadsheets and presentations ---------- */
 const sendFile = (res, buf, name, type) => { res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}` }); res.end(buf); };
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', PPTX_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-route('GET', '/api/reports', async (req, res, u) => json(res, 200, { templates: await R.listTemplates(u), datasets: R.listDatasets(u), decks: R.listDecks(u), meta: R.REPORT_META }));
-route('POST', '/api/reports/templates', async (req, res, u) => {
-  const buf = await readBody(req, config.maxUploadMb * MB); const org = req.headers['x-scope'] === 'organization';
-  const t = await R.addTemplate(u, { filename: fileName(req), buf, name: req.headers['x-title'] ? decodeURIComponent(req.headers['x-title']) : null, organization: org });
-  audit(u.id, 'report.template_added', { template: t.id, file: fileName(req), scope: org && u.role === 'admin' ? 'organization' : 'personal' }, clientIp(req)); json(res, 200, t);
+route('GET', '/api/reports', async (req, res, u) => json(res, 200, { clients: R.listClients(), templates: await R.listTemplates(u), datasets: R.listDatasets(u), decks: R.listDecks(u), meta: R.REPORT_META }));
+route('POST', '/api/reports/clients', async (req, res, u) => { const b = await readJson(req, 50e3); const cid = R.saveClient(u, null, b); audit(u.id, 'report.client_created', { client: cid, name: String(b.name).slice(0, 120) }, clientIp(req)); json(res, 200, { id: cid }); });
+route('PUT', '/api/reports/clients/:id', async (req, res, u, p) => { R.saveClient(u, p.id, await readJson(req, 50e3)); json(res, 200, { ok: true }); });
+route('DELETE', '/api/reports/clients/:id', (req, res, u, p) => { const c = R.deleteClient(u, p.id); audit(u.id, 'report.client_deleted', { client: c.id, name: c.name }, clientIp(req)); json(res, 200, { ok: true }); });
+route('POST', '/api/reports/clients/:id/docs', async (req, res, u, p) => { // client knowledge: earlier reports, briefs, guidelines
+  const c = R.listClients().find(x => x.id === p.id); if (!c?.collection_id) throw new HttpError(404, 'Client not found');
+  const classification = String(req.headers['x-classification'] || 'biasa'); const problem = classificationProblem(classification);
+  if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification, client: c.id }, clientIp(req)); throw new HttpError(422, problem); }
+  const buf = await readBody(req, config.maxUploadMb * MB);
+  const doc = await ingestDoc({ collectionId: c.collection_id, filename: fileName(req), mime: String(req.headers['content-type'] || '').split(';')[0], buf, classification, title: null, userId: u.id });
+  audit(u.id, 'knowledge.upload', { doc: doc.id, title: doc.title, classification, status: doc.status, client: c.id }, clientIp(req)); json(res, 200, doc);
 });
+route('POST', '/api/reports/clients/:id/recipes', async (req, res, u, p) => { const rid = R.addRecipe(u, p.id, await readJson(req, 1 * MB)); audit(u.id, 'report.recipe_saved', { client: p.id, recipe: rid }, clientIp(req)); json(res, 200, { id: rid }); });
+route('GET', '/api/reports/recipes/:id', (req, res, u, p) => json(res, 200, R.getRecipe(p.id)));
+route('DELETE', '/api/reports/recipes/:id', (req, res, u, p) => { R.deleteRecipe(u, p.id); json(res, 200, { ok: true }); });
+route('POST', '/api/reports/templates', async (req, res, u) => {
+  const buf = await readBody(req, config.maxUploadMb * MB); const clientId = String(req.headers['x-client'] || '') || null;
+  const t = await R.addTemplate(u, { filename: fileName(req), buf, name: req.headers['x-title'] ? decodeURIComponent(req.headers['x-title']) : null, clientId, personal: req.headers['x-scope'] === 'personal' });
+  audit(u.id, 'report.template_added', { template: t.id, file: fileName(req), client: clientId }, clientIp(req)); json(res, 200, t);
+});
+route('PATCH', '/api/reports/templates/:id', async (req, res, u, p) => { R.updateTemplate(u, p.id, await readJson(req, 10e3)); json(res, 200, { ok: true }); });
 route('DELETE', '/api/reports/templates/:id', (req, res, u, p) => { const t = R.deleteTemplate(u, p.id); audit(u.id, 'report.template_deleted', { template: t.id, name: t.name }, clientIp(req)); json(res, 200, { ok: true }); });
 route('GET', '/api/reports/templates/:id/file', (req, res, u, p) => { const f = R.templateFile(u, p.id); sendFile(res, f.buf, f.name, PPTX_TYPE); });
 route('POST', '/api/reports/datasets', async (req, res, u) => {
-  const buf = await readBody(req, config.maxUploadMb * MB); const d = await R.addDataset(u, { filename: fileName(req), buf });
+  const buf = await readBody(req, config.maxUploadMb * MB); const d = await R.addDataset(u, { filename: fileName(req), buf, clientId: String(req.headers['x-client'] || '') || null });
   audit(u.id, 'report.dataset_added', { dataset: d.id, file: d.filename, rows: d.sheets.reduce((a, s) => a + s.rows, 0) }, clientIp(req)); json(res, 200, d);
 });
 route('GET', '/api/reports/datasets/:id', async (req, res, u, p) => json(res, 200, await R.getDataset(u, p.id)));

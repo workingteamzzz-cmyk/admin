@@ -461,9 +461,19 @@ try {
     await putJson(A, '/api/admin/settings', { canvas: false }); await B.reload(); await B.waitForSelector('#app:not([hidden])');
     return ok(await B.locator('[data-go=studio]').isHidden(), 'Studio hidden for users with no canvases');
   });
+  const TPL = path.join(SERVER_DIR, 'assets', 'default-template.pptx');
+  await step(A, 'report-client', 'Reports: a client folder holds its guidelines, templates and documents (no built-in template)', async () => {
+    await A.goto(canopus.url + '#reports'); await A.waitForSelector('[data-r=newclient]'); const before = JSON.parse((await apiCall(A, '/api/reports')).body);
+    await A.click('[data-r=newclient] >> nth=0'); await A.waitForTimeout(150); await A.fill('#clName', 'Kementerian A'); await A.fill('#clDesc', 'Monitoring bulanan'); await A.fill('#clInstr', 'Gunakan istilah penerima manfaat. Hindari kata gratisan.');
+    await A.click('[data-r=saveclient]'); await A.waitForSelector('[data-r=picktpl]'); await A.setInputFiles('#rpTplFile', TPL); await A.waitForSelector('.rp-tpls .card', { timeout: 10000 });
+    fs.writeFileSync(path.join(FIX, 'brief-klien-a.txt'), 'Brief Kementerian A: fokus pada isu distribusi dan cerita penerima manfaat. Marker brief ALFA-12.');
+    await A.setInputFiles('#rpDocFile', path.join(FIX, 'brief-klien-a.txt')); await A.waitForFunction(() => /brief-klien-a/i.test(document.querySelector('#rpBody')?.textContent || ''), null, { timeout: 10000 });
+    const r = JSON.parse((await apiCall(A, '/api/reports')).body); const c = r.clients.find(x => x.name === 'Kementerian A');
+    return ok(before.templates.length === 0 && c && c.templates === 1 && c.docs === 1 && c.instructions.includes('penerima manfaat') && r.templates[0].clientId === c.id, `templates before: ${before.templates.length} (no built-in) · client templates ${c?.templates} · documents ${c?.docs} · guidelines saved: ${!!c?.instructions}`);
+  });
   await step(A, 'report-curate', 'Reports: AI plans the curation, the server runs it (duplicates, labels, summaries) and exports Excel', async () => {
     const before = recorded.length; await setModel(A, 'auto');
-    await A.goto(canopus.url + '#reports'); await A.waitForSelector('[data-r=pickds]'); await A.setInputFiles('#rpDsFile', F.media); await A.waitForSelector('#rpInstr', { timeout: 10000 });
+    await A.click('[data-r=tab][data-x=data]'); await A.waitForSelector('[data-r=pickds]'); await A.setInputFiles('#rpDsFile', F.media); await A.waitForSelector('#rpInstr', { timeout: 10000 });
     await A.fill('#rpInstr', 'Bersihkan, buang duplikat, beri label sentimen yang kosong dan isu, lalu rekap per media, sentimen dan tren harian.');
     await A.click('[data-r=plan]'); await A.waitForSelector('.rp-step', { timeout: TIMEOUT }); const steps = await A.locator('.rp-step').count();
     await A.click('[data-r=run]'); await A.waitForSelector('[data-r=rtab]', { timeout: TIMEOUT }); await A.waitForTimeout(300);
@@ -473,14 +483,16 @@ try {
     const sent = recorded.slice(before).filter(r => r.kind !== 'local'); const planReq = sent.find(r => /You plan data-curation/.test(r.raw)); const tagReqs = sent.filter(r => /You label texts/.test(r.raw));
     const sentiment = d.result.table.columns.indexOf('Sentimen'); const unlabeled = d.result.table.preview.filter(r => !r[sentiment]).length;
     const x = await A.evaluate(async id => { const r = await fetch(`/api/reports/datasets/${id}/xlsx`); const b = new Uint8Array(await r.arrayBuffer()); return { status: r.status, type: r.headers.get('content-type'), size: b.length, pk: b[0] === 0x50 && b[1] === 0x4b }; }, id);
+    await A.click('[data-r=saverecipe]'); await A.waitForSelector('#askIn'); await A.fill('#askIn', 'Monitoring bulanan'); await A.click('[data-dlg=ok]'); await A.waitForTimeout(500);
+    const recipes = JSON.parse((await apiCall(A, '/api/reports')).body).clients[0].recipeList.length;
     const sheetSkip = d.sheets[0].skipped; const rowsNoRows = planReq && !planReq.raw.includes('/read/7') && !planReq.raw.includes(SECRETS.mediaPhone) ? 'profile only' : 'ROWS SENT';
-    return ok(steps >= 8 && d.result.table.rows === 24 && d.result.summaries.length === 3 && !unlabeled && tagReqs.length >= 2 && x.status === 200 && x.pk && sheetSkip >= 1 && rowsNoRows === 'profile only' && !leaks().length,
-      `plan steps ${steps} · title rows skipped ${sheetSkip} · rows 26 → ${d.result.table.rows} · summaries ${d.result.summaries.map(s => s.name).join(', ')} · unlabeled ${unlabeled} · label requests ${tagReqs.length} · planning saw: ${rowsNoRows} · xlsx ${x.status} ${x.size} B · leaks ${leaks().length}`);
+    return ok(recipes === 1 && d.clientId && steps >= 8 && d.result.table.rows === 24 && d.result.summaries.length === 3 && !unlabeled && tagReqs.length >= 2 && x.status === 200 && x.pk && sheetSkip >= 1 && rowsNoRows === 'profile only' && !leaks().length,
+      `recipe saved: ${recipes} · plan steps ${steps} · title rows skipped ${sheetSkip} · rows 26 → ${d.result.table.rows} · summaries ${d.result.summaries.map(s => s.name).join(', ')} · unlabeled ${unlabeled} · label requests ${tagReqs.length} · planning saw: ${rowsNoRows} · xlsx ${x.status} ${x.size} B · leaks ${leaks().length}`);
   });
   let deckFile = null;
   await step(A, 'report-deck', 'Reports: AI drafts the slides, the server builds a PowerPoint with native charts and tables', async () => {
     const before = recorded.length; await A.click('[data-r=todeck]'); await A.waitForSelector('#rpBrief');
-    await A.fill('#rpBrief', 'Laporan monitoring media mingguan untuk pimpinan, dengan rekomendasi strategi komunikasi.'); await A.click('[data-r=draftdeck]');
+    await A.fill('#rpBrief', 'Laporan monitoring media mingguan untuk pimpinan tentang isu distribusi dan penerima manfaat, dengan rekomendasi strategi komunikasi.'); await A.click('[data-r=draftdeck]');
     await A.waitForSelector('.rp-slide', { timeout: TIMEOUT }); const slides = await A.locator('.rp-slide').count();
     const kid = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.decks[0].id));
     const deck = JSON.parse((await apiCall(A, '/api/reports/decks/' + kid)).body); const unmasked = deck.outline.slides[1].caption.includes(SECRETS.term);
@@ -493,21 +505,31 @@ try {
     const nSlides = files.filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f)).length, nCharts = files.filter(f => /^ppt\/charts\/chart\d+\.xml$/.test(f)).length, nEmb = files.filter(f => /^ppt\/embeddings\/.*\.xlsx$/.test(f)).length;
     const all = (await Promise.all(files.filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f)).map(f => z.file(f).async('string')))).join('');
     const realData = all.includes('Kompas') && all.includes(SECRETS.term) && !all.includes('⟦');
-    const outlineReq = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const sawMasked = outlineReq && !outlineReq.raw.includes(SECRETS.term) && !outlineReq.raw.includes(SECRETS.mediaPhone);
+    const outlineReq = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const sawMasked = outlineReq && !outlineReq.raw.includes(SECRETS.term) && !outlineReq.raw.includes(SECRETS.mediaPhone) && outlineReq.raw.includes('Gunakan istilah penerima manfaat. Hindari kata gratisan.') && outlineReq.raw.includes('ALFA-12');
     let rendered = 'not rendered';
     try { require('child_process').execFileSync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', OUT, deckFile], { timeout: 120000, stdio: 'ignore' }); require('child_process').execFileSync('pdftoppm', ['-r', '50', '-png', path.join(OUT, 'harness-deck.pdf'), path.join(OUT, 'server-deck')], { timeout: 60000 }); rendered = 'rendered with LibreOffice'; } catch {}
-    return ok(twoStage && slides === 10 && nSlides >= 10 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT finalization: ${twoStage} (chart sources kept) · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · AI saw masked term & no phone: ${sawMasked} · ${rendered}`);
+    return ok(twoStage && slides === 10 && nSlides >= 10 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT finalization: ${twoStage} (chart sources kept) · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · AI got client guidelines + client document, masked term, no phone: ${sawMasked} · ${rendered}`);
   });
-  await step(A, 'report-template', 'Reports: an earlier report uploaded as template gives its design and its structure to the next deck', async () => {
-    const before = recorded.length;
-    await A.click('[data-r=backdeck]').catch(() => {}); await A.click('[data-r=tab][data-x=templates]'); await A.waitForSelector('[data-r=picktpl]');
-    await A.setInputFiles('#rpTplFile', deckFile); await A.waitForFunction(() => document.querySelectorAll('.rp-tpls .card').length >= 2, null, { timeout: 10000 });
-    await A.waitForTimeout(300); await A.screenshot({ path: path.join(OUT, 'server-report-templates.png') }); const tpls = JSON.parse((await apiCall(A, '/api/reports')).body).templates; const t = tpls.find(x => !x.builtin);
-    await A.click('[data-r=tab][data-x=decks]'); await A.waitForSelector('#rpBrief'); await A.selectOption('#rpTpl', t.id); await A.check('#rpDs input'); await A.fill('#rpBrief', 'Laporan minggu berikutnya'); await A.click('[data-r=draftdeck]');
-    await A.waitForSelector('.rp-slide', { timeout: TIMEOUT }); const req = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw));
-    const usedStructure = !!req && req.raw.includes('Reference structure') && req.raw.includes('Rekomendasi Strategi Komunikasi');
-    const kid = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.decks[0].id)); const r2 = await A.evaluate(async kid => (await fetch(`/api/reports/decks/${kid}/pptx`)).status, kid);
-    return ok(t && t.scope === 'organization' && t.info.structure.length >= 8 && usedStructure && r2 === 200, `template “${t?.name}” (${t?.scope}) · reference slides ${t?.info.structure.length} · AI followed structure: ${usedStructure} · build ${r2}`);
+  await step(A, 'report-template', 'Reports: client B gets its own template from an earlier report, and can also reuse client A’s template', async () => {
+    const before = recorded.length; await A.click('[data-r=backdeck]').catch(() => {});
+    const b = JSON.parse((await putJson(A, '/api/reports/clients', { name: 'Klien B', instructions: 'Nada santai namun sopan.' }, 'POST')).body); await A.goto(canopus.url + '#reports'); await A.reload(); await A.waitForSelector('#rpClient');
+    await A.selectOption('#rpClient', b.id); await A.click('[data-r=tab][data-x=templates]'); await A.waitForSelector('[data-r=picktpl]');
+    await A.setInputFiles('#rpTplFile', deckFile); await A.waitForSelector('.rp-tpls .card', { timeout: 10000 }); await A.waitForTimeout(300); await A.screenshot({ path: path.join(OUT, 'server-report-templates.png') });
+    const all = JSON.parse((await apiCall(A, '/api/reports')).body); const tB = all.templates.find(x => x.clientId === b.id); const tA = all.templates.find(x => x.clientId && x.clientId !== b.id);
+    await A.click('[data-r=tab][data-x=decks]'); await A.waitForSelector('#rpBrief'); const defaultTpl = await A.inputValue('#rpTpl'); const groups = await A.locator('#rpTpl optgroup').count();
+    await A.fill('#rpBrief', 'Laporan bulan ini untuk Klien B'); await A.click('[data-r=draftdeck]'); await A.waitForSelector('.rp-slide', { timeout: TIMEOUT });
+    const req = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const usedStructure = !!req && req.raw.includes('Reference structure') && req.raw.includes('Rekomendasi Strategi Komunikasi') && req.raw.includes('Nada santai');
+    const dsA = all.datasets[0].id; const cross = await putJson(A, '/api/reports/decks', { client: b.id, template: tA.id, datasets: [dsA], brief: 'Pakai template klien A' }, 'POST'); const kid = JSON.parse(cross.body).id;
+    const built = await A.evaluate(async kid => (await fetch(`/api/reports/decks/${kid}/pptx`)).status, kid);
+    return ok(tB && tB.info.structure.length >= 8 && defaultTpl === tB.id && groups >= 2 && usedStructure && cross.status === 200 && built === 200, `B's template from earlier report: ${tB?.info.structure.length} reference slides · preselected for B: ${defaultTpl === tB?.id} · template groups ${groups} · AI followed B's structure + guidelines: ${usedStructure} · B deck on A's template: ${cross.status}/${built}`);
+  });
+  await step(A, 'report-recipe', 'Reports: next month’s file for client A reuses the saved recipe with no AI planning', async () => {
+    const before = recorded.length; await A.selectOption('#rpClient', (JSON.parse((await apiCall(A, '/api/reports')).body)).clients.find(c => c.name === 'Kementerian A').id);
+    await A.click('[data-r=tab][data-x=data]'); await A.waitForSelector('[data-r=pickds]'); await A.setInputFiles('#rpDsFile', F.media); await A.waitForSelector('[data-r=loadrecipe]', { timeout: 10000 });
+    await A.click('[data-r=loadrecipe]'); await A.waitForSelector('.rp-step'); await A.click('[data-r=run]'); await A.waitForSelector('[data-r=rtab]', { timeout: TIMEOUT });
+    const sent = recorded.slice(before); const plans = sent.filter(r => /You plan data-curation/.test(r.raw)).length, tags = sent.filter(r => /You label texts/.test(r.raw)).length;
+    const id = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.datasets[0].id)); const d = JSON.parse((await apiCall(A, '/api/reports/datasets/' + id)).body);
+    return ok(plans === 0 && tags === 0 && d.result.table.rows === 24 && d.result.summaries.length === 3, `AI planning requests ${plans} · labelling requests ${tags} (labels reused) · rows ${d.result.table.rows} · summaries ${d.result.summaries.length}`);
   });
   await step(A, 'report-ask', 'Reports: “Ask in chat” attaches the curated data (without personal columns) for questions and brainstorming', async () => {
     const before = recorded.length; await A.click('[data-r=tab][data-x=data]'); await A.waitForTimeout(200); if (!(await A.isVisible('[data-r=askds]'))) await A.click('[data-r=opends]'); await A.waitForSelector('[data-r=askds]'); await A.click('[data-r=askds]');
@@ -519,8 +541,8 @@ try {
   await step(B, 'report-isolation', 'Reports: another user cannot open someone else’s datasets or presentations', async () => {
     const ids = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => ({ d: j.datasets[0].id, k: j.decks[0].id })));
     const r1 = await apiCall(B, '/api/reports/datasets/' + ids.d), r2 = await apiCall(B, `/api/reports/decks/${ids.k}/pptx`), r3 = await apiCall(B, `/api/reports/datasets/${ids.d}/xlsx`);
-    const mine = JSON.parse((await apiCall(B, '/api/reports')).body); const orgTpl = mine.templates.some(t => !t.builtin && t.scope === 'organization');
-    return ok([r1.status, r2.status, r3.status].every(s => s === 404) && !mine.datasets.length && orgTpl, `dataset ${r1.status} · deck ${r2.status} · xlsx ${r3.status} · sees org template: ${orgTpl}`);
+    const mine = JSON.parse((await apiCall(B, '/api/reports')).body); const orgTpl = mine.clients.length >= 2 && mine.templates.length >= 2;
+    return ok([r1.status, r2.status, r3.status].every(s => s === 404) && !mine.datasets.length && orgTpl, `dataset ${r1.status} · deck ${r2.status} · xlsx ${r3.status} · sees the team's clients & templates: ${orgTpl}`);
   });
   await step(null, 'no-leaks', 'No sensitive value ever reached a cloud AI provider', async () => ok(cloud().length > 0 && !leaks().length, `${cloud().length} cloud requests inspected (Claude + GPT) · ${recorded.length - cloud().length} on-premise · leaks: ${leaks().length}`));
   await step(A, 'tour', 'Every page renders (screenshots for review)', async () => {

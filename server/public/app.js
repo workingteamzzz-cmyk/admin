@@ -237,7 +237,7 @@ function route(){
 }
 function go(v){ if(location.hash==='#'+v) route(); else location.hash=v; }
 addEventListener('hashchange', ()=>{ if(location.hash.startsWith('#invite=')) return showInvite(location.hash.slice(8)); route(); });
-function renderPage(v=curView()){ ({home:renderHome, knowledge:renderKnowledge, reports:renderReports, studio:renderStudio, sources:renderSources, prompts:renderPrompts, skills:renderSkills, space:renderSpace, admin:renderAdmin}[v]||renderHome)(); }
+function renderPage(v=curView()){ ({home:renderHome, knowledge:renderKnowledge, reports:()=>renderReports(true), studio:renderStudio, sources:renderSources, prompts:renderPrompts, skills:renderSkills, space:renderSpace, admin:renderAdmin}[v]||renderHome)(); }
 
 /* ================= Sidebar ================= */
 function renderSide(){

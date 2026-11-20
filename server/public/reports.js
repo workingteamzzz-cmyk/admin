@@ -1,7 +1,7 @@
 // Canopus Reports: curate spreadsheets and build presentations on the organization's templates.
 // The AI writes plans and slide text; the data work and the files are produced on the server.
 let C; // helpers from app.js
-const S = { tab: 'data', templates: [], datasets: [], decks: [], meta: {}, ds: null, dsResultTab: 0, plan: null, explanation: '', deck: null, sources: [], busy: '', loaded: false };
+const S = { tab: 'clients', client: '', clients: [], clientDocs: null, templates: [], datasets: [], decks: [], meta: {}, ds: null, dsResultTab: 0, plan: null, explanation: '', deck: null, sources: [], busy: '', loaded: false };
 const $ = s => document.querySelector(s);
 const esc = s => C.esc(s), ic = (n, c) => C.ic(n, c);
 const KIND_LABEL = { title: 'Cover', section: 'Section', bullets: 'Points', two: 'Two columns', kpi: 'Key numbers', quote: 'Quote', matrix: '2×2 matrix', actions: 'Action plan', table: 'Table', chart: 'Chart', closing: 'Closing' };
@@ -13,16 +13,31 @@ const DECK_CHIPS = ['Laporan monitoring media mingguan untuk pimpinan', 'Analisi
 export function initReports(ctx) {
   C = ctx;
   document.addEventListener('click', onClick);
-  document.addEventListener('change', e => { if (e.target.id === 'rpDsFile') uploadDataset(e.target.files); if (e.target.id === 'rpTplFile') uploadTemplate(e.target.files); });
+  document.addEventListener('change', async e => { if (e.target.id === 'rpDsFile') uploadDataset(e.target.files); if (e.target.id === 'rpTplFile') uploadTemplate(e.target.files); if (e.target.id === 'rpDocFile') uploadClientDocs(e.target.files);
+    if (e.target.dataset?.tplmove) { try { await C.api('/api/reports/templates/' + e.target.dataset.tplmove, { method: 'PATCH', body: { clientId: e.target.value || null } }); await load(); renderReports(); C.toast('Template moved'); } catch (err) { C.toast(err.message, 4000); } } });
 }
-async function load() { const r = await C.api('/api/reports'); Object.assign(S, { templates: r.templates, datasets: r.datasets, decks: r.decks, meta: r.meta, loaded: true }); }
-export async function renderReports() {
+async function load() { const r = await C.api('/api/reports'); Object.assign(S, { clients: r.clients, templates: r.templates, datasets: r.datasets, decks: r.decks, meta: r.meta });
+  if (!S.loaded) { S.client = prefs().client || ''; if (r.clients.length && !S.client) S.tab = 'clients'; } if (S.client && !S.clients.some(c => c.id === S.client)) S.client = ''; S.loaded = true; }
+const curClient = () => S.clients.find(c => c.id === S.client) || null;
+const inClient = x => !S.client || x.clientId === S.client;
+const clientName = cid => S.clients.find(c => c.id === cid)?.name || '';
+// Template choices grouped by client: the current client's first, then every other client's (any template can be reused).
+function templateOptions(selected) {
+  const groups = new Map(); for (const t of S.templates) { const k = t.clientId || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(t); }
+  const keys = [...groups.keys()].sort((a, b) => (a === S.client ? -1 : b === S.client ? 1 : !a ? 1 : !b ? -1 : clientName(a).localeCompare(clientName(b))));
+  const sel = selected || (S.client && groups.get(S.client)?.[0]?.id) || S.templates[0]?.id || 'plain';
+  return keys.map(k => `<optgroup label="${esc(k ? clientName(k) : 'No client')}">${groups.get(k).map(t => `<option value="${t.id}" ${t.id === sel ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</optgroup>`).join('') + `<option value="plain" ${sel === 'plain' ? 'selected' : ''}>Plain layout (no template)</option>`;
+}
+export async function renderReports(fresh) {
   const page = $('#repPage'); if (!page) return;
+  if (fresh === true && S.loaded) { try { await load(); } catch {} } // opening the page picks up what teammates added
   if (!S.loaded) { page.innerHTML = '<div class="help" style="padding:40px">Loading…</div>'; try { await load(); } catch (e) { page.innerHTML = `<div class="help" style="color:var(--red)">${esc(e.message)}</div>`; return; } }
-  page.innerHTML = `<div class="page-head"><div><h1><span class="h-ic c-orange">${ic('chart')}</span>Reports</h1><p class="sub">Curate spreadsheets (media monitoring, coverage logs, survey results) and turn them into presentations on your organization's template. The AI plans the work and writes the slide text; the data is processed and the files are built on this server.</p></div></div>
-    <div class="tabs">${[['data', 'table', 'Data curation'], ['decks', 'layers', 'Presentations'], ['templates', 'grid', 'Templates']].map(([k, i, l]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-r="tab" data-x="${k}">${ic(i)}${l}</button>`).join('')}</div>
+  page.innerHTML = `<div class="page-head"><div><h1><span class="h-ic c-orange">${ic('chart')}</span>Reports</h1><p class="sub">Your clients' data and templates in one place. Upload a client's spreadsheet and PowerPoint, describe what you need, and Canopus curates the data and builds the deck on that client's template. Data is processed and files are built on this server.</p></div>
+      <div class="rp-clientbar"><label for="rpClient">Client</label><select id="rpClient" class="vsel"><option value="">All clients</option>${S.clients.map(c => `<option value="${c.id}" ${c.id === S.client ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><button class="btn sm" data-r="newclient">${ic('plus')}New client</button></div></div>
+    <div class="tabs">${[['clients', 'users', 'Clients'], ['data', 'table', 'Data curation'], ['decks', 'layers', 'Presentations'], ['templates', 'grid', 'Templates']].map(([k, i, l]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-r="tab" data-x="${k}">${ic(i)}${l}</button>`).join('')}</div>
     <div id="rpBody" style="padding-top:14px"></div>`;
-  ({ data: S.ds ? dsView : dataHome, decks: S.deck ? deckView : deckHome, templates: tplView }[S.tab])();
+  $('#rpClient').onchange = e => { S.client = e.target.value; savePrefs({ client: S.client }); S.ds = null; S.deck = null; S.clientDocs = null; renderReports(); };
+  ({ clients: clientsView, data: S.ds ? dsView : dataHome, decks: S.deck ? deckView : deckHome, templates: tplView }[S.tab])();
   C.hydrateIcons(page);
 }
 const body = html => { $('#rpBody').innerHTML = html; C.hydrateIcons($('#rpBody')); };
@@ -59,18 +74,18 @@ async function download(url) {
 
 /* ================= data curation ================= */
 function dataHome() {
-  body(`<div class="set-sec rp-drop"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:240px"><h3>${ic('upload')}Upload a spreadsheet</h3><p>Excel (.xlsx) or CSV, e.g. a media monitoring log. Canopus finds the header row, then you describe what you need: cleaning, labels, filters, summaries.</p></div>
+  body(`<div class="set-sec rp-drop"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:240px"><h3>${ic('upload')}Upload a spreadsheet${curClient() ? ` for ${esc(curClient().name)}` : ''}</h3><p>Excel (.xlsx) or CSV in whatever format the client uses, e.g. a media monitoring log. Canopus finds the header row, then you describe what you need: cleaning, labels, filters, summaries.</p></div>
     <button class="cta" data-r="pickds">${ic('upload')}Upload Excel / CSV</button><input type="file" id="rpDsFile" accept=".xlsx,.csv,.tsv" hidden></div>
     <p class="help" style="margin-top:12px">${ic('lock')} Privacy: for planning, the AI sees column names, types and common values — not your rows. Labelling sends only the text columns you choose. Columns with ID numbers, phone numbers, e-mail or addresses are never sent.</p></div>
-    ${S.datasets.length ? `<div class="tblwrap"><table class="tbl"><thead><tr><th>Dataset</th><th class="r">Rows</th><th>Status</th><th>Updated</th><th></th></tr></thead><tbody>${S.datasets.map(d => `<tr><td><a href="#" data-r="opends" data-x="${d.id}"><b>${esc(d.name)}</b></a><div class="muted">${esc(d.filename)} · ${C.fmtSize(d.size)}</div></td><td class="r">${(d.result_rows ?? d.rows ?? 0).toLocaleString('id-ID')}</td><td>${d.curated ? '<span class="cls biasa">Curated</span>' : d.planned ? '<span class="cls processing">Plan ready</span>' : '<span class="cls">New</span>'}</td><td class="muted">${C.ago(d.updated)}</td><td class="r"><button class="btn sm" data-r="opends" data-x="${d.id}">Open</button></td></tr>`).join('')}</tbody></table></div>`
+    ${S.datasets.filter(inClient).length ? `<div class="tblwrap"><table class="tbl"><thead><tr><th>Dataset</th><th class="r">Rows</th><th>Status</th><th>Updated</th><th></th></tr></thead><tbody>${S.datasets.filter(inClient).map(d => `<tr><td><a href="#" data-r="opends" data-x="${d.id}"><b>${esc(d.name)}</b></a><div class="muted">${d.clientId ? esc(clientName(d.clientId)) + ' · ' : ''}${esc(d.filename)} · ${C.fmtSize(d.size)}</div></td><td class="r">${(d.result_rows ?? d.rows ?? 0).toLocaleString('id-ID')}</td><td>${d.curated ? '<span class="cls biasa">Curated</span>' : d.planned ? '<span class="cls processing">Plan ready</span>' : '<span class="cls">New</span>'}</td><td class="muted">${C.ago(d.updated)}</td><td class="r"><button class="btn sm" data-r="opends" data-x="${d.id}">Open</button></td></tr>`).join('')}</tbody></table></div>`
       : `<div class="empty-box"><div class="e-ic">${ic('table')}</div><b>No datasets yet</b><p>Upload a monitoring spreadsheet to start.</p></div>`}`);
 }
 async function uploadDataset(files) {
   const f = files?.[0]; if (!f) return; C.toast('Reading ' + f.name + '…');
-  try { const d = await C.api('/api/reports/datasets', { method: 'POST', raw: f, headers: { 'content-type': f.type || 'application/octet-stream', 'x-filename': encodeURIComponent(f.name) } }); S.ds = d; S.plan = null; S.explanation = ''; S.dsResultTab = 0; await load(); renderReports(); }
+  try { const d = await C.api('/api/reports/datasets', { method: 'POST', raw: f, headers: { 'content-type': f.type || 'application/octet-stream', 'x-filename': encodeURIComponent(f.name), 'x-client': S.client } }); S.ds = d; S.plan = null; S.explanation = ''; S.dsResultTab = 0; await load(); renderReports(); }
   catch (e) { C.toast(e.message, 5000); }
 }
-async function openDataset(did) { try { S.ds = await C.api('/api/reports/datasets/' + did); S.plan = S.ds.plan; S.explanation = ''; S.dsResultTab = 0; renderReports(); } catch (e) { C.toast(e.message, 4000); } }
+async function openDataset(did) { try { S.ds = await C.api('/api/reports/datasets/' + did); S.tab = 'data'; S.plan = S.ds.plan; S.explanation = ''; S.dsResultTab = 0; renderReports(); } catch (e) { C.toast(e.message, 4000); } }
 function dsView() {
   const d = S.ds; const sh = d.sheets.find(s => s.name === d.sheet) || d.sheets[0];
   const steps = S.plan?.steps || [];
@@ -87,10 +102,19 @@ function dsView() {
     <div class="set-sec"><div style="display:flex;align-items:center;gap:10px"><h3 style="flex:1;margin:0">${ic('memo')}Plan${steps.length ? ` · ${steps.length} steps` : ''}</h3><button class="btn sm" data-r="addstep">${ic('plus')}Add step</button>${steps.length ? `<button class="btn primary" data-r="run" ${S.busy ? 'disabled' : ''}>${S.busy === 'run' ? spin('Running…') : ic('bolt') + 'Run plan'}</button>` : ''}</div>
       ${S.explanation ? `<div class="notice" style="margin-top:10px">${esc(S.explanation)}</div>` : ''}
       ${steps.length ? `<ol class="rp-steps">${steps.map((s, i) => { const l = d.log?.[i]; return `<li class="rp-step ${s.op === 'ai_tag' ? 'ai' : ''}"><span class="badge">${esc(S.meta.ops?.[s.op] || s.op)}</span><span class="t">${esc(s.text || s.op)}</span>${l && JSON.stringify(stepKey(l)) === JSON.stringify(stepKey(s)) ? (l.ok ? `<small class="ok">${l.before !== l.after ? `${l.before} → ${l.after} rows` : l.changed != null ? `${l.changed} changed` : l.aiRows ? `${l.aiRows} labelled` : '✓'}</small>` : `<small class="bad" title="${esc(l.error)}">skipped</small>`) : ''}<span class="acts"><button class="icon-btn" data-r="upstep" data-x="${i}" title="Move up">↑</button><button class="icon-btn" data-r="editstep" data-x="${i}" title="Edit">${ic('edit')}</button><button class="icon-btn" data-r="rmstep" data-x="${i}" title="Remove">${ic('trash')}</button></span></li>`; }).join('')}</ol>`
-        : `<p class="help">Describe what you need above and press <b>Draft a plan</b>, or add steps yourself — this works entirely without AI.</p>`}</div>
+        : `<p class="help">Describe what you need above and press <b>Draft a plan</b>, load a saved recipe, or add steps yourself — recipes and manual steps use no AI planning.</p>`}
+      ${recipeBar(d)}</div>
     ${d.result ? resultHTML(d) : ''}`);
 }
 const stepKey = x => x.text;
+// Saved recipes: a client's curation plan, reused on next month's file without asking the AI again.
+function recipeBar(d) {
+  const cid = d.clientId || S.client; const mine = S.clients.find(c => c.id === cid)?.recipeList || [];
+  const others = S.clients.filter(c => c.id !== cid).flatMap(c => c.recipeList.map(r => ({ ...r, client: c.name })));
+  const opts = [...mine.map(r => `<option value="${r.id}">${esc(r.name)}</option>`), ...(others.length ? [`<optgroup label="Other clients">${others.map(r => `<option value="${r.id}">${esc(r.client)} · ${esc(r.name)}</option>`).join('')}</optgroup>`] : [])].join('');
+  return `<div class="rp-recipes">${opts ? `<select id="rpRecipe" class="vsel">${opts}</select><button class="btn sm" data-r="loadrecipe">${ic('refresh')}Load recipe</button>` : '<span class="help" style="margin:0">No saved recipes yet.</span>'}
+    ${S.plan?.steps?.length ? `<button class="btn sm" data-r="saverecipe">${ic('archive')}Save plan as recipe${cid ? ` for ${esc(clientName(cid))}` : ''}</button>` : ''}</div>`;
+}
 function resultHTML(d) {
   const tabs = [{ name: `Data (${d.result.table.rows.toLocaleString('id-ID')} rows)`, columns: d.result.table.columns, rows: d.result.table.preview }, ...d.result.summaries.map(s => ({ name: s.name, columns: s.columns, rows: s.rows }))];
   const cur = tabs[Math.min(S.dsResultTab, tabs.length - 1)]; const failed = (d.log || []).filter(l => !l.ok);
@@ -119,20 +143,20 @@ function stepModal(i) {
 
 /* ================= presentations ================= */
 function deckHome() {
-  const curated = S.datasets.filter(d => d.curated);
-  body(`<div class="set-sec"><h3>${ic('sparkle')}New presentation</h3>
+  const curated = S.datasets.filter(d => d.curated && inClient(d));
+  body(`<div class="set-sec"><h3>${ic('sparkle')}New presentation${curClient() ? ` for ${esc(curClient().name)}` : ''}</h3>${curClient()?.instructions ? `<p class="help">${ic('check')} ${esc(curClient().name)}'s guidelines are applied automatically.</p>` : ''}
     <div class="row2"><div><label for="rpTitle">Title</label><input type="text" id="rpTitle" placeholder="e.g. Laporan Monitoring Media 1–14 November 2026"></div>
-      <div><label for="rpTpl">Template</label><select id="rpTpl" class="vsel" style="width:100%">${S.templates.map(t => `<option value="${t.id}">${esc(t.name)}${t.scope === 'personal' ? ' (mine)' : ''}</option>`).join('')}</select></div></div>
+      <div><label for="rpTpl">Template — any client's template can be used</label><select id="rpTpl" class="vsel" style="width:100%">${templateOptions()}</select></div></div>
     <label>Data to use</label>${curated.length ? `<div class="checks" id="rpDs">${curated.map(d => `<label><input type="checkbox" value="${d.id}" ${S.prefDs === d.id ? 'checked' : ''}>${esc(d.name)} <span class="muted">(${(d.result_rows || 0).toLocaleString('id-ID')} rows)</span></label>`).join('')}</div>` : `<p class="help">No curated datasets yet — curate one in <a href="#" data-r="tab" data-x="data">Data curation</a>, or write the presentation from your brief alone.</p>`}
     <label for="rpBrief">Brief</label><textarea id="rpBrief" rows="4" placeholder="Who is it for, what period, what should it emphasize? e.g. Laporan mingguan untuk Kepala Biro: sorot isu keterlambatan distribusi dan beri 3 rekomendasi strategi komunikasi."></textarea>
     <div class="chips" style="margin:8px 0 12px">${DECK_CHIPS.map((c, i) => `<button class="chip" data-r="kchip" data-x="${i}">${esc(c)}</button>`).join('')}</div>
     ${stageSelects()}
-    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px"><label class="help" style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rpKnow"> Also use internal knowledge</label><button class="btn primary" data-r="draftdeck" ${S.busy ? 'disabled' : ''}>${S.busy === 'deck' ? spin('Writing slides… (up to a minute)') : ic('sparkle') + 'Draft slides'}</button></div>
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px"><label class="help" style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rpKnow" ${curClient()?.docs ? 'checked' : ''}> ${curClient() ? `Use ${esc(curClient().name)}'s documents` : 'Also use internal knowledge'}</label><button class="btn primary" data-r="draftdeck" ${S.busy ? 'disabled' : ''}>${S.busy === 'deck' ? spin('Writing slides… (up to a minute)') : ic('sparkle') + 'Draft slides'}</button></div>
     <p class="help">The analysis model receives the summary tables and a sample of the data's text columns (personal-data columns left out), chooses the charts and writes the insights; the finalization model polishes the wording and checks the numbers but cannot change which data a chart or table shows. Charts and tables are filled from the real data on this server.</p></div>
-    ${S.decks.length ? `<div class="tblwrap"><table class="tbl"><thead><tr><th>Presentation</th><th class="r">Slides</th><th>Updated</th><th></th></tr></thead><tbody>${S.decks.map(k => `<tr><td><a href="#" data-r="opendeck" data-x="${k.id}"><b>${esc(k.title)}</b></a><div class="muted">${esc(k.brief)}</div></td><td class="r">${k.slides}</td><td class="muted">${C.ago(k.updated)}</td><td class="r"><button class="btn sm" data-r="opendeck" data-x="${k.id}">Open</button> <button class="btn sm" data-r="pptx" data-x="${k.id}">${ic('download')}PPTX</button></td></tr>`).join('')}</tbody></table></div>` : ''}`);
+    ${S.decks.filter(inClient).length ? `<div class="tblwrap"><table class="tbl"><thead><tr><th>Presentation</th><th class="r">Slides</th><th>Updated</th><th></th></tr></thead><tbody>${S.decks.filter(inClient).map(k => `<tr><td><a href="#" data-r="opendeck" data-x="${k.id}"><b>${esc(k.title)}</b></a><div class="muted">${k.clientId ? esc(clientName(k.clientId)) + ' · ' : ''}${esc(k.brief)}</div></td><td class="r">${k.slides}</td><td class="muted">${C.ago(k.updated)}</td><td class="r"><button class="btn sm" data-r="opendeck" data-x="${k.id}">Open</button> <button class="btn sm" data-r="pptx" data-x="${k.id}">${ic('download')}PPTX</button></td></tr>`).join('')}</tbody></table></div>` : ''}`);
 }
 async function openDeck(kid) { try { S.deck = await C.api('/api/reports/decks/' + kid); S.sources = await C.api('/api/reports/sources', { method: 'POST', body: { datasets: S.deck.datasets } }); S.tab = 'decks'; renderReports(); } catch (e) { C.toast(e.message, 4000); } }
-const tplColors = tid => (S.templates.find(t => t.id === tid) || S.templates[0])?.info?.colors || {};
+const tplColors = tid => S.templates.find(t => t.id === tid)?.info?.colors || {};
 function slideThumb(s, colors) {
   const navy = '#' + (colors.dk2 || '1F3A5F'), acc = '#' + (colors.accent1 || '1E5AA8'), acc2 = '#' + (colors.accent2 || 'E8772E');
   const dark = ['title', 'section', 'closing'].includes(s.kind);
@@ -166,7 +190,7 @@ function slideFields(s, i) {
 function deckView() {
   const k = S.deck; const colors = tplColors(k.template);
   body(`<div class="bar" style="align-items:center;flex-wrap:wrap;gap:8px"><button class="btn sm" data-r="backdeck">← All presentations</button><input type="text" id="rpDTitle" value="${esc(k.title)}" style="flex:1 1 320px;min-width:260px;font-size:18px;font-weight:600">
-      <select id="rpDTpl" class="vsel">${S.templates.map(t => `<option value="${t.id}" ${t.id === k.template ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+      <select id="rpDTpl" class="vsel" title="Template">${templateOptions(k.template)}</select>
       ${finalizeSelect()}<button class="btn sm" data-r="refinal" ${S.busy ? 'disabled' : ''}>${S.busy === 'final' ? spin('Finalizing…') : ic('sparkle') + 'Finalize again'}</button><button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
     ${k.notes ? `<div class="notice">${esc(k.notes)}</div>` : ''}
     <div class="rp-slides">${k.outline.slides.map((s, i) => `<div class="rp-slide"><div class="rp-slide-l">${slideThumb(s, colors)}<div class="rp-slide-tools"><span class="badge">${i + 1} · ${KIND_LABEL[s.kind]}</span><button class="icon-btn" data-r="sup" data-x="${i}" title="Move up">↑</button><button class="icon-btn" data-r="sdown" data-x="${i}" title="Move down">↓</button><button class="icon-btn" data-r="sdel" data-x="${i}" title="Delete slide">${ic('trash')}</button></div></div><div class="rp-slide-r">${slideFields(s, i)}</div></div>`).join('')}</div>
@@ -196,19 +220,62 @@ const NEW_SLIDE = { title: { kind: 'title', title: 'Judul', subtitle: '' }, sect
   chart: { kind: 'chart', title: 'Grafik', source: '', chart: 'column', category: '', series: [], stacked: false, caption: '' }, closing: { kind: 'closing', title: 'Terima kasih', subtitle: '' } };
 
 /* ================= templates ================= */
+function tplCard(t) {
+  const c = t.info.colors || {}; const st = t.info.structure || [];
+  return `<div class="card"><div class="rp-tplprev" style="background:#${c.dk2 || '1F3A5F'}"><i style="background:#${c.accent2 || 'E8772E'}"></i><b>${esc(t.name)}</b><div class="swatches">${['accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6'].map(k => c[k] ? `<span style="background:#${c[k]}"></span>` : '').join('')}</div></div>
+    <div class="card-body"><div class="card-top"><h3>${esc(t.name)}</h3></div><div class="date">${t.scope === 'personal' ? 'Only me · ' : ''}${C.ago(t.created)}</div>
+    <div class="badges"><span class="badge">${t.info.ratio}</span><span class="badge">${t.info.layouts.length} layouts</span>${t.info.font ? `<span class="badge">${esc(t.info.font)}</span>` : ''}${st.length ? `<span class="badge gold" title="${esc(st.map((s, i) => `${i + 1}. ${s.title}`).join('\n'))}">${st.length} reference slides</span>` : ''}</div>
+    <label class="help" style="margin:10px 0 4px">Client</label><select class="vsel" data-tplmove="${t.id}" style="width:100%"><option value="">No client</option>${S.clients.map(k => `<option value="${k.id}" ${k.id === t.clientId ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}</select>
+    <div style="display:flex;gap:6px;margin-top:10px"><button class="btn sm" data-r="tpldl" data-x="${t.id}">${ic('download')}Download</button><button class="btn sm" data-r="tpldel" data-x="${t.id}">${ic('trash')}Delete</button></div></div></div>`;
+}
+function tplUploadBox() {
+  return `<div class="set-sec"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:240px"><h3>${ic('upload')}Add a template${curClient() ? ` for ${esc(curClient().name)}` : ''}</h3><p>Upload the client's PowerPoint (.pptx or .potx): their official template or an earlier report. Canopus uses its masters, layouts, colors and fonts; if the file has slides, their order and titles become the structure the AI follows. Every client can use any template.</p></div>
+    <div style="display:flex;gap:8px;align-items:center"><button class="cta" data-r="picktpl">${ic('upload')}Upload template</button><input type="file" id="rpTplFile" accept=".pptx,.potx" hidden></div></div></div>`;
+}
 function tplView() {
-  body(`<div class="set-sec"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:240px"><h3>${ic('upload')}Add your template</h3><p>Upload a PowerPoint file (.pptx or .potx) — your official template, or a previous report. Canopus uses its masters, layouts, colors and fonts. If the file has slides, their order and titles become the reference structure the AI follows for new reports.</p></div>
-    <div style="display:flex;gap:8px;align-items:center">${C.isAdmin() ? `<select id="rpTplScope" class="vsel"><option value="organization">For everyone</option><option value="personal">Only for me</option></select>` : ''}<button class="cta" data-r="picktpl">${ic('upload')}Upload template</button><input type="file" id="rpTplFile" accept=".pptx,.potx" hidden></div></div></div>
-    <div class="cards rp-tpls">${S.templates.map(t => { const c = t.info.colors || {}; const st = t.info.structure || [];
-      return `<div class="card"><div class="rp-tplprev" style="background:#${c.dk2 || '1F3A5F'}"><i style="background:#${c.accent2 || 'E8772E'}"></i><b>${esc(t.name)}</b><div class="swatches">${['accent1', 'accent2', 'accent3', 'accent4', 'accent5', 'accent6'].map(k => c[k] ? `<span style="background:#${c[k]}"></span>` : '').join('')}</div></div>
-        <div class="card-body"><div class="card-top"><h3>${esc(t.name)}</h3></div><div class="date">${t.builtin ? 'Built in' : (t.scope === 'organization' ? 'Organization template' : 'My template') + ' · ' + C.ago(t.created)}</div>
-        <div class="badges"><span class="badge">${t.info.ratio}</span><span class="badge">${t.info.layouts.length} layouts</span>${t.info.font ? `<span class="badge">${esc(t.info.font)}</span>` : ''}${st.length ? `<span class="badge gold" title="${esc(st.map((s, i) => `${i + 1}. ${s.title}`).join('\n'))}">${st.length} reference slides</span>` : ''}</div>
-        ${['section', 'two', 'visual'].filter(k => !t.info.supports?.[k]).length ? `<p class="help">No dedicated ${['section', 'two', 'visual'].filter(k => !t.info.supports?.[k]).map(k => ({ section: 'section', two: 'two-column', visual: 'title-only' })[k]).join(', ')} layout — Canopus uses the closest one.</p>` : ''}
-        <div style="display:flex;gap:6px;margin-top:10px"><button class="btn sm" data-r="tpldl" data-x="${t.id}">${ic('download')}Download</button>${!t.builtin && (t.mine || C.isAdmin()) ? `<button class="btn sm" data-r="tpldel" data-x="${t.id}">${ic('trash')}Delete</button>` : ''}</div></div></div>`; }).join('')}</div>`);
+  const list = S.templates.filter(inClient);
+  const groups = [...new Set(list.map(t => t.clientId || ''))].sort((a, b) => (!a ? 1 : !b ? -1 : clientName(a).localeCompare(clientName(b))));
+  body(tplUploadBox() + (list.length ? groups.map(g => `<h3 class="rp-group">${esc(g ? clientName(g) : 'No client')}</h3><div class="cards rp-tpls">${list.filter(t => (t.clientId || '') === g).map(tplCard).join('')}</div>`).join('')
+    : `<div class="empty-box"><div class="e-ic">${ic('grid')}</div><b>No templates yet</b><p>Templates come from your clients: upload their PowerPoint here or in the client's page.</p></div>`));
+}
+/* ================= clients ================= */
+function clientModal(c) {
+  C.openModal(`<h3>${c ? 'Edit client' : 'New client'}</h3><p class="s">A client keeps its templates, saved data recipes, guidelines and documents together. The whole team can use them.</p>
+    <label for="clName">Name</label><input type="text" id="clName" value="${esc(c?.name || '')}" autofocus placeholder="e.g. Kementerian X">
+    <label for="clDesc">Short description</label><input type="text" id="clDesc" value="${esc(c?.description || '')}" placeholder="e.g. Ministry, monthly media monitoring + quarterly strategy">
+    <label for="clInstr">Guidelines for the AI</label><textarea id="clInstr" rows="6" placeholder="Voice and tone, key messages, terms to use or avoid, sensitive issues, audiences, report structure they expect, who signs off…">${esc(c?.instructions || '')}</textarea>
+    <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-r="saveclient" data-x="${c?.id || ''}">Save</button></div>`, 'wide');
+}
+async function loadClientDocs() { const c = curClient(); if (!c) return; const k = await C.api('/api/knowledge').catch(() => []); S.clientDocs = k.find(x => x.id === c.collection_id)?.docs || []; }
+function clientsView() {
+  const c = curClient();
+  if (!c) {
+    body(S.clients.length ? `<div class="cards rp-clients">${S.clients.map(k => `<div class="card" data-r="openclient" data-x="${k.id}" role="button"><div class="card-body"><div class="card-top"><h3>${esc(k.name)}</h3></div><div class="date">${esc(k.description || 'Client')}</div>
+        <div class="badges"><span class="badge">${k.templates} template${k.templates === 1 ? '' : 's'}</span><span class="badge">${k.recipes} recipe${k.recipes === 1 ? '' : 's'}</span><span class="badge">${k.docs} document${k.docs === 1 ? '' : 's'}</span>${k.instructions ? '<span class="badge gold">Guidelines</span>' : ''}</div></div></div>`).join('')}</div>`
+      : `<div class="empty-box"><div class="e-ic">${ic('users')}</div><b>No clients yet</b><p>Create a client for each customer. Their templates, data recipes, guidelines and documents stay together, ready for the next report.</p><button class="cta" data-r="newclient">${ic('plus')}New client</button></div>`);
+    return;
+  }
+  if (S.clientDocs === null) { S.clientDocs = []; loadClientDocs().then(() => S.tab === 'clients' && curClient()?.id === c.id && renderReports()); }
+  const tpls = S.templates.filter(t => t.clientId === c.id), ds = S.datasets.filter(d => d.clientId === c.id), decks = S.decks.filter(k => k.clientId === c.id);
+  body(`<div class="bar" style="align-items:center;flex-wrap:wrap"><h2 style="flex:1;margin:0;font-size:22px">${esc(c.name)}</h2><button class="btn sm" data-r="editclient">${ic('edit')}Edit</button><button class="btn sm" data-r="tab" data-x="data">${ic('table')}Curate data</button><button class="btn sm primary" data-r="tab" data-x="decks">${ic('layers')}New presentation</button><button class="icon-btn" data-r="delclient" title="Delete client">${ic('trash')}</button></div>
+    <div class="set-sec"><h3>${ic('memo')}Guidelines for the AI</h3>${c.instructions ? `<div class="rp-guide">${esc(c.instructions)}</div>` : `<p>No guidelines yet. Add the client's voice, key messages, terms to use or avoid and sensitive issues — they are applied to every deck for this client. <a href="#" data-r="editclient">Add guidelines</a></p>`}</div>
+    ${tplUploadBox()}${tpls.length ? `<div class="cards rp-tpls">${tpls.map(tplCard).join('')}</div>` : ''}
+    <div class="set-sec"><h3>${ic('refresh')}Data recipes</h3><p>Curation plans saved from earlier work for this client. Load one on next month's file: no AI planning needed.</p>
+      ${c.recipeList.length ? c.recipeList.map(r => `<div class="doc-row">${ic('bolt')}<span class="t">${esc(r.name)}</span><small>${r.columns.length} columns · ${C.ago(r.created)}</small><button class="icon-btn" data-r="delrecipe" data-x="${r.id}" title="Delete">${ic('trash')}</button></div>`).join('') : '<p class="help">Run a plan in Data curation, then “Save plan as recipe”.</p>'}</div>
+    <div class="set-sec"><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:240px"><h3>${ic('book')}Client documents</h3><p>Earlier reports, briefs and guidelines (PDF, DOCX, TXT, CSV). Searchable in chat and used for this client's decks; indexed on this server.</p></div>
+      <select id="rpDocCls" class="vsel"><option value="biasa">General (Biasa)</option><option value="terbatas">Restricted (Terbatas)</option></select><button class="btn sm" data-r="pickdoc">${ic('upload')}Upload documents</button><input type="file" id="rpDocFile" multiple hidden></div>
+      ${(S.clientDocs || []).map(d => `<div class="doc-row">${ic('file')}<span class="t">${esc(d.title)}</span><small>${d.status === 'ready' ? `${d.chunks} passages` : esc(d.status)} · ${C.ago(d.created)}</small></div>`).join('') || '<p class="help">No documents yet.</p>'}</div>
+    <div class="row2"><div class="set-sec"><h3>${ic('table')}Datasets</h3>${ds.map(d => `<div class="doc-row"><a href="#" data-r="opends" data-x="${d.id}" class="t">${esc(d.name)}</a><small>${C.ago(d.updated)}</small></div>`).join('') || '<p class="help">None yet.</p>'}</div>
+      <div class="set-sec"><h3>${ic('layers')}Presentations</h3>${decks.map(k => `<div class="doc-row"><a href="#" data-r="opendeck" data-x="${k.id}" class="t">${esc(k.title)}</a><small>${C.ago(k.updated)}</small></div>`).join('') || '<p class="help">None yet.</p>'}</div></div>`);
+}
+async function uploadClientDocs(files) {
+  const c = curClient(); if (!c || !files?.length) return; let n = 0;
+  for (const f of files) { try { C.toast('Indexing ' + f.name + '…', 6000); await C.api(`/api/reports/clients/${c.id}/docs`, { method: 'POST', raw: f, headers: { 'content-type': f.type || 'application/octet-stream', 'x-filename': encodeURIComponent(f.name), 'x-classification': $('#rpDocCls')?.value || 'biasa' } }); n++; } catch (e) { C.toast(`${f.name}: ${e.message}`, 5000); } }
+  await load(); await loadClientDocs(); renderReports(); if (n) C.toast(`${n} document${n > 1 ? 's' : ''} added`);
 }
 async function uploadTemplate(files) {
   const f = files?.[0]; if (!f) return; C.toast('Reading template…');
-  try { await C.api('/api/reports/templates', { method: 'POST', raw: f, headers: { 'content-type': 'application/octet-stream', 'x-filename': encodeURIComponent(f.name), 'x-scope': $('#rpTplScope')?.value || 'personal' } }); await load(); renderReports(); C.toast('Template added'); }
+  try { await C.api('/api/reports/templates', { method: 'POST', raw: f, headers: { 'content-type': 'application/octet-stream', 'x-filename': encodeURIComponent(f.name), 'x-client': S.client } }); await load(); renderReports(); C.toast('Template added'); }
   catch (e) { C.toast(e.message, 5000); }
 }
 
@@ -220,6 +287,18 @@ async function onClick(e) {
     switch (r) {
       case 'tab': S.tab = x; if (x === 'decks') S.deck = null; renderReports(); break;
       case 'pickds': $('#rpDsFile').click(); break;
+      case 'pickdoc': $('#rpDocFile').click(); break;
+      case 'newclient': clientModal(null); break;
+      case 'editclient': clientModal(curClient()); break;
+      case 'openclient': S.client = x; savePrefs({ client: x }); S.clientDocs = null; renderReports(); break;
+      case 'saveclient': { const body = { name: $('#clName').value.trim(), description: $('#clDesc').value.trim(), instructions: $('#clInstr').value.trim() };
+        if (x) await C.api('/api/reports/clients/' + x, { method: 'PUT', body }); else { const r = await C.api('/api/reports/clients', { method: 'POST', body }); S.client = r.id; savePrefs({ client: r.id }); S.clientDocs = null; S.tab = 'clients'; }
+        C.closeModal(); await load(); renderReports(); C.toast('Saved'); break; }
+      case 'delclient': if (await C.confirmBox('Delete client?', 'Its recipes are deleted. Templates, datasets, presentations and documents are kept, without a client.')) { await C.api('/api/reports/clients/' + S.client, { method: 'DELETE' }); S.client = ''; savePrefs({ client: '' }); await load(); renderReports(); } break;
+      case 'loadrecipe': { const rc = await C.api('/api/reports/recipes/' + $('#rpRecipe').value); S.plan = rc.plan; S.explanation = `Loaded recipe “${rc.name}”. Check the steps, then run the plan.`; S.ds.log = null; renderReports(); break; }
+      case 'saverecipe': { const cid = S.ds.clientId || S.client; if (!cid) { C.toast('Choose a client at the top first'); break; } const n = await C.ask('Save plan as recipe', { value: S.plan.title || S.ds.name, sub: `Saved for ${clientName(cid)}. Load it on next month's file to run the same steps without AI planning.` });
+        if (n && n.trim()) { const sh = S.ds.sheets.find(z => z.name === S.ds.sheet) || S.ds.sheets[0]; await C.api(`/api/reports/clients/${cid}/recipes`, { method: 'POST', body: { name: n.trim(), plan: S.plan, columns: sh.columns } }); await load(); renderReports(); C.toast('Recipe saved'); } break; }
+      case 'delrecipe': if (await C.confirmBox('Delete recipe?', 'Datasets that used it are not affected.')) { await C.api('/api/reports/recipes/' + x, { method: 'DELETE' }); await load(); renderReports(); } break;
       case 'picktpl': $('#rpTplFile').click(); break;
       case 'opends': await openDataset(x); break;
       case 'back': S.ds = null; await load(); renderReports(); break;
@@ -246,7 +325,7 @@ async function onClick(e) {
       case 'todeck': S.prefDs = S.ds.id; S.tab = 'decks'; S.deck = null; await load(); renderReports(); break;
       case 'draftdeck': { const datasets = [...document.querySelectorAll('#rpDs input:checked')].map(i => i.value); const brief = $('#rpBrief').value.trim();
         if (!brief && !datasets.length) { C.toast('Write a brief or choose data first'); break; }
-        const payload = { title: $('#rpTitle').value.trim(), template: $('#rpTpl').value, datasets, brief, model: $('#rpDModel')?.value, finalizeModel: $('#rpFModel')?.value, knowledge: $('#rpKnow').checked }; savePrefs({ analysis: payload.model, finalize: payload.finalizeModel });
+        const payload = { client: S.client || null, title: $('#rpTitle').value.trim(), template: $('#rpTpl').value, datasets, brief, model: $('#rpDModel')?.value, finalizeModel: $('#rpFModel')?.value, knowledge: $('#rpKnow').checked }; savePrefs({ analysis: payload.model, finalize: payload.finalizeModel });
         S.busy = 'deck'; renderReports();
         try { const k = await C.api('/api/reports/decks', { method: 'POST', body: payload }); S.busy = ''; await load(); await openDeck(k.id); C.refreshMe?.(); }
         finally { S.busy = ''; if (!S.deck) renderReports(); } break; }
@@ -262,7 +341,7 @@ async function onClick(e) {
       case 'sdel': S.deck.outline.slides.splice(+x, 1); S.deck.dirty = true; renderReports(); break;
       case 'sadd': { const s = structuredClone(NEW_SLIDE[x]); if (s.source !== undefined) s.source = S.sources.find(v => !v.main)?.ref || S.sources[0]?.ref || ''; S.deck.outline.slides.push(s); S.deck.dirty = true; renderReports(); setTimeout(() => document.querySelector('.rp-slide:last-child')?.scrollIntoView({ behavior: 'smooth' }), 30); break; }
       case 'tpldl': await download(`/api/reports/templates/${x}/file`); break;
-      case 'tpldel': if (await C.confirmBox('Delete template?', 'Presentations that use it will fall back to the Canopus default template.')) { await C.api('/api/reports/templates/' + x, { method: 'DELETE' }); await load(); renderReports(); } break;
+      case 'tpldel': if (await C.confirmBox('Delete template?', 'Presentations that use it will fall back to a plain layout until you choose another template.')) { await C.api('/api/reports/templates/' + x, { method: 'DELETE' }); await load(); renderReports(); } break;
     }
   } catch (err) { C.toast(err.message, 5000); }
 }

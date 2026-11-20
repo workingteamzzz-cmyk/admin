@@ -19,7 +19,10 @@ CREATE TABLE IF NOT EXISTS datasets(id TEXT PRIMARY KEY, user_id TEXT NOT NULL R
 CREATE TABLE IF NOT EXISTS decks(id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, title TEXT NOT NULL, template_id TEXT, datasets TEXT NOT NULL DEFAULT '[]',
   brief TEXT NOT NULL DEFAULT '', outline TEXT, notes TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_tag_cache(key TEXT PRIMARY KEY, value TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', collection_id TEXT, created_by TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS client_recipes(id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL, plan TEXT NOT NULL, columns TEXT NOT NULL DEFAULT '[]', created_by TEXT, created INTEGER NOT NULL);
 `);
+for (const sql of ['ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT']) { try { db.exec(sql); } catch {} }
 const DIR = path.join(config.dataDir, 'reports');
 fs.mkdirSync(path.join(DIR, 'datasets'), { recursive: true, mode: 0o700 });
 fs.mkdirSync(path.join(DIR, 'templates'), { recursive: true, mode: 0o700 });
@@ -27,37 +30,75 @@ const DEFAULT_TEMPLATE = path.join(ROOT, 'assets', 'default-template.pptx');
 const err = (status, message) => Object.assign(new Error(message), { status });
 const dsDir = d => path.join(DIR, 'datasets', d);
 
+/* ================= clients ================= */
+// A client is the team's folder for one customer: its templates, saved curation recipes, instructions (voice, key
+// messages, sensitivities) and a knowledge collection for its documents. Clients are shared by the whole team.
+const clientRow = cid => { if (!cid) return null; const c = one(`SELECT * FROM clients WHERE id=?`, cid); if (!c) throw err(404, 'Client not found'); return c; };
+export function listClients() {
+  return all(`SELECT c.*, (SELECT COUNT(*) FROM report_templates t WHERE t.client_id=c.id) templates, (SELECT COUNT(*) FROM client_recipes r WHERE r.client_id=c.id) recipes,
+    (SELECT COUNT(*) FROM docs d WHERE d.collection_id=c.collection_id) docs FROM clients c ORDER BY c.name COLLATE NOCASE`).map(c => ({ ...c,
+    recipeList: all(`SELECT id,name,columns,created FROM client_recipes WHERE client_id=? ORDER BY created DESC`, c.id).map(r => ({ ...r, columns: JSON.parse(r.columns) })) }));
+}
+export function saveClient(user, cid, { name, description, instructions }) {
+  const nm = String(name || '').trim().slice(0, 120); if (!nm) throw err(400, 'Give the client a name.');
+  if (one(`SELECT 1 FROM clients WHERE name=? COLLATE NOCASE AND id IS NOT ?`, nm, cid || null)) throw err(409, 'A client with this name already exists.');
+  if (cid) { clientRow(cid); run(`UPDATE clients SET name=?, description=?, instructions=?, updated=? WHERE id=?`, nm, String(description || '').slice(0, 500), String(instructions || '').slice(0, 8000), now(), cid); return cid; }
+  const nid = id(), col = id();
+  run(`INSERT INTO collections(id,name,description,created) VALUES(?,?,?,?)`, col, `Klien · ${nm}`.slice(0, 120), `Documents for client ${nm}: earlier reports, briefs, guidelines.`, now());
+  run(`INSERT INTO clients(id,name,description,instructions,collection_id,created_by,created,updated) VALUES(?,?,?,?,?,?,?,?)`, nid, nm, String(description || '').slice(0, 500), String(instructions || '').slice(0, 8000), col, user.id, now(), now());
+  return nid;
+}
+export function deleteClient(user, cid) {
+  const c = clientRow(cid); if (user.role !== 'admin' && c.created_by !== user.id) throw err(403, 'Only an administrator or the person who created this client can delete it.');
+  for (const t of ['report_templates', 'datasets', 'decks']) run(`UPDATE ${t} SET client_id=NULL WHERE client_id=?`, cid);
+  run(`DELETE FROM clients WHERE id=?`, cid); return c; // the knowledge collection and its documents are kept
+}
+export function addRecipe(user, cid, { name, plan, columns }) {
+  clientRow(cid); const p = sanitizePlan(plan); if (!p.steps.length) throw err(400, 'The plan has no steps.');
+  const rid = id(); run(`INSERT INTO client_recipes(id,client_id,name,plan,columns,created_by,created) VALUES(?,?,?,?,?,?,?)`, rid, cid, String(name || 'Recipe').trim().slice(0, 120) || 'Recipe', JSON.stringify(p), JSON.stringify((columns || []).slice(0, 200).map(String)), user.id, now());
+  return rid;
+}
+export function getRecipe(rid) { const r = one(`SELECT * FROM client_recipes WHERE id=?`, rid); if (!r) throw err(404, 'Recipe not found'); const plan = JSON.parse(r.plan); return { ...r, plan: { ...plan, steps: plan.steps.map(x => ({ ...x, text: describe(x) })) }, columns: JSON.parse(r.columns) }; }
+export function deleteRecipe(user, rid) { const r = one(`SELECT * FROM client_recipes WHERE id=?`, rid); if (!r) throw err(404, 'Recipe not found'); run(`DELETE FROM client_recipes WHERE id=?`, rid); return r; }
+
 /* ================= templates ================= */
-let defaultInfo;
+// No built-in template is offered: every deck uses a template someone uploaded (usually a client's). "plain" is only a
+// neutral fallback layout for drafts made before any template exists.
+const PLAIN = path.join(ROOT, 'assets', 'default-template.pptx');
 async function templateInfo(buf) { return describeTemplate(await openTemplate(buf)); }
 export async function listTemplates(user) {
-  defaultInfo ??= await templateInfo(fs.readFileSync(DEFAULT_TEMPLATE));
-  const rows = all(`SELECT id,name,owner_id,filename,size,info,created FROM report_templates WHERE owner_id IS NULL OR owner_id=? ORDER BY owner_id IS NOT NULL, created DESC`, user.id);
-  return [{ id: 'default', name: 'Canopus default', builtin: true, scope: 'organization', info: defaultInfo },
-    ...rows.map(r => ({ id: r.id, name: r.name, filename: r.filename, size: r.size, created: r.created, scope: r.owner_id ? 'personal' : 'organization', mine: r.owner_id === user.id, info: JSON.parse(r.info) }))];
+  const rows = all(`SELECT t.id,t.name,t.owner_id,t.filename,t.size,t.info,t.created,t.client_id,c.name client FROM report_templates t LEFT JOIN clients c ON c.id=t.client_id WHERE t.owner_id IS NULL OR t.owner_id=? ORDER BY c.name COLLATE NOCASE, t.created DESC`, user.id);
+  return rows.map(r => ({ id: r.id, name: r.name, filename: r.filename, size: r.size, created: r.created, clientId: r.client_id, client: r.client, scope: r.owner_id ? 'personal' : 'team', mine: r.owner_id === user.id, info: JSON.parse(r.info) }));
 }
 function templateRow(user, tid) {
-  if (!tid || tid === 'default') return null;
+  if (!tid || tid === 'plain' || tid === 'default') return null;
   const r = one(`SELECT * FROM report_templates WHERE id=? AND (owner_id IS NULL OR owner_id=?)`, tid, user.id);
   if (!r) throw err(404, 'Template not found'); return r;
 }
-function templateBuf(user, tid) { const r = templateRow(user, tid); return r ? fs.readFileSync(path.join(DIR, 'templates', r.id + '.pptx')) : fs.readFileSync(DEFAULT_TEMPLATE); }
-async function templateDesc(user, tid) { const r = templateRow(user, tid); if (!r) { defaultInfo ??= await templateInfo(fs.readFileSync(DEFAULT_TEMPLATE)); return { name: 'Canopus default', info: defaultInfo }; } return { name: r.name, info: JSON.parse(r.info) }; }
-export async function addTemplate(user, { filename, buf, name, organization }) {
+function templateBuf(user, tid) { const r = templateRow(user, tid); return fs.readFileSync(r ? path.join(DIR, 'templates', r.id + '.pptx') : PLAIN); }
+let plainInfo;
+async function templateDesc(user, tid) { const r = templateRow(user, tid); if (!r) { plainInfo ??= await templateInfo(fs.readFileSync(PLAIN)); return { name: 'Plain layout', info: plainInfo }; } return { name: r.name, info: JSON.parse(r.info) }; }
+export async function addTemplate(user, { filename, buf, name, clientId, personal }) {
   if (!/\.(pptx|potx)$/i.test(filename)) throw err(415, 'Upload a PowerPoint file (.pptx or .potx).');
+  if (clientId) clientRow(clientId);
   let info; try { info = await templateInfo(buf); } catch (e) { throw err(422, 'This file could not be read as a PowerPoint template: ' + e.message); }
   if (!info.layouts.length) throw err(422, 'This file has no slide layouts.');
   const tid = id(); fs.writeFileSync(path.join(DIR, 'templates', tid + '.pptx'), buf, { mode: 0o600 });
-  const scopeOrg = organization && user.role === 'admin';
-  run(`INSERT INTO report_templates(id,name,owner_id,filename,size,info,created,created_by) VALUES(?,?,?,?,?,?,?,?)`, tid, String(name || filename.replace(/\.(pptx|potx)$/i, '')).slice(0, 120), scopeOrg ? null : user.id, filename, buf.length, JSON.stringify(info), now(), user.id);
+  run(`INSERT INTO report_templates(id,name,owner_id,filename,size,info,created,created_by,client_id) VALUES(?,?,?,?,?,?,?,?,?)`, tid, String(name || filename.replace(/\.(pptx|potx)$/i, '')).slice(0, 120), personal ? user.id : null, filename, buf.length, JSON.stringify(info), now(), user.id, clientId || null);
   return { id: tid, info };
+}
+// Templates can be moved to another client or renamed; any client may *use* any team template.
+export function updateTemplate(user, tid, { name, clientId }) {
+  const r = templateRow(user, tid); if (!r) throw err(404, 'Template not found'); if (clientId) clientRow(clientId);
+  run(`UPDATE report_templates SET name=?, client_id=? WHERE id=?`, String(name ?? r.name).trim().slice(0, 120) || r.name, clientId === undefined ? r.client_id : clientId || null, tid);
 }
 export function deleteTemplate(user, tid) {
   const r = one(`SELECT * FROM report_templates WHERE id=?`, tid);
-  if (!r || (r.owner_id ? r.owner_id !== user.id : user.role !== 'admin')) throw err(404, 'Template not found');
+  if (!r || (r.owner_id && r.owner_id !== user.id)) throw err(404, 'Template not found');
+  if (!r.owner_id && user.role !== 'admin' && r.created_by !== user.id) throw err(403, 'Only an administrator or the person who uploaded it can delete this template.');
   fs.rmSync(path.join(DIR, 'templates', r.id + '.pptx'), { force: true }); run(`DELETE FROM report_templates WHERE id=?`, r.id); return r;
 }
-export function templateFile(user, tid) { const r = templateRow(user, tid); return r ? { buf: fs.readFileSync(path.join(DIR, 'templates', r.id + '.pptx')), name: r.filename } : { buf: fs.readFileSync(DEFAULT_TEMPLATE), name: 'canopus-default.pptx' }; }
+export function templateFile(user, tid) { const r = templateRow(user, tid); if (!r) throw err(404, 'Template not found'); return { buf: fs.readFileSync(path.join(DIR, 'templates', r.id + '.pptx')), name: r.filename }; }
 
 /* ================= datasets ================= */
 const sourceFile = d => path.join(dsDir(d.id), 'source' + path.extname(d.filename).toLowerCase());
@@ -66,7 +107,8 @@ function ownDataset(user, did) { const d = one(`SELECT * FROM datasets WHERE id=
 const extraCols = () => getSettings().redaction.columns || [];
 const preview = (t, n = 8) => ({ name: t.name, columns: t.columns, rows: t.rows.length, preview: t.rows.slice(0, n), skipped: t.skipped || 0, personal: t.columns.filter(c => reportSensitive(c, extraCols())) });
 
-export async function addDataset(user, { filename, buf }) {
+export async function addDataset(user, { filename, buf, clientId }) {
+  if (clientId) clientRow(clientId);
   if (!/\.(xlsx|csv|tsv)$/i.test(filename)) throw err(415, 'Upload an Excel (.xlsx) or CSV file.');
   let sheets; try { sheets = await loadWorkbook(buf, filename); } catch (e) { throw err(422, 'This file could not be read: ' + e.message); }
   if (!sheets.length) throw err(422, 'No table found in this file.');
@@ -74,17 +116,17 @@ export async function addDataset(user, { filename, buf }) {
   const d = { id: did, filename };
   fs.writeFileSync(sourceFile(d), buf, { mode: 0o600 });
   const main = [...sheets].sort((a, b) => b.rows.length - a.rows.length)[0];
-  run(`INSERT INTO datasets(id,user_id,name,filename,size,sheet,rows,created,updated) VALUES(?,?,?,?,?,?,?,?,?)`, did, user.id, filename.replace(/\.(xlsx|csv|tsv)$/i, '').slice(0, 120), filename, buf.length, main.name, main.rows.length, now(), now());
+  run(`INSERT INTO datasets(id,user_id,name,filename,size,sheet,rows,created,updated,client_id) VALUES(?,?,?,?,?,?,?,?,?,?)`, did, user.id, filename.replace(/\.(xlsx|csv|tsv)$/i, '').slice(0, 120), filename, buf.length, main.name, main.rows.length, now(), now(), clientId || null);
   return getDataset(user, did);
 }
 export function listDatasets(user) {
-  return all(`SELECT id,name,filename,size,sheet,rows,result_rows,created,updated,(plan IS NOT NULL) planned,(log IS NOT NULL) curated FROM datasets WHERE user_id=? ORDER BY updated DESC`, user.id);
+  return all(`SELECT id,name,filename,size,sheet,rows,result_rows,created,updated,client_id clientId,(plan IS NOT NULL) planned,(log IS NOT NULL) curated FROM datasets WHERE user_id=? ORDER BY updated DESC`, user.id);
 }
 function readResult(did) { const f = path.join(dsDir(did), 'result.json'); return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null; }
 export async function getDataset(user, did) {
   const d = ownDataset(user, did); const sheets = await loadSource(d); const res = readResult(did);
   const plan = d.plan ? JSON.parse(d.plan) : null;
-  return { id: d.id, name: d.name, filename: d.filename, size: d.size, sheet: d.sheet, instruction: d.instruction, created: d.created, updated: d.updated,
+  return { id: d.id, clientId: d.client_id, name: d.name, filename: d.filename, size: d.size, sheet: d.sheet, instruction: d.instruction, created: d.created, updated: d.updated,
     sheets: sheets.map(t => preview(t)), plan: plan && { ...plan, steps: plan.steps.map(s => ({ ...s, text: describe(s) })) }, log: d.log ? JSON.parse(d.log) : null,
     result: res && { table: { name: 'Data', columns: res.table.columns, rows: res.table.rows.length, preview: res.table.rows.slice(0, 50) }, summaries: res.summaries.map(s => ({ ...s, rows: s.rows.slice(0, 200), total: s.rows.length })) } };
 }
@@ -201,7 +243,7 @@ export function datasetDigest(user, did) {
 
 /* ================= decks ================= */
 function ownDeck(user, kid) { const k = one(`SELECT * FROM decks WHERE id=? AND user_id=?`, kid, user.id); if (!k) throw err(404, 'Presentation not found'); return k; }
-const deckOut = k => ({ id: k.id, title: k.title, template: k.template_id || 'default', datasets: JSON.parse(k.datasets), brief: k.brief, outline: k.outline ? JSON.parse(k.outline) : null, notes: k.notes || '', created: k.created, updated: k.updated });
+const deckOut = k => ({ id: k.id, clientId: k.client_id, title: k.title, template: k.template_id || 'plain', datasets: JSON.parse(k.datasets), brief: k.brief, outline: k.outline ? JSON.parse(k.outline) : null, notes: k.notes || '', created: k.created, updated: k.updated });
 export function listDecks(user) { return all(`SELECT * FROM decks WHERE user_id=? ORDER BY updated DESC`, user.id).map(k => { const o = deckOut(k); return { ...o, slides: o.outline?.slides.length || 0, outline: undefined, brief: o.brief.slice(0, 200) }; }); }
 export function getDeck(user, kid) { return deckOut(ownDeck(user, kid)); }
 export function deleteDeck(user, kid) { const k = ownDeck(user, kid); run(`DELETE FROM decks WHERE id=?`, k.id); return k; }
@@ -265,38 +307,40 @@ async function finalizeOutline(user, outline, { brief, catalog, finalizeModel, r
   return { outline: result, finalizer, note: same ? red.unmask(String(fin.notes || '')) : `${finalizer.label} changed the slide structure, so its edits were not applied.` };
 }
 
-export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge }) {
-  checkLimits(user);
+export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId }) {
+  checkLimits(user); const client = clientRow(clientId);
   const ids = [...new Set(datasets)].slice(0, 6); const tables = deckTables(user, ids);
   const tdesc = await templateDesc(user, template);
   const model = reportModel(user, requested, 'writing'); const kid = id();
   const red = redactorFor(user, 'deck:' + kid); const catalog = catalogText(tables);
   let excerpts = '';
-  if (knowledge && brief) { const hits = search(user, String(brief).slice(0, 300), { limit: 6 }).filter(h => !h.localOnly); if (hits.length) excerpts = `\n\nRelevant internal documents:\n${hits.map((h, i) => `[${i + 1}] ${h.title}${h.page ? ' p.' + h.page : ''}: ${h.text.slice(0, 900)}`).join('\n')}`; }
+  if (knowledge && brief) { const hits = search(user, String(brief).slice(0, 300), { limit: 6, collections: client?.collection_id ? [client.collection_id] : null }).filter(h => !h.localOnly); if (hits.length) excerpts = `\n\nRelevant internal documents:\n${hits.map((h, i) => `[${i + 1}] ${h.title}${h.page ? ' p.' + h.page : ''}: ${h.text.slice(0, 900)}`).join('\n')}`; }
   const struct = tdesc.info.structure?.length ? `\n\nReference structure from the template "${tdesc.name}" (slides in an earlier report; follow its order and style, with new content):\n${tdesc.info.structure.map((s, i) => `${i + 1}. ${s.title || '(no title)'}${s.has?.length ? ` [${s.has.join(', ')}]` : ''}${s.text ? ' — ' + s.text.slice(0, 160) : ''}`).join('\n')}` : '';
-  const prompt = red.mask(`Brief from the user:\n${String(brief || 'Create a report presentation from this data.').slice(0, 6000)}${title ? `\n\nWorking title: ${title}` : ''}\n\nToday: ${new Date().toISOString().slice(0, 10)}${struct}\n\nData catalog:${catalog || '\n(no datasets attached — write from the brief only, without charts or tables)'}${excerpts}`);
+  const clientNote = client ? `Client: ${client.name}${client.description ? ` — ${client.description}` : ''}${client.instructions ? `\nClient guidelines (voice, key messages, terms to use or avoid, audiences) — follow them:\n${client.instructions}` : ''}\n\n` : '';
+  const prompt = red.mask(`${clientNote}Brief from the user:\n${String(brief || 'Create a report presentation from this data.').slice(0, 6000)}${title ? `\n\nWorking title: ${title}` : ''}\n\nToday: ${new Date().toISOString().slice(0, 10)}${struct}\n\nData catalog:${catalog || '\n(no datasets attached — write from the brief only, without charts or tables)'}${excerpts}`);
   const raw = await askJson(user, model, OUTLINE_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt, 'report.outline', 12000, 'medium');
   let outline = sanitizeOutline(unmaskDeep(red, raw)); let notes = red.unmask(String(raw.notes || ''));
   if (!outline.slides.length) throw err(502, 'The AI did not return any slides. Try again with a more specific brief.');
   let finalizer = null;
-  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief, catalog, finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
+  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: (client?.instructions ? `Client guidelines: ${client.instructions}\n\n` : '') + (brief || ''), catalog, finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
   notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, notes].filter(Boolean).join(' ');
   const t = String(title || outline.title || 'Presentation').slice(0, 160);
-  run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && template !== 'default' ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now());
+  run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null);
   return { ...getDeck(user, kid), model: { id: model.id, label: model.label }, finalizer: finalizer && { id: finalizer.id, label: finalizer.label } };
 }
 // Finalize (again) after the user edited the slides.
 export async function refinalizeDeck(user, kid, { finalizeModel }) {
   checkLimits(user); const k = getDeck(user, kid); if (!k.outline) throw err(409, 'This presentation has no outline yet.');
   const red = redactorFor(user, 'deck:' + kid);
-  const f = await finalizeOutline(user, k.outline, { brief: k.brief, catalog: catalogText(deckTables(user, k.datasets)), finalizeModel, red });
+  const c = k.clientId ? one(`SELECT instructions FROM clients WHERE id=?`, k.clientId) : null;
+  const f = await finalizeOutline(user, k.outline, { brief: (c?.instructions ? `Client guidelines: ${c.instructions}\n\n` : '') + k.brief, catalog: catalogText(deckTables(user, k.datasets)), finalizeModel, red });
   run(`UPDATE decks SET outline=?, notes=?, updated=? WHERE id=?`, JSON.stringify(f.outline), `Finalized by ${f.finalizer.label}. ${f.note}`.trim().slice(0, 1000), now(), kid);
   return { ...getDeck(user, kid), finalizer: { id: f.finalizer.id, label: f.finalizer.label } };
 }
 export function saveDeck(user, kid, { title, outline, template, datasets }) {
   const k = ownDeck(user, kid); if (template) templateRow(user, template);
   run(`UPDATE decks SET title=?, outline=?, template_id=?, datasets=?, updated=? WHERE id=?`, String(title ?? k.title).slice(0, 160) || 'Presentation', outline ? JSON.stringify(sanitizeOutline(outline)) : k.outline,
-    template ? (template === 'default' ? null : template) : k.template_id, datasets ? JSON.stringify([...new Set(datasets)].slice(0, 6)) : k.datasets, now(), kid);
+    template ? (['default', 'plain'].includes(template) ? null : template) : k.template_id, datasets ? JSON.stringify([...new Set(datasets)].slice(0, 6)) : k.datasets, now(), kid);
   return getDeck(user, kid);
 }
 export async function deckPptx(user, kid) {
