@@ -425,9 +425,13 @@ route('POST', '/api/reports/datasets/:id/attach', (req, res, u, p) => json(res, 
 route('POST', '/api/reports/sources', async (req, res, u) => { const { datasets } = await readJson(req, 20e3); json(res, 200, R.deckSources(u, Array.isArray(datasets) ? datasets : [])); });
 route('POST', '/api/reports/decks', async (req, res, u) => {
   const body = await readJson(req, 100e3); const k = await R.draftDeck(u, body);
-  audit(u.id, 'report.deck_drafted', { deck: k.id, model: k.model.id, slides: k.outline.slides.length, datasets: k.datasets.length }, clientIp(req)); json(res, 200, k);
+  audit(u.id, 'report.deck_drafted', { deck: k.id, model: k.model.id, finalizer: k.finalizer?.id || null, slides: k.outline.slides.length, datasets: k.datasets.length }, clientIp(req)); json(res, 200, k);
 });
 route('GET', '/api/reports/decks/:id', (req, res, u, p) => json(res, 200, R.getDeck(u, p.id)));
+route('POST', '/api/reports/decks/:id/finalize', async (req, res, u, p) => {
+  const body = await readJson(req, 10e3); const k = await R.refinalizeDeck(u, p.id, body);
+  audit(u.id, 'report.deck_finalized', { deck: p.id, model: k.finalizer.id }, clientIp(req)); json(res, 200, k);
+});
 route('PUT', '/api/reports/decks/:id', async (req, res, u, p) => json(res, 200, R.saveDeck(u, p.id, await readJson(req, 1 * MB))));
 route('DELETE', '/api/reports/decks/:id', (req, res, u, p) => { R.deleteDeck(u, p.id); json(res, 200, { ok: true }); });
 route('GET', '/api/reports/decks/:id/pptx', async (req, res, u, p) => {

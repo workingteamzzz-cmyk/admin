@@ -27,6 +27,21 @@ export async function renderReports() {
 }
 const body = html => { $('#rpBody').innerHTML = html; C.hydrateIcons($('#rpBody')); };
 const modelSelect = (sel, id) => { const ms = C.me().config.models; return `<select id="${id}" class="vsel" title="AI model">${ms.length > 1 ? `<option value="auto">Auto (recommended)</option>` : ''}${ms.map(m => `<option value="${m.id}" ${sel === m.id ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select>`; };
+// Two-stage decks: one model analyzes (default: a Claude model), another finalizes the wording (default: a GPT model).
+const PREF_KEY = 'canopus.reports.models';
+const prefs = () => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}'); } catch { return {}; } };
+const savePrefs = p => { try { localStorage.setItem(PREF_KEY, JSON.stringify({ ...prefs(), ...p })); } catch {} };
+function stageSelects() {
+  const ms = C.me().config.models; const p = prefs();
+  const claude = ms.filter(m => m.provider === 'anthropic'); const gpt = ms.filter(m => m.provider === 'openai');
+  const aDef = ms.some(m => m.id === p.analysis) ? p.analysis : (claude.find(m => m.tier === 'standard') || claude[0] || ms[0])?.id;
+  const fDef = p.finalize === 'none' || ms.some(m => m.id === p.finalize) ? p.finalize : (gpt.find(m => m.tier === 'standard') || gpt[0])?.id || 'none';
+  const opts = sel => ms.map(m => `<option value="${m.id}" ${sel === m.id ? 'selected' : ''}>${esc(m.label)}</option>`).join('');
+  return `<div class="row2 rp-stages"><div><label for="rpDModel">1 · Analysis — charts, insights, recommendations</label><select id="rpDModel" class="vsel" style="width:100%">${opts(aDef)}</select></div>
+    <div><label for="rpFModel">2 · Finalization — wording, titles, consistency</label><select id="rpFModel" class="vsel" style="width:100%"><option value="none" ${fDef === 'none' ? 'selected' : ''}>None (use the analysis as is)</option>${opts(fDef)}</select></div></div>`;
+}
+const finalizeSelect = () => { const ms = C.me().config.models; const p = prefs(); const gpt = ms.filter(m => m.provider === 'openai'); const def = ms.some(m => m.id === p.finalize) ? p.finalize : (gpt[0] || ms[0])?.id;
+  return `<select id="rpReFModel" class="vsel" title="Model for finalization">${ms.map(m => `<option value="${m.id}" ${def === m.id ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select>`; };
 const spin = label => `<span class="shimmer">${esc(label)}</span>`;
 const fmtCell = v => (typeof v === 'number' ? v.toLocaleString('id-ID') : esc(String(v ?? '').slice(0, 140)));
 function tableHTML(columns, rows, personal = []) {
@@ -111,8 +126,9 @@ function deckHome() {
     <label>Data to use</label>${curated.length ? `<div class="checks" id="rpDs">${curated.map(d => `<label><input type="checkbox" value="${d.id}" ${S.prefDs === d.id ? 'checked' : ''}>${esc(d.name)} <span class="muted">(${(d.result_rows || 0).toLocaleString('id-ID')} rows)</span></label>`).join('')}</div>` : `<p class="help">No curated datasets yet — curate one in <a href="#" data-r="tab" data-x="data">Data curation</a>, or write the presentation from your brief alone.</p>`}
     <label for="rpBrief">Brief</label><textarea id="rpBrief" rows="4" placeholder="Who is it for, what period, what should it emphasize? e.g. Laporan mingguan untuk Kepala Biro: sorot isu keterlambatan distribusi dan beri 3 rekomendasi strategi komunikasi."></textarea>
     <div class="chips" style="margin:8px 0 12px">${DECK_CHIPS.map((c, i) => `<button class="chip" data-r="kchip" data-x="${i}">${esc(c)}</button>`).join('')}</div>
-    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">${modelSelect('auto', 'rpDModel')}<label class="help" style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rpKnow"> Also use internal knowledge</label><button class="btn primary" data-r="draftdeck" ${S.busy ? 'disabled' : ''}>${S.busy === 'deck' ? spin('Writing slides… (up to a minute)') : ic('sparkle') + 'Draft slides'}</button></div>
-    <p class="help">The AI receives the summary tables and a sample of the data's text columns (personal-data columns left out), then writes the slide text. Charts and tables are filled from the real data on this server.</p></div>
+    ${stageSelects()}
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px"><label class="help" style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rpKnow"> Also use internal knowledge</label><button class="btn primary" data-r="draftdeck" ${S.busy ? 'disabled' : ''}>${S.busy === 'deck' ? spin('Writing slides… (up to a minute)') : ic('sparkle') + 'Draft slides'}</button></div>
+    <p class="help">The analysis model receives the summary tables and a sample of the data's text columns (personal-data columns left out), chooses the charts and writes the insights; the finalization model polishes the wording and checks the numbers but cannot change which data a chart or table shows. Charts and tables are filled from the real data on this server.</p></div>
     ${S.decks.length ? `<div class="tblwrap"><table class="tbl"><thead><tr><th>Presentation</th><th class="r">Slides</th><th>Updated</th><th></th></tr></thead><tbody>${S.decks.map(k => `<tr><td><a href="#" data-r="opendeck" data-x="${k.id}"><b>${esc(k.title)}</b></a><div class="muted">${esc(k.brief)}</div></td><td class="r">${k.slides}</td><td class="muted">${C.ago(k.updated)}</td><td class="r"><button class="btn sm" data-r="opendeck" data-x="${k.id}">Open</button> <button class="btn sm" data-r="pptx" data-x="${k.id}">${ic('download')}PPTX</button></td></tr>`).join('')}</tbody></table></div>` : ''}`);
 }
 async function openDeck(kid) { try { S.deck = await C.api('/api/reports/decks/' + kid); S.sources = await C.api('/api/reports/sources', { method: 'POST', body: { datasets: S.deck.datasets } }); S.tab = 'decks'; renderReports(); } catch (e) { C.toast(e.message, 4000); } }
@@ -145,9 +161,9 @@ function slideFields(s, i) {
 }
 function deckView() {
   const k = S.deck; const colors = tplColors(k.template);
-  body(`<div class="bar" style="align-items:center"><button class="btn sm" data-r="backdeck">← All presentations</button><input type="text" id="rpDTitle" value="${esc(k.title)}" style="flex:1;font-size:18px;font-weight:600">
+  body(`<div class="bar" style="align-items:center;flex-wrap:wrap;gap:8px"><button class="btn sm" data-r="backdeck">← All presentations</button><input type="text" id="rpDTitle" value="${esc(k.title)}" style="flex:1 1 320px;min-width:260px;font-size:18px;font-weight:600">
       <select id="rpDTpl" class="vsel">${S.templates.map(t => `<option value="${t.id}" ${t.id === k.template ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
-      <button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
+      ${finalizeSelect()}<button class="btn sm" data-r="refinal" ${S.busy ? 'disabled' : ''}>${S.busy === 'final' ? spin('Finalizing…') : ic('sparkle') + 'Finalize again'}</button><button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
     ${k.notes ? `<div class="notice">${esc(k.notes)}</div>` : ''}
     <div class="rp-slides">${k.outline.slides.map((s, i) => `<div class="rp-slide"><div class="rp-slide-l">${slideThumb(s, colors)}<div class="rp-slide-tools"><span class="badge">${i + 1} · ${KIND_LABEL[s.kind]}</span><button class="icon-btn" data-r="sup" data-x="${i}" title="Move up">↑</button><button class="icon-btn" data-r="sdown" data-x="${i}" title="Move down">↓</button><button class="icon-btn" data-r="sdel" data-x="${i}" title="Delete slide">${ic('trash')}</button></div></div><div class="rp-slide-r">${slideFields(s, i)}</div></div>`).join('')}</div>
     <div class="set-sec" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b style="flex:1">Add a slide</b>${Object.entries(KIND_LABEL).map(([kk, l]) => `<button class="btn sm" data-r="sadd" data-x="${kk}">${ic('plus')}${l}</button>`).join('')}</div>`);
@@ -223,11 +239,14 @@ async function onClick(e) {
       case 'todeck': S.prefDs = S.ds.id; S.tab = 'decks'; S.deck = null; await load(); renderReports(); break;
       case 'draftdeck': { const datasets = [...document.querySelectorAll('#rpDs input:checked')].map(i => i.value); const brief = $('#rpBrief').value.trim();
         if (!brief && !datasets.length) { C.toast('Write a brief or choose data first'); break; }
-        const payload = { title: $('#rpTitle').value.trim(), template: $('#rpTpl').value, datasets, brief, model: $('#rpDModel')?.value, knowledge: $('#rpKnow').checked };
+        const payload = { title: $('#rpTitle').value.trim(), template: $('#rpTpl').value, datasets, brief, model: $('#rpDModel')?.value, finalizeModel: $('#rpFModel')?.value, knowledge: $('#rpKnow').checked }; savePrefs({ analysis: payload.model, finalize: payload.finalizeModel });
         S.busy = 'deck'; renderReports();
         try { const k = await C.api('/api/reports/decks', { method: 'POST', body: payload }); S.busy = ''; await load(); await openDeck(k.id); C.refreshMe?.(); }
         finally { S.busy = ''; if (!S.deck) renderReports(); } break; }
       case 'opendeck': await openDeck(x); break;
+      case 'refinal': { const fm = $('#rpReFModel').value; savePrefs({ finalize: fm }); await saveDeck(true); S.busy = 'final'; renderReports();
+        try { S.deck = await C.api(`/api/reports/decks/${S.deck.id}/finalize`, { method: 'POST', body: { finalizeModel: fm } }); C.toast('Finalized by ' + (S.deck.finalizer?.label || 'AI')); C.refreshMe?.(); }
+        finally { S.busy = ''; renderReports(); } break; }
       case 'backdeck': if (S.deck?.dirty) await saveDeck(true); S.deck = null; await load(); renderReports(); break;
       case 'savedeck': await saveDeck(); renderReports(); break;
       case 'pptx': if (S.deck && S.deck.id === x) await saveDeck(true); await download(`/api/reports/decks/${x}/pptx`); break;
