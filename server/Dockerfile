@@ -6,6 +6,7 @@ COPY scripts ./scripts
 RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
 COPY public ./public
+COPY assets ./assets
 RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node
 EXPOSE 8080

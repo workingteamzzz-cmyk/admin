@@ -288,16 +288,16 @@ async function runOpenAI({ model, system, messages, useKnowledge, mode, emit, si
 }
 
 // Short non-streaming completion (titles, prompt polishing, routing).
-async function complete(user, model, system, text, purpose, maxTokens = 1024) {
+export async function complete(user, model, system, text, purpose, maxTokens = 1024, effort = 'low') {
   if (oaStyle(model.provider)) {
     const ep = endpoint(model.provider);
-    const res = await (model.provider === 'local' ? fetch : httpFetch)(ep.base + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ep.key }, body: JSON.stringify({ model: model.api, messages: [{ role: 'system', content: system }, { role: 'user', content: text }] }), signal: AbortSignal.timeout(60e3) });
+    const res = await (model.provider === 'local' ? fetch : httpFetch)(ep.base + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ep.key }, body: JSON.stringify({ model: model.api, messages: [{ role: 'system', content: system }, { role: 'user', content: text }] }), signal: AbortSignal.timeout(maxTokens > 4096 ? 300e3 : 60e3) });
     if (!res.ok) throw Object.assign(new Error('HTTP ' + res.status), { status: res.status });
     const j = await res.json(); const u = j.usage || {};
     recordUsage(user, model, { input: u.prompt_tokens, output: u.completion_tokens }, purpose);
     return (j.choices?.[0]?.message?.content || '').trim();
   }
-  const r = await (await anthropic()).messages.create({ model: model.api, max_tokens: maxTokens, output_config: { effort: 'low' }, system, messages: [{ role: 'user', content: text }] });
+  const r = await (await anthropic()).messages.create({ model: model.api, max_tokens: maxTokens, output_config: { effort }, system, messages: [{ role: 'user', content: text }] });
   const u = r.usage || {}; recordUsage(user, model, { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens }, purpose);
   return r.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
 }
@@ -396,6 +396,21 @@ export async function quick(user, purpose, text, chatId) {
     : 'You improve prompts for an AI assistant. Rewrite the user\'s prompt so it is clear, specific and well-structured: state the goal, relevant context, and the desired output format. Keep the user\'s intent and language, and keep any placeholders like ⟦NAME_1⟧ exactly. Do not answer the prompt. Reply with the improved prompt only.';
   const out = await complete(user, model, system, red.mask(String(text).slice(0, purpose === 'title' ? 1500 : 8000)) || ' ', purpose, purpose === 'title' ? 512 : 2048);
   return red.unmask(out);
+}
+
+// Model for report work: the one the user picked, else the model the admin's routing rule names for this kind of task.
+export function reportModel(user, requested, rule = 'writing') {
+  const settings = getSettings(); const allowed = modelsFor(user, settings);
+  if (!allowed.length) throw Object.assign(new Error('No AI model is available to you. Ask your administrator.'), { status: 503 });
+  if (requested && requested !== 'auto') { const m = allowed.find(x => x.id === requested); if (!m) throw Object.assign(new Error('You are not allowed to use that model.'), { status: 403 }); return m; }
+  const want = allModels(settings).find(m => m.id === settings.routing.rules[rule]) || allowed[0];
+  return substitute(want, allowed, false);
+}
+// The cheapest model the user may use (for bulk labelling).
+export function helperModel(user) {
+  const helper = modelsFor(user).sort((a, b) => tierRank(a.tier) - tierRank(b.tier) || (a.provider === 'anthropic' ? -1 : 1))[0];
+  if (!helper) throw Object.assign(new Error('No AI model available'), { status: 503 });
+  return helper.provider === 'anthropic' ? { ...helper, api: HELPER_MODEL, price: PRICES[HELPER_MODEL] } : helper;
 }
 
 export async function listOpenAIModels() {

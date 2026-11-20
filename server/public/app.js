@@ -1,6 +1,7 @@
 // Canopus — server edition. All AI calls and data go through this server; no API keys in the browser.
 import { marked } from '/vendor/marked.esm.js';
 import DOMPurify from '/vendor/purify.es.mjs';
+import { initReports, renderReports } from '/reports.js';
 
 DOMPurify.addHook('afterSanitizeAttributes', n => { if (n.tagName === 'A') { n.setAttribute('target', '_blank'); n.setAttribute('rel', 'noopener noreferrer'); } });
 
@@ -83,8 +84,16 @@ const BUILTIN_PROMPTS = [
   {id:'bp6', icon:'languages', title:'Formal translation', body:'Translate the text below into {{language}}. Keep a formal, official tone and preserve names, numbers and formatting.\n\n{{text}}'},
   {id:'bp7', icon:'megaphone', title:'Press release', body:'Draft a press release announcing {{announcement}}. Include a headline, a dateline, a lead paragraph, a quote from {{spokesperson}}, and boilerplate.'},
   {id:'bp8', icon:'mail', title:'Reply to an email', body:'Draft a reply to this email. Tone: {{tone}}. Goal: {{goal}}.\n\nEmail:\n{{email}}'},
+  {id:'bp9', icon:'megaphone', title:'Issue analysis', body:'Analisis isu berikut untuk tim komunikasi: {{isu}}.\n\nSusun: ringkasan isu, kronologi singkat, pemangku kepentingan dan posisinya, narasi yang beredar (positif/negatif), tingkat risiko reputasi (rendah/sedang/tinggi) beserta alasannya, dan 3–5 rekomendasi langkah komunikasi. Gunakan knowledge internal dan data monitoring terlampir bila ada.'},
+  {id:'bp10', icon:'bulb', title:'Key messages', body:'Rumuskan key messages untuk {{topik}} dengan audiens {{audiens}}.\n\nBerikan: 1 pesan utama (maks. 20 kata), 3 pesan pendukung masing-masing dengan bukti/data, kalimat yang sebaiknya dihindari, dan contoh kutipan untuk juru bicara.'},
+  {id:'bp11', icon:'chat', title:'Media Q&A prep', body:'Siapkan antisipasi pertanyaan wartawan tentang {{topik}} untuk {{juru_bicara}}.\n\nBuat 10 pertanyaan paling mungkin (termasuk yang sulit/menjebak) dan jawaban singkat yang aman, konsisten dengan key messages, serta catatan hal yang tidak boleh dijanjikan.'},
+  {id:'bp12', icon:'shield', title:'Crisis holding statement', body:'Isu sensitif sedang berkembang: {{situasi}}.\n\nBuat: (1) holding statement 3–4 kalimat yang empatik dan faktual, (2) daftar fakta yang perlu dipastikan dulu, (3) langkah 24 jam pertama, (4) kanal dan juru bicara yang tepat, (5) hal yang harus dihindari.'},
+  {id:'bp13', icon:'sparkle', title:'Brainstorm campaign ideas', body:'Brainstorming ide kampanye komunikasi untuk {{program}} dengan tujuan {{tujuan}} dan audiens {{audiens}}.\n\nBerikan 8 ide yang beragam (digital, media, komunitas, acara), masing-masing dengan: nama ide, inti gagasan, kanal, contoh konten, dan cara mengukur keberhasilan. Tandai 2 ide paling realistis untuk dijalankan bulan ini.'},
+  {id:'bp14', icon:'memo', title:'Communication strategy', body:'Susun strategi komunikasi untuk {{program}} periode {{periode}}.\n\nStruktur: situasi & temuan monitoring media, tujuan (SMART), audiens prioritas, key messages, taktik per kanal, juru bicara, kalender aktivitas, risiko & mitigasi, serta indikator keberhasilan.'},
 ];
 const BUILTIN_SKILLS = [
+  {id:'bs6', name:'Communications analyst', description:'Media monitoring, issue framing and strategic communication advice', builtin:true,
+   content:'When the user works on media coverage, public issues, campaigns or communication strategy: think like a senior government communications analyst. Separate facts from narratives; name stakeholders and their interests; assess reputational risk with reasons; tie recommendations to evidence (coverage numbers, sentiment, outlets, quotes); propose concrete actions with owner, channel and timing; suggest key messages and spokespeople; flag what must be verified before speaking publicly. Keep tone professional and neutral; never invent quotes or figures.'},
   {id:'bs1', name:'Formal Indonesian', description:'Official, EYD-compliant Bahasa Indonesia for government documents', builtin:true,
    content:'When the user writes in Indonesian or asks for an Indonesian document, write in formal Bahasa Indonesia that follows PUEBI/EYD: standard vocabulary (bahasa baku), correct capitalization of official titles and institutions, no slang or English loanwords when an Indonesian term exists, and a polite official register (Bapak/Ibu). For letters and memos, follow common Indonesian government formats (Nomor, Lampiran, Hal, salutation, closing).'},
   {id:'bs2', name:'Executive brief', description:'Bottom-line-up-front writing for busy decision makers', builtin:true,
@@ -203,10 +212,13 @@ async function start(meData){
   if(innerWidth<=820) $('#app').classList.add('collapsed');
   route();
 }
+// Opens a new chat with a file attached and a prompt to complete (used by Reports → Ask in chat).
+function chatWith(rec, text=''){ addFileRecord({...rec, ftype:ftypeOf(rec.name), added:Date.now()}); save(); state.current=null; pendingSpace=null; closePanel(); attachments=[{...rec, ftype:ftypeOf(rec.name)}]; go('home'); setTimeout(()=>{ renderChips(); input.value=text; autosize(); input.focus(); },40); }
+initReports({ api, esc, ic, hydrateIcons, toast, openModal, closeModal, confirmBox, ask, fmtSize, ago, isAdmin, me:()=>me, refreshMe:()=>refreshMe(), chatWith });
 async function refreshMe(){ try{ me=await api('/api/me'); renderSide(); updateTools(); }catch{} }
 
 /* ================= Routing ================= */
-const VIEWS=['home','knowledge','studio','sources','prompts','skills','space','admin'];
+const VIEWS=['home','knowledge','reports','studio','sources','prompts','skills','space','admin'];
 let spaceId=null, pendingSpace=null, pendingProject=null;
 const projectById=id=>me?.projects?.find(p=>p.id===id);
 const curView=()=>{ const v=location.hash.slice(1).split('/')[0]||'home'; return VIEWS.includes(v)?v:'home'; };
@@ -223,7 +235,7 @@ function route(){
 }
 function go(v){ if(location.hash==='#'+v) route(); else location.hash=v; }
 addEventListener('hashchange', ()=>{ if(location.hash.startsWith('#invite=')) return showInvite(location.hash.slice(8)); route(); });
-function renderPage(v=curView()){ ({home:renderHome, knowledge:renderKnowledge, studio:renderStudio, sources:renderSources, prompts:renderPrompts, skills:renderSkills, space:renderSpace, admin:renderAdmin}[v]||renderHome)(); }
+function renderPage(v=curView()){ ({home:renderHome, knowledge:renderKnowledge, reports:renderReports, studio:renderStudio, sources:renderSources, prompts:renderPrompts, skills:renderSkills, space:renderSpace, admin:renderAdmin}[v]||renderHome)(); }
 
 /* ================= Sidebar ================= */
 function renderSide(){

@@ -8,6 +8,7 @@ import { hashPassword, verifyPassword, passwordProblem, createInvite, inviteUser
 import { ingestDoc, deleteDoc, deleteCollection, classificationProblem, search } from './knowledge.mjs';
 import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels } from './ai.mjs';
 import { emit as emitWebhook } from './webhooks.mjs';
+import * as R from './reports.mjs';
 import { bootstrapAdmin } from './cli.mjs';
 import { newTicket, useTicket, dropTicket, twoFactorRequired, newTotpSecret, verifyTotp, otpauthUrl, qrSvg, seal, unseal, ipAllowed, purge } from './security.mjs';
 
@@ -392,6 +393,47 @@ route('POST', '/api/v1/collections/:id/docs', async (req, res, _u, p) => {
   audit(u.id, 'knowledge.upload', { doc: doc.id, title: doc.title, classification, status: doc.status, via: t.name }, clientIp(req));
   json(res, 200, { id: doc.id, title: doc.title, status: doc.status, error: doc.error, passages: doc.chunks });
 }, { public: true, token: true });
+
+/* ---------- reports: curated spreadsheets and presentations ---------- */
+const sendFile = (res, buf, name, type) => { res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}` }); res.end(buf); };
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', PPTX_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+route('GET', '/api/reports', async (req, res, u) => json(res, 200, { templates: await R.listTemplates(u), datasets: R.listDatasets(u), decks: R.listDecks(u), meta: R.REPORT_META }));
+route('POST', '/api/reports/templates', async (req, res, u) => {
+  const buf = await readBody(req, config.maxUploadMb * MB); const org = req.headers['x-scope'] === 'organization';
+  const t = await R.addTemplate(u, { filename: fileName(req), buf, name: req.headers['x-title'] ? decodeURIComponent(req.headers['x-title']) : null, organization: org });
+  audit(u.id, 'report.template_added', { template: t.id, file: fileName(req), scope: org && u.role === 'admin' ? 'organization' : 'personal' }, clientIp(req)); json(res, 200, t);
+});
+route('DELETE', '/api/reports/templates/:id', (req, res, u, p) => { const t = R.deleteTemplate(u, p.id); audit(u.id, 'report.template_deleted', { template: t.id, name: t.name }, clientIp(req)); json(res, 200, { ok: true }); });
+route('GET', '/api/reports/templates/:id/file', (req, res, u, p) => { const f = R.templateFile(u, p.id); sendFile(res, f.buf, f.name, PPTX_TYPE); });
+route('POST', '/api/reports/datasets', async (req, res, u) => {
+  const buf = await readBody(req, config.maxUploadMb * MB); const d = await R.addDataset(u, { filename: fileName(req), buf });
+  audit(u.id, 'report.dataset_added', { dataset: d.id, file: d.filename, rows: d.sheets.reduce((a, s) => a + s.rows, 0) }, clientIp(req)); json(res, 200, d);
+});
+route('GET', '/api/reports/datasets/:id', async (req, res, u, p) => json(res, 200, await R.getDataset(u, p.id)));
+route('PATCH', '/api/reports/datasets/:id', async (req, res, u, p) => { const { name } = await readJson(req, 10e3); R.renameDataset(u, p.id, name); json(res, 200, { ok: true }); });
+route('DELETE', '/api/reports/datasets/:id', (req, res, u, p) => { const d = R.deleteDataset(u, p.id); audit(u.id, 'report.dataset_deleted', { dataset: d.id, file: d.filename }, clientIp(req)); json(res, 200, { ok: true }); });
+route('POST', '/api/reports/datasets/:id/plan', async (req, res, u, p) => {
+  const body = await readJson(req, 50e3); const r = await R.planDataset(u, p.id, body);
+  audit(u.id, 'report.plan', { dataset: p.id, model: r.model.id, steps: r.plan.steps.length }, clientIp(req)); json(res, 200, r);
+});
+route('POST', '/api/reports/datasets/:id/run', async (req, res, u, p) => {
+  const body = await readJson(req, 2 * MB); const r = await R.runDataset(u, p.id, body);
+  audit(u.id, 'report.curate', { dataset: p.id, steps: r.log.length, failed: r.log.filter(l => !l.ok).length, aiRows: r.aiRows }, clientIp(req)); json(res, 200, await R.getDataset(u, p.id));
+});
+route('GET', '/api/reports/datasets/:id/xlsx', async (req, res, u, p) => { const f = await R.datasetXlsx(u, p.id); audit(u.id, 'report.download', { dataset: p.id, type: 'xlsx' }, clientIp(req)); sendFile(res, f.buf, f.name, XLSX_TYPE); });
+route('POST', '/api/reports/datasets/:id/attach', (req, res, u, p) => json(res, 200, R.datasetDigest(u, p.id)));
+route('POST', '/api/reports/sources', async (req, res, u) => { const { datasets } = await readJson(req, 20e3); json(res, 200, R.deckSources(u, Array.isArray(datasets) ? datasets : [])); });
+route('POST', '/api/reports/decks', async (req, res, u) => {
+  const body = await readJson(req, 100e3); const k = await R.draftDeck(u, body);
+  audit(u.id, 'report.deck_drafted', { deck: k.id, model: k.model.id, slides: k.outline.slides.length, datasets: k.datasets.length }, clientIp(req)); json(res, 200, k);
+});
+route('GET', '/api/reports/decks/:id', (req, res, u, p) => json(res, 200, R.getDeck(u, p.id)));
+route('PUT', '/api/reports/decks/:id', async (req, res, u, p) => json(res, 200, R.saveDeck(u, p.id, await readJson(req, 1 * MB))));
+route('DELETE', '/api/reports/decks/:id', (req, res, u, p) => { R.deleteDeck(u, p.id); json(res, 200, { ok: true }); });
+route('GET', '/api/reports/decks/:id/pptx', async (req, res, u, p) => {
+  const r = await R.deckPptx(u, p.id); audit(u.id, 'report.download', { deck: p.id, type: 'pptx', slides: r.slides }, clientIp(req));
+  res.setHeader('x-canopus-warnings', encodeURIComponent(JSON.stringify(r.warnings).slice(0, 2000))); sendFile(res, r.buf, r.name, PPTX_TYPE);
+});
 
 /* ---------- static files ---------- */
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json' };

@@ -26,7 +26,8 @@ const TIMEOUT = LIVE ? 240000 : 30000;
 
 // Values that must never reach the AI service (they are in the test documents).
 const SECRETS = { nik: '3174012345678901', email: 'budi.santoso@example.go.id', term: 'Proyek Garuda',
-  patient: 'Siti Aminah', rm: 'RM-778899', diagnosis: 'Demam Berdarah Dengue', local: 'LOCAL-SECRET-42' };
+  patient: 'Siti Aminah', rm: 'RM-778899', diagnosis: 'Demam Berdarah Dengue', local: 'LOCAL-SECRET-42',
+  mediaPhone: '081298765432', mediaEmail: 'redaksi.rahasia@example.co.id' };
 
 /* ---------------- Claude API: simulator (default) or recording forwarder (--live) ---------------- */
 const recorded = [];
@@ -61,6 +62,34 @@ function simulate(body) {
   if (/HTML page/i.test(q)) return sse([...head, ...text('Here it is.\n\n```html\n<!doctype html><html><head><title>Harness Canvas</title></head><body><h1>Hello Canopus</h1></body></html>\n```\n\nDone.'), ...end('end_turn')]);
   const ex = q.match(/Reply with exactly:\s*(\S+)/i);
   return sse([...head, ...text((ex ? ex[1] : 'Halo! Ada yang bisa saya bantu?') + (/PELANGI/.test(JSON.stringify(body.system)) ? ' PELANGI' : '')), ...end('end_turn')]);
+}
+// Simulated answers for Reports: curation plans, labels and slide outlines (JSON, like the real model is asked for).
+function reportMock(sys, q) {
+  try { sys = JSON.parse(sys); } catch {}
+  if (/You plan data-curation steps/.test(sys)) return JSON.stringify({ title: 'Monitoring kurasi', explanation: 'Membersihkan data, membuang duplikat, melabeli sentimen yang kosong, lalu merekap.', steps: [
+    { op: 'clean', columns: [], actions: ['trim', 'empty_words'] }, { op: 'replace', column: 'Nama Media', pairs: [['kompas', 'Kompas'], ['KOMPAS', 'Kompas']] },
+    { op: 'dedupe', columns: ['Link'] }, { op: 'clean', columns: ['Tanggal'], actions: ['date'] }, { op: 'clean', columns: ['Sentimen'], actions: ['title'] },
+    { op: 'ai_tag', column: 'Sentimen', from: ['Judul Berita', 'Ringkasan'], labels: ['Positif', 'Netral', 'Negatif'], instruction: 'Sentimen terhadap kementerian', only_empty: true },
+    { op: 'ai_tag', column: 'Isu', from: ['Judul Berita'], labels: [], instruction: 'Isu utama berita' },
+    { op: 'summary', name: 'Rekap per Media', group_by: ['Nama Media'], measures: [{ fn: 'count', as: 'Jumlah' }, { fn: 'sum', column: 'AVE (Rp)', as: 'Total AVE' }], total: true },
+    { op: 'summary', name: 'Sebaran Sentimen', group_by: ['Sentimen'], measures: [{ fn: 'count', as: 'Jumlah' }, { fn: 'percent', as: '%' }] },
+    { op: 'pivot', name: 'Tren Sentimen', rows: 'Tanggal', columns: 'Sentimen', fn: 'count' }] });
+  if (/You design a small set of categories/.test(sys)) return JSON.stringify({ labels: ['Distribusi', 'Anggaran', 'Layanan Digital'] });
+  if (/You label texts/.test(sys)) { const allowed = [...sys.matchAll(/"([^"]+)"/g)].map(m => m[1]); const out = {};
+    for (const m of q.matchAll(/^(\d+)\. (.*)$/gm)) { const t = m[2]; const pick = /keluh|kritik|terlambat/i.test(t) ? ['Negatif', 'Distribusi', 'Anggaran'] : /resmi|diperluas|kolaborasi/i.test(t) ? ['Positif', 'Layanan Digital'] : ['Netral', 'Lainnya'];
+      out[m[1]] = pick.find(x => allowed.includes(x)) || allowed[0]; }
+    return JSON.stringify(out); }
+  if (/senior communications analyst/.test(sys)) { const ds = q.match(/### (.+?) \/ Data/)?.[1] || 'Data'; const ref = /Reference structure/.test(q);
+    return JSON.stringify({ title: 'Laporan Monitoring Media', notes: ref ? 'Mengikuti struktur referensi template.' : 'Disusun dari data monitoring.', slides: [
+      { kind: 'title', title: 'Laporan Monitoring Media', subtitle: 'Periode November 2026' },
+      { kind: 'kpi', title: 'Angka Kunci', items: [{ value: '24', label: 'Pemberitaan' }, { value: '3', label: 'Media' }], caption: 'Isu ⟦NAME_1⟧ ikut diberitakan.' },
+      { kind: 'chart', title: 'Sebaran Sentimen', source: `${ds} / Sebaran Sentimen`, chart: 'doughnut', category: 'Sentimen', series: ['Jumlah'], caption: 'Sentimen netral dominan.' },
+      { kind: 'chart', title: 'Tren Harian', source: `${ds} / Tren Sentimen`, chart: 'column', category: 'Tanggal', series: ['Positif', 'Netral', 'Negatif'], stacked: true, caption: 'Puncak pemberitaan di awal bulan.' },
+      { kind: 'table', title: 'Rekap per Media', source: `${ds} / Rekap per Media`, caption: 'Kompas paling aktif.' },
+      { kind: 'table', title: 'Daftar Berita Negatif', source: `${ds} / Data`, columns: ['Tanggal', 'Nama Media', 'Judul Berita', 'Sentimen'], top: 8 },
+      { kind: 'bullets', title: 'Rekomendasi Strategi Komunikasi', bullets: ['Klarifikasi isu **distribusi**', '- Siapkan data per provinsi', 'Perkuat cerita penerima manfaat'] },
+      { kind: 'closing', title: 'Terima kasih', subtitle: 'Biro Komunikasi' }] }); }
+  return null;
 }
 function classifyMock(q) {
   if (/anggaran|koordinator|pasien|dokumen|marker|NIK|kunjungan|rekam|⟦/i.test(q)) return 'knowledge';
@@ -103,7 +132,7 @@ async function startClaudeEndpoint() {
     }
     const body = JSON.parse(raw || '{}');
     const sys = JSON.stringify(body.system || '');
-    if (!body.stream) { const reply = /Classify the user/.test(sys) ? classifyMock(userText(lastUser(body))) : 'Harness Chat';
+    if (!body.stream) { const reply = /Classify the user/.test(sys) ? classifyMock(userText(lastUser(body))) : reportMock(sys, userText(lastUser(body))) ?? 'Harness Chat';
       res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ id: 'm', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: reply }], stop_reason: 'end_turn', usage: { input_tokens: 50, output_tokens: 5 } })); }
     if (/SIMULATE-OUTAGE/.test(JSON.stringify(body.messages))) { res.writeHead(529, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } })); }
     res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(simulate(body));
@@ -132,9 +161,13 @@ function pdf(lines) {
   return Buffer.from(out + `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${x}\n%%EOF\n`, 'latin1');
 }
 const FIX = fs.mkdtempSync(path.join(os.tmpdir(), 'canopus-fix-'));
-const F = { mbg: path.join(FIX, 'program-mbg-2026.txt'), polhukam: path.join(FIX, 'catatan-polhukam.pdf'), secret: path.join(FIX, 'nota-rahasia.txt'),
+const F = { media: path.join(FIX, 'monitoring-media-nov.csv'), mbg: path.join(FIX, 'program-mbg-2026.txt'), polhukam: path.join(FIX, 'catatan-polhukam.pdf'), secret: path.join(FIX, 'nota-rahasia.txt'),
   patients: path.join(FIX, 'data-pasien-poli.csv'), local: path.join(FIX, 'catatan-klinis.txt') };
 fs.writeFileSync(F.patients, `No RM,Nama Pasien,NIK,Alamat,Poli,Kunjungan Terakhir,Diagnosa\n${SECRETS.rm},${SECRETS.patient},3171015505800002,Jl. Melati 5 Jakarta,Penyakit Dalam,2026-11-10,${SECRETS.diagnosis}\nRM-778900,Joko Prasetyo,3171011203750001,Jl. Kenanga 9 Bogor,Anak,2026-11-12,Bronkitis Akut\n`);
+{ const outlets = ['Kompas', 'kompas', 'KOMPAS ', 'detikcom', 'Tempo']; const news = [['Program makan bergizi diperluas ke 10 provinsi', 'Program diperluas, orang tua menyambut baik.'], ['Keterlambatan distribusi bantuan dikeluhkan warga', 'Warga mengeluhkan bantuan terlambat.'], ['Menteri resmikan layanan digital baru', 'Layanan digital mempercepat pelayanan.'], ['DPR kritik serapan anggaran ' + SECRETS.term, 'Serapan anggaran dinilai rendah.']];
+  const lines = ['LAPORAN MONITORING MEDIA NOVEMBER 2026;;;;;;;;', ';;;;;;;;', 'Tanggal;Nama Media;Judul Berita;Ringkasan;Link;No HP Narasumber;Email Wartawan;Sentimen;AVE (Rp)'];
+  for (let i = 0; i < 26; i++) { const n = news[i % 4]; lines.push([`${String(1 + (i % 9)).padStart(2, '0')}/11/2026`, outlets[i % 5], n[0], n[1], `https://www.media.id/read/${i % 24}`, SECRETS.mediaPhone, SECRETS.mediaEmail, i % 3 ? '' : 'positif', (i % 4 + 1) * 2500000].join(';')); }
+  fs.writeFileSync(F.media, lines.join('\n')); }
 fs.writeFileSync(F.local, `Catatan klinis rekam medis (hanya on-premise).\n\nMarker verifikasi rekam medis: ${SECRETS.local}. Pasien kontrol ulang setiap dua minggu.\n`);
 fs.writeFileSync(F.mbg, `Program Makan Bergizi Gratis (MBG) 2026\n\nAnggaran program tahun 2026 adalah Rp71 triliun dan menjangkau 82,9 juta penerima manfaat di seluruh provinsi.\n\nKoordinator pelaksana: Budi Santoso, NIK ${SECRETS.nik}, email ${SECRETS.email}. Kegiatan ini terkait ${SECRETS.term} tahap kedua.\n`);
 fs.writeFileSync(F.polhukam, pdf(['Catatan Polhukam (terbatas)', 'Verification marker dokumen ini adalah ORION-77.', 'Hanya untuk kelompok Polhukam.']));
@@ -299,7 +332,7 @@ try {
     return ok((await A.locator('#adminBody .col-card', { hasText: 'Asisten Program' }).count()) === 1, 'project listed');
   });
   await step(A, 'invite-user', 'Invite a normal user into the Ekonomi group', async () => {
-    await A.goto(canopus.url + '#admin'); await A.click('[data-atab=users]'); await A.click('[data-act=adduser]');
+    await A.goto(canopus.url + '#admin'); await A.click('[data-atab=users]'); await A.click('[data-act=adduser]'); await A.waitForTimeout(150);
     await A.fill('#uEmail', 'staf@kantor.go.id'); await A.fill('#uName', 'Staf Ekonomi'); await A.locator('#uGroups label', { hasText: 'Ekonomi' }).locator('input').check();
     await A.click('[data-act=saveuser]'); await A.waitForSelector('#linkIn'); inviteB = await A.inputValue('#linkIn'); await A.keyboard.press('Escape');
     return ok(/#invite=/.test(inviteB), 'invite link created');
@@ -423,9 +456,67 @@ try {
     await putJson(A, '/api/admin/settings', { canvas: false }); await B.reload(); await B.waitForSelector('#app:not([hidden])');
     return ok(await B.locator('[data-go=studio]').isHidden(), 'Studio hidden for users with no canvases');
   });
+  await step(A, 'report-curate', 'Reports: AI plans the curation, the server runs it (duplicates, labels, summaries) and exports Excel', async () => {
+    const before = recorded.length; await setModel(A, 'auto');
+    await A.goto(canopus.url + '#reports'); await A.waitForSelector('[data-r=pickds]'); await A.setInputFiles('#rpDsFile', F.media); await A.waitForSelector('#rpInstr', { timeout: 10000 });
+    await A.fill('#rpInstr', 'Bersihkan, buang duplikat, beri label sentimen yang kosong dan isu, lalu rekap per media, sentimen dan tren harian.');
+    await A.click('[data-r=plan]'); await A.waitForSelector('.rp-step', { timeout: TIMEOUT }); const steps = await A.locator('.rp-step').count();
+    await A.click('[data-r=run]'); await A.waitForSelector('[data-r=rtab]', { timeout: TIMEOUT }); await A.waitForTimeout(300);
+    await A.locator('.rp-steps').scrollIntoViewIfNeeded(); await A.screenshot({ path: path.join(OUT, 'server-report-plan.png') }); await A.locator('[data-r=rtab]').nth(1).click(); await A.locator('[data-r=rtab]').first().scrollIntoViewIfNeeded(); await A.waitForTimeout(200); await A.screenshot({ path: path.join(OUT, 'server-report-result.png') });
+    const id = await A.evaluate(() => document.querySelector('[data-r=askds]') && fetch('/api/reports').then(r => r.json()).then(j => j.datasets[0].id));
+    const d = JSON.parse((await apiCall(A, '/api/reports/datasets/' + id)).body);
+    const sent = recorded.slice(before).filter(r => r.kind !== 'local'); const planReq = sent.find(r => /You plan data-curation/.test(r.raw)); const tagReqs = sent.filter(r => /You label texts/.test(r.raw));
+    const sentiment = d.result.table.columns.indexOf('Sentimen'); const unlabeled = d.result.table.preview.filter(r => !r[sentiment]).length;
+    const x = await A.evaluate(async id => { const r = await fetch(`/api/reports/datasets/${id}/xlsx`); const b = new Uint8Array(await r.arrayBuffer()); return { status: r.status, type: r.headers.get('content-type'), size: b.length, pk: b[0] === 0x50 && b[1] === 0x4b }; }, id);
+    const sheetSkip = d.sheets[0].skipped; const rowsNoRows = planReq && !planReq.raw.includes('/read/7') && !planReq.raw.includes(SECRETS.mediaPhone) ? 'profile only' : 'ROWS SENT';
+    return ok(steps >= 8 && d.result.table.rows === 24 && d.result.summaries.length === 3 && !unlabeled && tagReqs.length >= 2 && x.status === 200 && x.pk && sheetSkip >= 1 && rowsNoRows === 'profile only' && !leaks().length,
+      `plan steps ${steps} · title rows skipped ${sheetSkip} · rows 26 → ${d.result.table.rows} · summaries ${d.result.summaries.map(s => s.name).join(', ')} · unlabeled ${unlabeled} · label requests ${tagReqs.length} · planning saw: ${rowsNoRows} · xlsx ${x.status} ${x.size} B · leaks ${leaks().length}`);
+  });
+  let deckFile = null;
+  await step(A, 'report-deck', 'Reports: AI drafts the slides, the server builds a PowerPoint with native charts and tables', async () => {
+    const before = recorded.length; await A.click('[data-r=todeck]'); await A.waitForSelector('#rpBrief');
+    await A.fill('#rpBrief', 'Laporan monitoring media mingguan untuk pimpinan, dengan rekomendasi strategi komunikasi.'); await A.click('[data-r=draftdeck]');
+    await A.waitForSelector('.rp-slide', { timeout: TIMEOUT }); const slides = await A.locator('.rp-slide').count();
+    const kid = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.decks[0].id));
+    const deck = JSON.parse((await apiCall(A, '/api/reports/decks/' + kid)).body); const unmasked = deck.outline.slides[1].caption.includes(SECRETS.term);
+    const b64 = await A.evaluate(async kid => { const r = await fetch(`/api/reports/decks/${kid}/pptx`); const b = new Uint8Array(await r.arrayBuffer()); let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s); }, kid);
+    deckFile = path.join(OUT, 'harness-deck.pptx'); fs.writeFileSync(deckFile, Buffer.from(b64, 'base64'));
+    const JSZip = require('jszip'); const z = await JSZip.loadAsync(fs.readFileSync(deckFile)); const files = Object.keys(z.files);
+    const nSlides = files.filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f)).length, nCharts = files.filter(f => /^ppt\/charts\/chart\d+\.xml$/.test(f)).length, nEmb = files.filter(f => /^ppt\/embeddings\/.*\.xlsx$/.test(f)).length;
+    const all = (await Promise.all(files.filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f)).map(f => z.file(f).async('string')))).join('');
+    const realData = all.includes('Kompas') && all.includes(SECRETS.term) && !all.includes('⟦');
+    const outlineReq = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const sawMasked = outlineReq && !outlineReq.raw.includes(SECRETS.term) && !outlineReq.raw.includes(SECRETS.mediaPhone);
+    let rendered = 'not rendered';
+    try { require('child_process').execFileSync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', OUT, deckFile], { timeout: 120000, stdio: 'ignore' }); require('child_process').execFileSync('pdftoppm', ['-r', '50', '-png', path.join(OUT, 'harness-deck.pdf'), path.join(OUT, 'server-deck')], { timeout: 60000 }); rendered = 'rendered with LibreOffice'; } catch {}
+    return ok(slides === 8 && nSlides >= 8 && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · AI saw masked term & no phone: ${sawMasked} · ${rendered}`);
+  });
+  await step(A, 'report-template', 'Reports: an earlier report uploaded as template gives its design and its structure to the next deck', async () => {
+    const before = recorded.length;
+    await A.click('[data-r=backdeck]').catch(() => {}); await A.click('[data-r=tab][data-x=templates]'); await A.waitForSelector('[data-r=picktpl]');
+    await A.setInputFiles('#rpTplFile', deckFile); await A.waitForFunction(() => document.querySelectorAll('.rp-tpls .card').length >= 2, null, { timeout: 10000 });
+    await A.waitForTimeout(300); await A.screenshot({ path: path.join(OUT, 'server-report-templates.png') }); const tpls = JSON.parse((await apiCall(A, '/api/reports')).body).templates; const t = tpls.find(x => !x.builtin);
+    await A.click('[data-r=tab][data-x=decks]'); await A.waitForSelector('#rpBrief'); await A.selectOption('#rpTpl', t.id); await A.check('#rpDs input'); await A.fill('#rpBrief', 'Laporan minggu berikutnya'); await A.click('[data-r=draftdeck]');
+    await A.waitForSelector('.rp-slide', { timeout: TIMEOUT }); const req = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw));
+    const usedStructure = !!req && req.raw.includes('Reference structure') && req.raw.includes('Rekomendasi Strategi Komunikasi');
+    const kid = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.decks[0].id)); const r2 = await A.evaluate(async kid => (await fetch(`/api/reports/decks/${kid}/pptx`)).status, kid);
+    return ok(t && t.scope === 'organization' && t.info.structure.length >= 8 && usedStructure && r2 === 200, `template “${t?.name}” (${t?.scope}) · reference slides ${t?.info.structure.length} · AI followed structure: ${usedStructure} · build ${r2}`);
+  });
+  await step(A, 'report-ask', 'Reports: “Ask in chat” attaches the curated data (without personal columns) for questions and brainstorming', async () => {
+    const before = recorded.length; await A.click('[data-r=tab][data-x=data]'); await A.waitForTimeout(200); if (!(await A.isVisible('[data-r=askds]'))) await A.click('[data-r=opends]'); await A.waitForSelector('[data-r=askds]'); await A.click('[data-r=askds]');
+    await A.waitForSelector('#v-home:not([hidden])'); await A.waitForTimeout(300); const chips = await A.locator('#chips .chip').count(); const pre = await A.inputValue('#input');
+    await A.fill('#input', pre + 'media mana yang paling banyak memberitakan isu negatif? Beri 3 ide strategi.'); await A.keyboard.press('Enter'); await waitIdle(A); const r = await lastBot(A);
+    const req = recorded.slice(before).filter(x => x.kind !== 'local').find(x => x.raw.includes('Rekap per Media'));
+    return ok(chips === 1 && !r.error && req && !req.raw.includes(SECRETS.mediaEmail) && !req.raw.includes(SECRETS.mediaPhone) && !leaks().length, `attachment chips ${chips} · answered: ${!r.error} · data reached AI: ${!!req} · personal columns left out: ${!!req && !req.raw.includes(SECRETS.mediaEmail)}`);
+  });
+  await step(B, 'report-isolation', 'Reports: another user cannot open someone else’s datasets or presentations', async () => {
+    const ids = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => ({ d: j.datasets[0].id, k: j.decks[0].id })));
+    const r1 = await apiCall(B, '/api/reports/datasets/' + ids.d), r2 = await apiCall(B, `/api/reports/decks/${ids.k}/pptx`), r3 = await apiCall(B, `/api/reports/datasets/${ids.d}/xlsx`);
+    const mine = JSON.parse((await apiCall(B, '/api/reports')).body); const orgTpl = mine.templates.some(t => !t.builtin && t.scope === 'organization');
+    return ok([r1.status, r2.status, r3.status].every(s => s === 404) && !mine.datasets.length && orgTpl, `dataset ${r1.status} · deck ${r2.status} · xlsx ${r3.status} · sees org template: ${orgTpl}`);
+  });
   await step(null, 'no-leaks', 'No sensitive value ever reached a cloud AI provider', async () => ok(cloud().length > 0 && !leaks().length, `${cloud().length} cloud requests inspected (Claude + GPT) · ${recorded.length - cloud().length} on-premise · leaks: ${leaks().length}`));
   await step(A, 'tour', 'Every page renders (screenshots for review)', async () => {
-    for (const v of ['home', 'knowledge', 'studio', 'prompts', 'skills']) { await A.goto(canopus.url + '#' + v); if (v === 'home') await A.click('[data-go=home]'); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, `server-page-${v}.png`) }); }
+    for (const v of ['home', 'knowledge', 'reports', 'studio', 'prompts', 'skills']) { await A.goto(canopus.url + '#' + v); if (v === 'home') await A.click('[data-go=home]'); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, `server-page-${v}.png`) }); }
     await A.goto(canopus.url + '#admin'); for (const t of ['security', 'users', 'groups', 'projects', 'knowledge', 'models', 'settings', 'integrations', 'usage', 'audit']) { await A.click(`[data-atab=${t}]`); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, `server-admin-${t}.png`) }); }
     const M = await browser.newContext({ viewport: { width: 390, height: 844 } }); const pm = await M.newPage(); await pm.goto(canopus.url); await pm.waitForTimeout(500); await pm.screenshot({ path: path.join(OUT, 'server-page-mobile-login.png') }); await M.close();
     return ok(!pageErrors.length, pageErrors.join(' | ') || 'no page errors');

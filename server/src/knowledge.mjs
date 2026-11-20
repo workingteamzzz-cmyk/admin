@@ -81,7 +81,7 @@ async function readXlsx(buf) {
   }
   return sheets;
 }
-async function readSheets(buf, filename) {
+export async function readSheets(buf, filename) {
   if (/\.xlsx$/i.test(filename)) return readXlsx(buf);
   const text = buf.toString('utf8').replace(/^\uFEFF/, '');
   const first = text.split('\n')[0]; const delim = /\.tsv$/i.test(filename) ? '\t' : (first.split(';').length > first.split(',').length ? ';' : ',');
