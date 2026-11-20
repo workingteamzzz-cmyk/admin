@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT NOT NULL, des
   collections TEXT NOT NULL DEFAULT '[]', groups TEXT NOT NULL DEFAULT '[]', model TEXT NOT NULL DEFAULT 'auto', created INTEGER NOT NULL, updated INTEGER NOT NULL);
 `);
 // Columns added after the first release.
-for (const sql of [`ALTER TABLE users ADD COLUMN totp_secret TEXT`, `ALTER TABLE users ADD COLUMN totp_last INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE sessions ADD COLUMN last_seen INTEGER`, `ALTER TABLE redactions ADD COLUMN created INTEGER`, `ALTER TABLE collections ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE docs ADD COLUMN sensitive INTEGER DEFAULT 0`, `ALTER TABLE groups ADD COLUMN budget_usd REAL`, `ALTER TABLE groups ADD COLUMN models TEXT`, `ALTER TABLE usage ADD COLUMN provider TEXT`]) { try { db.exec(sql); } catch {} }
+for (const sql of [`ALTER TABLE users ADD COLUMN totp_secret TEXT`, `ALTER TABLE users ADD COLUMN totp_last INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE sessions ADD COLUMN last_seen INTEGER`, `ALTER TABLE redactions ADD COLUMN created INTEGER`, `ALTER TABLE collections ADD COLUMN local_only INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE docs ADD COLUMN sensitive INTEGER DEFAULT 0`, `ALTER TABLE groups ADD COLUMN budget_usd REAL`, `ALTER TABLE groups ADD COLUMN models TEXT`, `ALTER TABLE usage ADD COLUMN provider TEXT`, `ALTER TABLE collections ADD COLUMN kind TEXT NOT NULL DEFAULT 'admin'`, `ALTER TABLE collections ADD COLUMN owner_id TEXT`, `ALTER TABLE collections ADD COLUMN private INTEGER NOT NULL DEFAULT 0`]) { try { db.exec(sql); } catch {} }
 
 export const id = () => crypto.randomBytes(9).toString('base64url');
 export const now = () => Date.now();
@@ -77,10 +77,18 @@ export function groupSpent(groupId) { return one(`SELECT COALESCE(SUM(us.cost),0
 
 // Collections a user may read: admins see all; otherwise collections with no group restriction, or sharing a group with the user.
 export function allowedCollections(user) {
-  if (user.role === 'admin') return all(`SELECT * FROM collections ORDER BY name`);
-  return all(`SELECT c.* FROM collections c WHERE NOT EXISTS (SELECT 1 FROM collection_groups cg WHERE cg.collection_id=c.id)
-    OR EXISTS (SELECT 1 FROM collection_groups cg JOIN user_groups ug ON ug.group_id=cg.group_id WHERE cg.collection_id=c.id AND ug.user_id=?) ORDER BY c.name`, user.id);
+  // A person's private knowledge is visible only to that person (not even to administrators in the app).
+  const notPrivate = `NOT (c.kind='person' AND c.private=1 AND c.owner_id IS NOT ?)`;
+  if (user.role === 'admin') return all(`SELECT c.* FROM collections c WHERE ${notPrivate} ORDER BY c.name`, user.id);
+  return all(`SELECT c.* FROM collections c WHERE ${notPrivate} AND (NOT EXISTS (SELECT 1 FROM collection_groups cg WHERE cg.collection_id=c.id)
+    OR EXISTS (SELECT 1 FROM collection_groups cg JOIN user_groups ug ON ug.group_id=cg.group_id WHERE cg.collection_id=c.id AND ug.user_id=?)) ORDER BY c.name`, user.id, user.id);
 }
+// Shared spaces every organization gets: one team collection for everyone, and one collection per person.
+export function ensureSpaces(user) {
+  if (!one(`SELECT 1 FROM collections WHERE kind='team'`)) run(`INSERT INTO collections(id,name,description,created,kind) VALUES(?,?,?,?,?)`, id(), 'Team knowledge', 'Documents and files for everyone in the organization.', now(), 'team');
+  if (!one(`SELECT 1 FROM collections WHERE kind='person' AND owner_id=?`, user.id)) run(`INSERT INTO collections(id,name,description,created,kind,owner_id) VALUES(?,?,?,?,?,?)`, id(), user.name || user.email, 'Personal knowledge', now(), 'person', user.id);
+}
+export function canUpload(user, c) { return user.role === 'admin' && c.kind === 'admin' || c.kind === 'team' || c.kind === 'client' || (c.kind === 'person' && c.owner_id === user.id); }
 
 // Shared projects a user may use: no group restriction, or sharing a group with the user (admins see all).
 export function projectsFor(user) {

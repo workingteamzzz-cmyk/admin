@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, desc
 CREATE TABLE IF NOT EXISTS client_recipes(id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL, plan TEXT NOT NULL, columns TEXT NOT NULL DEFAULT '[]', created_by TEXT, created INTEGER NOT NULL);
 `);
 for (const sql of ['ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT']) { try { db.exec(sql); } catch {} }
+try { db.exec(`UPDATE collections SET kind='client' WHERE kind='admin' AND id IN (SELECT collection_id FROM clients)`); } catch {}
 const DIR = path.join(config.dataDir, 'reports');
 fs.mkdirSync(path.join(DIR, 'datasets'), { recursive: true, mode: 0o700 });
 fs.mkdirSync(path.join(DIR, 'templates'), { recursive: true, mode: 0o700 });
@@ -44,7 +45,7 @@ export function saveClient(user, cid, { name, description, instructions }) {
   if (one(`SELECT 1 FROM clients WHERE name=? COLLATE NOCASE AND id IS NOT ?`, nm, cid || null)) throw err(409, 'A client with this name already exists.');
   if (cid) { clientRow(cid); run(`UPDATE clients SET name=?, description=?, instructions=?, updated=? WHERE id=?`, nm, String(description || '').slice(0, 500), String(instructions || '').slice(0, 8000), now(), cid); return cid; }
   const nid = id(), col = id();
-  run(`INSERT INTO collections(id,name,description,created) VALUES(?,?,?,?)`, col, `Klien · ${nm}`.slice(0, 120), `Documents for client ${nm}: earlier reports, briefs, guidelines.`, now());
+  run(`INSERT INTO collections(id,name,description,created,kind) VALUES(?,?,?,?,?)`, col, `Klien · ${nm}`.slice(0, 120), `Documents for client ${nm}: earlier reports, briefs, guidelines.`, now(), 'client');
   run(`INSERT INTO clients(id,name,description,instructions,collection_id,created_by,created,updated) VALUES(?,?,?,?,?,?,?,?)`, nid, nm, String(description || '').slice(0, 500), String(instructions || '').slice(0, 8000), col, user.id, now(), now());
   return nid;
 }
@@ -102,7 +103,12 @@ export function templateFile(user, tid) { const r = templateRow(user, tid); if (
 
 /* ================= datasets ================= */
 const sourceFile = d => path.join(dsDir(d.id), 'source' + path.extname(d.filename).toLowerCase());
-async function loadSource(d) { return loadWorkbook(fs.readFileSync(sourceFile(d)), d.filename); }
+// Large files (50,000+ rows) are parsed once; the parsed tables are kept next to the upload.
+async function loadSource(d) {
+  const cache = path.join(dsDir(d.id), 'source.json');
+  if (fs.existsSync(cache)) return JSON.parse(fs.readFileSync(cache, 'utf8'));
+  const sheets = await loadWorkbook(fs.readFileSync(sourceFile(d)), d.filename); fs.writeFileSync(cache, JSON.stringify(sheets), { mode: 0o600 }); return sheets;
+}
 function ownDataset(user, did) { const d = one(`SELECT * FROM datasets WHERE id=? AND user_id=?`, did, user.id); if (!d) throw err(404, 'Dataset not found'); return d; }
 const extraCols = () => getSettings().redaction.columns || [];
 const preview = (t, n = 8) => ({ name: t.name, columns: t.columns, rows: t.rows.length, preview: t.rows.slice(0, n), skipped: t.skipped || 0, personal: t.columns.filter(c => reportSensitive(c, extraCols())) });
@@ -114,7 +120,7 @@ export async function addDataset(user, { filename, buf, clientId }) {
   if (!sheets.length) throw err(422, 'No table found in this file.');
   const did = id(); fs.mkdirSync(dsDir(did), { recursive: true, mode: 0o700 });
   const d = { id: did, filename };
-  fs.writeFileSync(sourceFile(d), buf, { mode: 0o600 });
+  fs.writeFileSync(sourceFile(d), buf, { mode: 0o600 }); fs.writeFileSync(path.join(dsDir(did), 'source.json'), JSON.stringify(sheets), { mode: 0o600 });
   const main = [...sheets].sort((a, b) => b.rows.length - a.rows.length)[0];
   run(`INSERT INTO datasets(id,user_id,name,filename,size,sheet,rows,created,updated,client_id) VALUES(?,?,?,?,?,?,?,?,?,?)`, did, user.id, filename.replace(/\.(xlsx|csv|tsv)$/i, '').slice(0, 120), filename, buf.length, main.name, main.rows.length, now(), now(), clientId || null);
   return getDataset(user, did);
@@ -183,7 +189,8 @@ export async function planDataset(user, did, { instruction, model: requested, sh
 }
 
 // Labels short texts in batches with the cheapest model. Results are cached by (labels, instruction, text).
-function makeTagger(user, did) {
+const TAG_BATCH = 80, TAG_PARALLEL = 6;
+function makeTagger(user, did, progress = () => {}) {
   const red = redactorFor(user, 'report:' + did); let model;
   return async (texts, labels, instruction) => {
     model ??= helperModel(user); checkLimits(user);
@@ -200,23 +207,59 @@ function makeTagger(user, did) {
     const todo = [...new Set(texts.filter((x, i) => x && values[i] == null))];
     const norm = new Map(use.map(l => [l.toLowerCase(), l]));
     const system = `You label texts${instruction ? `: ${instruction}` : ''}. Allowed labels: ${use.map(l => `"${l}"`).join(', ')}. Choose exactly one allowed label per text. Reply with JSON only: {"1":"label","2":"label",...} using the texts' numbers.${red.enabled ? ' ' + SYSTEM_NOTE : ''}`;
-    for (let i = 0; i < todo.length; i += 40) {
-      const batch = todo.slice(i, i + 40); checkLimits(user);
-      const r = await askJson(user, model, system, batch.map((x, k) => `${k + 1}. ${red.mask(x).replace(/\s+/g, ' ')}`).join('\n'), 'report.tag', 1500, 'low');
-      batch.forEach((x, k) => { const v = norm.get(String(r[k + 1] ?? '').trim().toLowerCase()); if (v) run(`INSERT OR REPLACE INTO ai_tag_cache(key,value,created) VALUES(?,?,?)`, keyOf(x), v, now()); });
-    }
+    // Unique texts only, in batches, several batches at a time. Labels are cached as they arrive, so an interrupted
+    // run (budget reached, network) continues where it stopped and never pays twice for the same text.
+    const batches = []; for (let i = 0; i < todo.length; i += TAG_BATCH) batches.push(todo.slice(i, i + TAG_BATCH));
+    let done = 0, failed = 0; progress({ phase: 'label', done: 0, total: todo.length, cached: texts.filter(Boolean).length - todo.length });
+    const work = async batch => {
+      checkLimits(user);
+      try {
+        let r;
+        for (let attempt = 0; ; attempt++) { // rate limits or brief outages on large runs: wait and retry the same batch
+          try { r = await askJson(user, model, system, batch.map((x, k) => `${k + 1}. ${red.mask(x).replace(/\s+/g, ' ')}`).join('\n'), 'report.tag', 3000, 'low'); break; }
+          catch (e) { if (attempt >= 4 || ![429, 500, 502, 503, 529].includes(e.status)) throw e; await new Promise(res => setTimeout(res, 2000 * 2 ** attempt)); }
+        }
+        batch.forEach((x, k) => { const v = norm.get(String(r[k + 1] ?? '').trim().toLowerCase()); if (v) run(`INSERT OR REPLACE INTO ai_tag_cache(key,value,created) VALUES(?,?,?)`, keyOf(x), v, now()); });
+      } catch (e) { if (e.status === 402) throw e; failed += batch.length; }
+      done += batch.length; progress({ phase: 'label', done, total: todo.length });
+    };
+    let next = 0; await Promise.all(Array.from({ length: Math.min(TAG_PARALLEL, batches.length) }, async () => { while (next < batches.length) await work(batches[next++]); }));
+    if (failed && failed === todo.length) throw new Error('AI labelling failed. Try again in a moment.');
     return { labels: use, values: texts.map(x => (x ? one(`SELECT value FROM ai_tag_cache WHERE key=?`, keyOf(x))?.value || '' : '')) };
   };
 }
 
-export async function runDataset(user, did, { plan: rawPlan, sheet }) {
-  const d = ownDataset(user, did); const sheets = await loadSource(d); const t = pickSheet(sheets, sheet || d.sheet);
+// Runs happen in the background (big files and AI labelling can take minutes); the page polls for progress.
+const jobs = new Map(); // dataset id → { status, step, steps, text, done, total, error, started }
+export function jobStatus(user, did) { ownDataset(user, did); return jobs.get(did) || { status: 'idle' }; }
+export function startRun(user, did, { plan: rawPlan, sheet }) {
+  const d = ownDataset(user, did); if (jobs.get(did)?.status === 'running') throw err(409, 'This dataset is already being processed.');
   const plan = sanitizePlan(rawPlan || (d.plan ? JSON.parse(d.plan) : { steps: [] }));
-  const s = getSettings();
-  const r = await runPlan(t, plan, { tagger: makeTagger(user, did), maxAiRows: s.reports?.maxAiRows || 3000 });
-  fs.writeFileSync(path.join(dsDir(did), 'result.json'), JSON.stringify({ sheet: t.name, table: r.table, summaries: r.summaries, log: r.log, plan, at: now() }), { mode: 0o600 });
-  run(`UPDATE datasets SET plan=?, log=?, sheet=?, result_rows=?, updated=? WHERE id=?`, JSON.stringify(plan), JSON.stringify(r.log), t.name, r.table.rows.length, now(), did);
-  return { log: r.log, aiRows: r.log.reduce((a, l) => a + (l.aiRows || 0), 0) };
+  const job = { status: 'running', step: 0, steps: plan.steps.length, text: 'Reading the file…', done: 0, total: 0, started: now() }; jobs.set(did, job);
+  (async () => {
+    try {
+      const sheets = await loadSource(d); const t = pickSheet(sheets, sheet || d.sheet); const s = getSettings();
+      const r = await runPlan(t, plan, { tagger: makeTagger(user, did, p => Object.assign(job, { done: p.done, total: p.total, cached: p.cached ?? job.cached })), maxAiRows: s.reports?.maxAiRows || 100000,
+        onStep: (i, st) => Object.assign(job, { step: i + 1, text: describe(st), done: 0, total: 0, cached: 0 }) });
+      fs.writeFileSync(path.join(dsDir(did), 'result.json'), JSON.stringify({ sheet: t.name, table: r.table, summaries: r.summaries, log: r.log, plan, at: now() }), { mode: 0o600 });
+      run(`UPDATE datasets SET plan=?, log=?, sheet=?, result_rows=?, updated=? WHERE id=?`, JSON.stringify(plan), JSON.stringify(r.log), t.name, r.table.rows.length, now(), did);
+      const aiRows = r.log.reduce((a, l) => a + (l.aiRows || 0), 0);
+      audit(user.id, 'report.curate', { dataset: did, steps: r.log.length, failed: r.log.filter(l => !l.ok).length, aiRows, rows: r.table.rows.length, seconds: Math.round((now() - job.started) / 1000) });
+      Object.assign(job, { status: 'done', text: 'Done', finished: now() });
+    } catch (e) { Object.assign(job, { status: 'error', error: e.message, finished: now() }); }
+    setTimeout(() => { if (jobs.get(did) === job) jobs.delete(did); }, 10 * 60e3).unref?.();
+  })();
+  return job;
+}
+// What AI labelling would cost before running it: unique texts not yet labelled × tokens per text.
+export async function estimateRun(user, did, { plan: rawPlan, sheet }) {
+  const d = ownDataset(user, did); const plan = sanitizePlan(rawPlan || { steps: [] }); const tags = plan.steps.filter(x => x.op === 'ai_tag');
+  if (!tags.length) return { aiRows: 0, usd: 0, minutes: 0 };
+  const t = pickSheet(await loadSource(d), sheet || d.sheet); let texts = 0, chars = 0;
+  for (const st of tags) { const idx = st.from.map(c => t.columns.findIndex(x => x.toLowerCase() === c.toLowerCase())).filter(i => i >= 0);
+    const uniq = new Set(t.rows.map(r => idx.map(i => r[i]).join(' — ').slice(0, 600)).filter(Boolean)); texts += uniq.size; for (const u of uniq) chars += u.length; }
+  const m = helperModel(user); const price = m.price || { in: 0, out: 0 }; const inTok = chars / 3.5 + texts * 6 + Math.ceil(texts / TAG_BATCH) * 250, outTok = texts * 8;
+  return { aiRows: texts, model: m.label, usd: +((inTok * price.in + outTok * price.out) / 1e6).toFixed(3), minutes: Math.max(1, Math.round(Math.ceil(texts / TAG_BATCH) / TAG_PARALLEL * 6 / 60)), rows: t.rows.length };
 }
 export async function datasetXlsx(user, did) {
   const d = ownDataset(user, did); const res = readResult(did); if (!res) throw err(409, 'Run the plan first.');

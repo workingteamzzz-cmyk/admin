@@ -287,6 +287,7 @@ function updateTools(){
   $('#modeLabel').textContent=mode().name;
   $('#webBtn').hidden=!me.config.webSearch; $('#webBtn').classList.toggle('on', !!state.web&&me.config.webSearch);
   $('#knowBtn').classList.toggle('on', state.knowledge!==false);
+  { const sp=scopeSpace(); $('#knowBtn .wl').textContent=state.knowledge===false?'Knowledge':sp?spaceName(sp):'Knowledge'; $('#knowBtn').title=state.knowledge===false?'Knowledge search is off':sp?`Searching only: ${spaceName(sp)}`:'Searching all knowledge you can access'; }
   $('#keybar').hidden=!!me.config.apiConfigured;
   const b=me.budget; const warn=[...(b.limit>0&&b.spent>=b.limit*.8?[`You have used ${Math.round(b.spent/b.limit*100)}% of your monthly AI budget (${usd(b.spent)} of ${usd(b.limit)}).`]:[]), ...(b.groups||[]).filter(g=>g.spent>=g.limit*.8).map(g=>`Group “${g.name}” has used ${Math.round(g.spent/g.limit*100)}% of its monthly budget.`)];
   let bn=$('#budgetWarn'); if(!bn){ bn=document.createElement('div'); bn.id='budgetWarn'; bn.className='notice'; $('#composer').before(bn); }
@@ -514,7 +515,7 @@ async function respond(chat){
   chat.msgs.push(bot); chat.updated=Date.now();
   const idx=chat.msgs.length-1; const ac=new AbortController(); const ctl={abort(){ ctl.aborted=true; ac.abort(); }};
   running.set(chat.id, ctl); renderSide(); if(curView()==='home'&&chat.id===state.current){ renderHead(); renderHome(); }
-  const payload={ chatId:chat.id, projectId:chat.projectId||undefined, model:M.id, mode:state.mode, web:!!state.web, knowledge:state.knowledge!==false, messages:historyFor(chat, idx),
+  const payload={ chatId:chat.id, projectId:chat.projectId||undefined, model:M.id, mode:state.mode, web:!!state.web, knowledge:state.knowledge!==false, scope:state.knowledge!==false&&scopeSpace()&&!chat.projectId?[scopeSpace().id]:undefined, scopeLabel:scopeSpace()?spaceName(scopeSpace()):undefined, messages:historyFor(chat, idx),
     system:{ instructions:state.instructions, spaceName:sp?.name, spaceInstructions:sp?.instructions, skills:allSkills().filter(s=>s.enabled).map(s=>({name:s.name, content:s.content})) } };
   try{
     const r=await fetch('/api/chat',{method:'POST', signal:ac.signal, headers:{'content-type':'application/json','x-canopus':'1'}, body:JSON.stringify(payload)});
@@ -570,20 +571,49 @@ async function autoTitle(chat){
 
 /* ================= Knowledge (organization) ================= */
 const clsBadge=c=>`<span class="cls ${esc(c)}">${esc(me.config.classifications[c]?.label||c)}</span>`;
+// Knowledge spaces: the team space (everyone), each person's own space, client spaces, and organization collections.
+const KIND_ORDER={team:0, person:1, client:2, admin:3};
+function spaceName(c){ return c.kind==='person'?(c.mine?'My knowledge':`${c.ownerName||c.name}`):c.name; }
+function docRows(c){ return c.docs.length?c.docs.map(d=>`<div class="doc-row">${ic('file')}<span class="t" title="${esc(d.filename)}">${esc(d.title)}</span>${clsBadge(d.classification)}${d.sensitive?`<span class="cls terbatas" title="Values in personal-data columns are always masked before reaching the AI">${ic('lock')}${d.sensitive} masked</span>`:''}<small>${d.uploader&&c.kind!=='person'?esc(d.uploader)+' · ':''}${d.pages>1?d.pages+' pages · ':''}${fmtDate(d.created)}</small>${d.status==='ready'?`<a class="icon-btn" href="/api/knowledge/docs/${d.id}/file" target="_blank" rel="noopener" title="Open original">${ic('eye')}</a>`:`<span class="cls ${d.status}">${d.status}</span>`}${isAdmin()||d.uploaded_by===me.user.id||c.mine?`<button class="icon-btn" data-kdel="${d.id}" title="Remove">${ic('trash')}</button>`:''}</div>`).join(''):'<div class="empty" style="padding:6px 0">No documents yet.</div>'; }
+function spaceCard(c, sub=''){
+  return `<div class="col-card" id="space-${c.id}"><div class="col-head"><div><h3>${esc(spaceName(c))}${c.kind==='person'&&c.private?` <span class="cls">${ic('lock')}Private</span>`:''}</h3><p>${sub||[c.local_only?`<span class="cls biasa">${ic('lock')}On this server only</span>`:'', c.description?esc(c.description):'', c.kind==='admin'?`Access: ${c.groups.length?c.groups.map(g=>esc(g.name)).join(', '):'everyone'}`:''].filter(Boolean).join(' · ')}</p></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">${c.mine?`<button class="btn sm" data-kpriv="${c.private?0:1}">${ic('lock')}${c.private?'Share with the team':'Make private'}</button>`:''}${c.canUpload?`<button class="btn sm" data-kup="${c.id}">${ic('upload')}Add files</button>`:''}<button class="btn sm" data-askcol="${c.id}">${ic('chat')}Ask</button></div></div>${docRows(c)}</div>`;
+}
 async function renderKnowledge(){
   const total=knowledge.reduce((a,c)=>a+c.docs.length,0);
-  $('#knowPage').innerHTML=`<div class="page-head"><div><h1><span class="h-ic c-sky"><svg data-ic="book"></svg></span>Knowledge</h1><p class="sub">Internal documents Canopus can search when you ask a question. Documents stay on this server: only the few passages relevant to your question are sent to the AI, sensitive details like ID numbers are masked first, and every answer cites its sources.</p></div>${isAdmin()?`<button class="cta" data-go="admin" data-tab="knowledge">${ic('settings')}Manage</button>`:''}</div>
-    <div class="set-sec" style="margin-bottom:16px"><h3 style="display:flex;gap:8px;align-items:center">${ic('search')}Search documents directly</h3><p>Finds passages without using AI: nothing leaves the server and it costs nothing. Works for every collection you can access, including on-premise ones.</p>
-      <form id="dsForm" class="bar" style="margin:0"><label class="search"><svg data-ic="search"></svg><input id="dsQ" placeholder="e.g. a name, a record number, “anggaran 2026”…"></label><button class="btn primary" type="submit">Search</button></form><div id="dsRes"></div></div>
-    <div class="stat-row"><div class="stat"><small>Collections you can access</small><b>${knowledge.length}</b></div><div class="stat"><small>Documents</small><b>${total}</b></div><div class="stat"><small>Searchable passages</small><b>${knowledge.reduce((a,c)=>a+c.docs.reduce((x,d)=>x+(d.chunks||0),0),0)}</b></div></div>
-    ${knowledge.length?knowledge.map(c=>`<div class="col-card"><div class="col-head"><div><h3>${esc(c.name)}</h3><p>${c.local_only?`<span class="cls biasa">${ic('lock')}On this server only</span> `:''}${c.description?esc(c.description)+' · ':''}Access: ${c.groups.length?c.groups.map(g=>esc(g.name)).join(', '):'everyone'}</p></div><button class="btn sm" data-askcol="${c.id}">${ic('chat')}Ask about this</button></div>
-      ${c.docs.length?c.docs.map(d=>`<div class="doc-row">${ic('file')}<span class="t" title="${esc(d.filename)}">${esc(d.title)}</span>${clsBadge(d.classification)}${d.sensitive?`<span class="cls terbatas" title="Values in personal-data columns are always masked before reaching the AI">${ic('lock')}${d.sensitive} masked</span>`:''}<small>${d.pages>1?d.pages+' pages · ':''}${fmtDate(d.created)}</small>${d.status==='ready'?`<a class="icon-btn" href="/api/knowledge/docs/${d.id}/file" target="_blank" rel="noopener" title="Open original">${ic('eye')}</a>`:`<span class="cls ${d.status}">${d.status}</span>`}</div>`).join(''):'<div class="empty" style="padding:6px 0">No documents yet.</div>'}</div>`).join('')
-      :`<div class="empty-box"><div class="e-ic">${ic('book')}</div><b>No knowledge available yet</b><p>${isAdmin()?'Create a collection and upload documents in Admin → Knowledge.':'Your administrator hasn\'t shared any knowledge collections with you yet.'}</p></div>`}`;
+  const team=knowledge.filter(c=>c.kind==='team'), mine=knowledge.filter(c=>c.kind==='person'&&c.mine), people=knowledge.filter(c=>c.kind==='person'&&!c.mine).sort((a,b)=>spaceName(a).localeCompare(spaceName(b)));
+  const clients=knowledge.filter(c=>c.kind==='client'), org=knowledge.filter(c=>!c.kind||c.kind==='admin');
+  const section=(title,sub,html)=>html?`<h2 class="k-sec">${title}</h2>${sub?`<p class="k-sub">${sub}</p>`:''}${html}`:'';
+  $('#knowPage').innerHTML=`<div class="page-head"><div><h1><span class="h-ic c-sky"><svg data-ic="book"></svg></span>Knowledge</h1><p class="sub">Documents Canopus can search when you ask a question: a team space for everyone, a space for each person, client spaces and organization collections. Documents stay on this server; only the passages relevant to a question are sent to the AI, with sensitive details masked, and answers cite their sources.</p></div>${isAdmin()?`<button class="cta" data-go="admin" data-tab="knowledge">${ic('settings')}Manage</button>`:''}</div>
+    <div class="set-sec" style="margin-bottom:16px"><h3 style="display:flex;gap:8px;align-items:center">${ic('search')}Search documents directly</h3><p>Finds passages without using AI: nothing leaves the server and it costs nothing.</p>
+      <form id="dsForm" class="bar" style="margin:0;flex-wrap:wrap"><label class="search"><svg data-ic="search"></svg><input id="dsQ" placeholder="e.g. a name, a topic, “anggaran 2026”…"></label><select id="dsScope" class="vsel"><option value="">All knowledge</option>${[...knowledge].sort((a,b)=>(KIND_ORDER[a.kind]??3)-(KIND_ORDER[b.kind]??3)).map(c=>`<option value="${c.id}">${esc(spaceName(c))}</option>`).join('')}</select><button class="btn primary" type="submit">Search</button></form><div id="dsRes"></div></div>
+    <div class="stat-row"><div class="stat"><small>Spaces you can access</small><b>${knowledge.length}</b></div><div class="stat"><small>Documents</small><b>${total}</b></div><div class="stat"><small>Searchable passages</small><b>${knowledge.reduce((a,c)=>a+c.docs.reduce((x,d)=>x+(d.chunks||0),0),0)}</b></div></div>
+    ${section(`${ic('users')}For everyone`,'Files and knowledge the whole team shares. Everyone can add and use them.',team.map(c=>spaceCard(c,'Everyone can add files here and everyone can use them.')).join(''))}
+    ${section(`${ic('star')}My knowledge`,'Your own files. Shared with the team by default so others can refer to what you built — make it private to keep it to yourself.',mine.map(c=>spaceCard(c,c.private?'Only you can see and search this space.':'Readable by the team; only you can add or remove files.')).join(''))}
+    ${section(`${ic('users')}People`,'Knowledge built by each person. Ask within one person’s space to answer from what they collected.',people.map(c=>spaceCard(c,`Built by ${esc(c.ownerName||c.name)} · ${c.docs.length} document${c.docs.length===1?'':'s'}`)).join('')||'<div class="empty" style="padding:4px 0 10px">No one else has shared knowledge yet.</div>')}
+    ${section(`${ic('chart')}Clients`,'Each client’s documents, also used for that client’s reports.',clients.map(c=>spaceCard(c)).join(''))}
+    ${section(`${ic('shield')}Organization collections`,'Managed by administrators, with access per group.',org.map(c=>spaceCard(c)).join(''))}
+    <input type="file" id="kUp" multiple hidden>`;
   hydrateIcons($('#knowPage'));
+  $('#kUp').onchange=e=>uploadToSpace(kTarget, e.target.files);
   $('#dsForm').onsubmit=async e=>{ e.preventDefault(); const q=$('#dsQ').value.trim(); if(!q) return; const box=$('#dsRes'); box.innerHTML='<div class="help">Searching…</div>';
-    try{ const hits=await api('/api/knowledge/search',{method:'POST', body:{query:q}}); dsHits=hits;
+    try{ const hits=await api('/api/knowledge/search',{method:'POST', body:{query:q, collection:$('#dsScope').value||undefined}}); dsHits=hits;
       box.innerHTML=hits.length?hits.map((h,j)=>`<div class="doc-row" style="align-items:flex-start">${ic('file')}<div style="flex:1;min-width:0"><b style="font-size:14px">${esc(h.title)}${h.page?' — p. '+h.page:''}</b> <small>${esc(h.collection)}</small>${h.localOnly?` <span class="cls biasa">${ic('lock')}on-premise</span>`:''}<div class="help" style="white-space:pre-wrap;color:var(--fg);opacity:.85">${esc(h.text.slice(0,400))}${h.text.length>400?'…':''}</div></div><button class="icon-btn" data-dshit="${j}" title="Show passage">${ic('eye')}</button></div>`).join(''):'<div class="help">No matching passages.</div>'; }
     catch(err){ box.innerHTML=`<div class="help" style="color:var(--red)">${esc(err.message)}</div>`; } };
+}
+let kTarget=null;
+async function uploadToSpace(cid, files){
+  if(!cid||!files?.length) return; let n=0;
+  for(const f of files){ try{ toast(`Adding ${f.name}…`,6000); await api(`/api/knowledge/collections/${cid}/docs`,{method:'POST', raw:f, headers:{'content-type':f.type||'application/octet-stream','x-filename':encodeURIComponent(f.name),'x-classification':'biasa'}}); n++; }catch(e){ toast(`${f.name}: ${e.message}`,5000); } }
+  await refreshKnowledge(); if(curView()==='knowledge') renderKnowledge(); if(n) toast(`${n} file${n>1?'s':''} added`);
+}
+// Which knowledge a chat searches: all of it, or one space (team, a person, a client, a collection).
+function scopeSpace(){ return state.knowledgeScope?knowledge.find(c=>c.id===state.knowledgeScope)||null:null; }
+function knowMenu(anchor){
+  const it=(v,label,on)=>`<button data-kscope="${v}" class="${on?'on':''}">${on?ic('check'):ic('book')}${esc(label)}</button>`;
+  const sorted=[...knowledge].sort((a,b)=>(KIND_ORDER[a.kind]??3)-(KIND_ORDER[b.kind]??3)||spaceName(a).localeCompare(spaceName(b)));
+  floatMenu(anchor, it('all','All knowledge',state.knowledge!==false&&!state.knowledgeScope)+'<div class="m-sep"></div>'+sorted.map(c=>it(c.id,(c.kind==='person'&&!c.mine?'Person · ':c.kind==='client'?'Client · ':'')+spaceName(c),state.knowledge!==false&&state.knowledgeScope===c.id)).join('')+'<div class="m-sep"></div>'+it('off','Off — don’t search',state.knowledge===false));
+  const m=document.querySelector('.float-menu'); if(m){ const r=anchor.getBoundingClientRect(); m.style.top='auto'; m.style.bottom=(innerHeight-r.top+6)+'px'; m.style.left=Math.max(8,Math.min(r.left,innerWidth-260))+'px'; m.style.maxHeight='60vh'; m.style.overflowY='auto'; }
 }
 let dsHits=[];
 
@@ -921,7 +951,7 @@ const checked=sel=>[...document.querySelectorAll(sel+' input[type=checkbox]:chec
 
 document.addEventListener('click',async e=>{
   if(e.target.id==='modal'){ closeModal(); return; }
-  const t=e.target.closest('button,[data-open],[data-go],[data-space],[data-project],[data-copen],[data-fuse],[data-useprompt],[data-act],.scrim');
+  const t=e.target.closest('button,[data-open],[data-go],[data-space],[data-project],[data-copen],[data-fuse],[data-useprompt],[data-act],[data-kscope],.scrim');
   document.querySelectorAll('.float-menu').forEach(x=>x.remove());
   if(!t){ closeMenus(); return; }
   const d=t.dataset;
@@ -957,7 +987,11 @@ document.addEventListener('click',async e=>{
   if(d.cite){ const [i,j]=d.cite.split(':').map(Number); const c=curChat().msgs[i].citations[j]; const r=docRef(c.source); showPassage(c.title, c.text, r?.docId, r?.page); return; }
   if(d.dshit!==undefined){ const h=dsHits[+d.dshit]; showPassage(h.title, h.text, h.docId, h.page); return; }
   if(d.found){ const [i,j]=d.found.split(':').map(Number); const f=curChat().msgs[i].found[j]; showPassage(f.title, f.text, f.docId, f.page); return; }
-  if(d.askcol){ const c=knowledge.find(x=>x.id===d.askcol); state.current=null; go('home'); setTimeout(()=>{ input.value=`Using the internal documents in “${c.name}”, `; autosize(); input.focus(); },30); return; }
+  if(d.askcol){ const c=knowledge.find(x=>x.id===d.askcol); state.current=null; state.knowledge=true; state.knowledgeScope=c.id; save(); go('home'); setTimeout(()=>{ updateTools(); input.value=''; autosize(); input.focus(); toast(`Asking within: ${spaceName(c)}`); },30); return; }
+  if(d.kscope){ if(d.kscope==='off'){ state.knowledge=false; } else { state.knowledge=true; state.knowledgeScope=d.kscope==='all'?null:d.kscope; } save(); updateTools(); toast(state.knowledge===false?'Knowledge search off':scopeSpace()?`Searching only: ${spaceName(scopeSpace())}`:'Searching all knowledge'); return; }
+  if(d.kup){ kTarget=d.kup; $('#kUp').click(); return; }
+  if(d.kdel){ if(await confirmBox('Remove document?','It is removed from the server and can no longer be searched.','Remove')){ await api('/api/knowledge/docs/'+d.kdel,{method:'DELETE'}); await refreshKnowledge(); renderKnowledge(); } return; }
+  if(d.kpriv!==undefined){ await api('/api/knowledge/mine',{method:'PATCH', body:{private:d.kpriv==='1'}}); await refreshKnowledge(); renderKnowledge(); toast(d.kpriv==='1'?'Your space is now private':'Your space is shared with the team'); return; }
   if(d.ftype){ fType=d.ftype; renderSources(); return; }
   if(d.fdel){ if(await confirmBox('Delete file?','It will be removed from the server and from any space. Chats that used it can no longer resend it.')){ await api('/api/blobs/'+d.fdel,{method:'DELETE'}).catch(()=>{}); state.files=state.files.filter(f=>f.id!==d.fdel); state.spaces.forEach(s=>s.fileIds=(s.fileIds||[]).filter(x=>x!==d.fdel)); save(); renderSources(); renderSide(); } return; }
   if(d.fuse){ const f=state.files.find(x=>x.id===d.fuse); if(f){ closeModal(); state.current=null; closePanel(); attachments=[...attachments.filter(a=>a.id!==f.id), {...f}]; go('home'); setTimeout(()=>{ renderChips(); input.focus(); },20); } return; }
@@ -1021,7 +1055,7 @@ document.addEventListener('click',async e=>{
     case 'picked': { const ids=checked('#modal'); closeModal(); pickCb?.(ids); break; }
     case 'shot': captureScreen(); break;
     case 'web': state.web=!state.web; save(); updateTools(); toast(state.web?'Web search on':'Web search off'); break;
-    case 'know': state.knowledge=state.knowledge===false; save(); updateTools(); toast(state.knowledge!==false?'Internal knowledge on':'Internal knowledge off for this conversation'); break;
+    case 'know': knowMenu(t); break;
     case 'enhance': { const v=input.value.trim(); if(!v){ toast('Type a prompt first, then I can improve it'); break; } t.classList.add('on'); t.disabled=true; try{ const {text}=await api('/api/quick',{method:'POST', body:{purpose:'enhance', text:v, chatId:state.current||'compose'}}); if(text){ input.value=text; autosize(); toast('Prompt improved'); } }catch(err){ toast(err.message,4000); } finally{ t.classList.remove('on'); t.disabled=false; } break; }
     case 'mic': dictate(t); break;
     case 'regen': { const c=curChat(); if(!c||running.has(c.id)) break; if(c.msgs.at(-1)?.r==='assistant') c.msgs.pop(); respond(c); break; }

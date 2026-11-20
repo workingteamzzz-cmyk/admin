@@ -634,3 +634,13 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 .rp-flow li.done span{background:rgba(70,180,120,.2);color:#3fae74}
 .rp-flow li.now{color:var(--active-fg);border-color:var(--active-fg);background:var(--active);font-weight:600}
 .rp-flow li.now span{background:var(--active-fg);color:var(--bg)}
+.k-sec{display:flex;align-items:center;gap:8px;font-size:17px;margin:26px 0 4px}
+.k-sec svg{width:18px;height:18px;color:var(--gold)}
+.k-sub{color:var(--muted);font-size:13.5px;margin:0 0 10px}
+.float-menu button.on{color:var(--active-fg);font-weight:600}
+
+.rp-job{margin-top:12px;padding:12px 14px;border:1px solid rgba(244,199,106,.35);background:rgba(244,199,106,.06);border-radius:12px}
+.rp-job-top{display:flex;justify-content:space-between;gap:10px;font-size:14px}
+.rp-job small{display:block;margin-top:6px;color:var(--muted);font-size:12.5px}
+.rp-bar{height:6px;border-radius:99px;background:var(--line);margin-top:8px;overflow:hidden}
+.rp-bar i{display:block;height:100%;background:var(--gold);border-radius:99px;transition:width .4s}

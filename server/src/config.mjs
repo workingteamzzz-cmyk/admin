@@ -39,7 +39,7 @@ export const config = {
   allowedIps: (env.CANOPUS_ALLOWED_IPS || '').split(',').map(s => s.trim()).filter(Boolean), // e.g. 10.0.0.0/8,203.0.113.7
   cookieSecure: bool(env.COOKIE_SECURE, !/^http:\/\/(localhost|127\.0\.0\.1)/.test(env.PUBLIC_URL || 'http://localhost')),
   trustProxy: bool(env.TRUST_PROXY, false),
-  maxUploadMb: +(env.MAX_UPLOAD_MB || 25),
+  maxUploadMb: +(env.MAX_UPLOAD_MB || 60),
 };
 
 // Built-in Claude models. OpenAI models are added by the administrator (Admin → Models).

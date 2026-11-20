@@ -263,10 +263,11 @@ function pivotTable(t, st) {
 
 // Runs the steps on a copy of the table. Returns the curated table, the summary tables and a per-step log.
 // `tagger(texts, labels, instruction)` → Promise<{labels: string[], values: string[]}> is used by ai_tag steps.
-export async function runPlan(table, plan, { tagger, maxAiRows = 3000 } = {}) {
+export async function runPlan(table, plan, { tagger, maxAiRows = 100000, onStep = () => {} } = {}) {
   let t = { name: table.name, columns: [...table.columns], rows: table.rows.map(r => [...r]) };
   const summaries = []; const log = [];
-  for (const st of plan.steps) {
+  for (const [si, st] of plan.steps.entries()) {
+    onStep(si, st); await new Promise(r => setImmediate(r)); // keep the server responsive on very large files
     const before = t.rows.length; const entry = { op: st.op, text: describe(st), before };
     try {
       switch (st.op) {

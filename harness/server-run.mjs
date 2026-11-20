@@ -550,6 +550,50 @@ try {
     const mine = JSON.parse((await apiCall(B, '/api/reports')).body); const orgTpl = mine.clients.length >= 2 && mine.templates.length >= 2;
     return ok([r1.status, r2.status, r3.status].every(s => s === 404) && !mine.datasets.length && orgTpl, `dataset ${r1.status} · deck ${r2.status} · xlsx ${r3.status} · sees the team's clients & templates: ${orgTpl}`);
   });
+  await step(A, 'knowledge-spaces', 'Knowledge for everyone, per person, private spaces, and asking within one space', async () => {
+    const team = JSON.parse((await apiCall(A, '/api/knowledge')).body).find(c => c.kind === 'team');
+    fs.writeFileSync(path.join(FIX, 'anggaran-kampanye.txt'), 'Anggaran kampanye sosialisasi 2027 adalah Rp5 miliar untuk seluruh kanal. Marker TEAM-77.');
+    await A.goto(canopus.url + '#knowledge'); await A.reload(); await A.waitForSelector(`[data-kup="${team.id}"]`); await A.click(`[data-kup="${team.id}"]`);
+    await A.setInputFiles('#kUp', path.join(FIX, 'anggaran-kampanye.txt')); await A.waitForFunction(() => /anggaran-kampanye/i.test(document.querySelector('#knowPage')?.textContent || ''), null, { timeout: 10000 });
+    const kB = JSON.parse((await apiCall(B, '/api/knowledge')).body); const mineB = kB.find(c => c.kind === 'person' && c.mine); const seesTeamDoc = kB.find(c => c.kind === 'team').docs.length === 1;
+    const up = await apiCall(B, `/api/knowledge/collections/${mineB.id}/docs`, { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': 'catatan-staf.txt', 'content-type': 'text/plain' }, body: 'Catatan staf: anggaran rapat koordinasi Rp20 juta. Marker STAF-88.' });
+    const mineA = JSON.parse((await apiCall(A, '/api/knowledge')).body).find(c => c.kind === 'person' && c.mine);
+    const intoOthers = await apiCall(B, `/api/knowledge/collections/${mineA.id}/docs`, { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': 'x.txt', 'content-type': 'text/plain' }, body: 'x' });
+    const peopleA = JSON.parse((await apiCall(A, '/api/knowledge')).body).find(c => c.id === mineB.id);
+    // Ask within the team space only
+    const before = recorded.length; await A.goto(canopus.url + '#home'); await A.evaluate(id => { window.__canopus.state.knowledge = true; window.__canopus.state.knowledgeScope = id; }, team.id);
+    const r = await ask(A, 'Berapa anggaran kampanye sosialisasi 2027?'); const sent = recorded.slice(before).map(x => x.raw).join('\n');
+    const scoped = /TEAM-77/.test(r.text) && !sent.includes('Rp71 triliun');
+    await A.evaluate(() => { window.__canopus.state.knowledgeScope = null; });
+    // B makes their space private: it disappears for A, also from direct search
+    await putJson(B, '/api/knowledge/mine', { private: true }, 'PATCH');
+    const hidden = !JSON.parse((await apiCall(A, '/api/knowledge')).body).some(c => c.id === mineB.id);
+    const found = JSON.parse((await putJson(A, '/api/knowledge/search', { query: 'STAF-88' }, 'POST')).body).length;
+    await A.goto(canopus.url + '#knowledge'); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, 'server-knowledge-spaces.png'), fullPage: true });
+    return ok(seesTeamDoc && up.status === 200 && intoOthers.status === 403 && peopleA?.docs.length === 1 && scoped && hidden && found === 0,
+      `B sees team file: ${seesTeamDoc} · B adds to own space: ${up.status} · B into A's space: ${intoOthers.status} · A sees B's space: ${peopleA?.docs.length === 1} · answer only from team space: ${scoped} · private hidden: ${hidden} · direct search finds private: ${found}`);
+  });
+  await step(A, 'report-large', 'Reports: a 50,000-row spreadsheet is curated and labelled in the background', async () => {
+    const big = path.join(FIX, 'monitoring-50rb.csv'); const outlets = ['Kompas', 'kompas', 'Detik', 'Tempo', 'Antara', 'CNN Indonesia'];
+    const lines = ['Tanggal;Nama Media;Judul Berita;Link;Sentimen'];
+    for (let i = 0; i < 50000; i++) lines.push([`${String(1 + (i % 28)).padStart(2, '0')}/11/2026`, outlets[i % 6], `${['Program diperluas', 'Distribusi dikeluhkan warga', 'Layanan digital diresmikan', 'Kritik serapan anggaran'][i % 4]} wilayah ${i % 600}`, `https://berita.id/${i % 48000}`, ''].join(';'));
+    fs.writeFileSync(big, lines.join('\n'));
+    const t0 = Date.now(); const before = recorded.length;
+    const up = await A.evaluate(async b64 => { const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); const r = await fetch('/api/reports/datasets', { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': 'monitoring-50rb.csv', 'content-type': 'text/csv' }, body: bin }); return r.json(); }, fs.readFileSync(big).toString('base64'));
+    const tUp = Date.now() - t0;
+    const plan = { steps: [{ op: 'clean', columns: [], actions: ['trim'] }, { op: 'replace', column: 'Nama Media', pairs: [['kompas', 'Kompas']] }, { op: 'dedupe', columns: ['Link'] }, { op: 'clean', columns: ['Tanggal'], actions: ['date'] },
+      { op: 'ai_tag', column: 'Sentimen', from: ['Judul Berita'], labels: ['Positif', 'Netral', 'Negatif'], only_empty: true },
+      { op: 'summary', name: 'Rekap per Media', group_by: ['Nama Media'], measures: [{ fn: 'count', as: 'Jumlah' }], total: true }, { op: 'pivot', name: 'Tren Sentimen', rows: 'Tanggal', columns: 'Sentimen' }] };
+    const est = JSON.parse((await putJson(A, `/api/reports/datasets/${up.id}/estimate`, { plan }, 'POST')).body);
+    const t1 = Date.now(); const start = await putJson(A, `/api/reports/datasets/${up.id}/run`, { plan }, 'POST'); const quick = Date.now() - t1;
+    let job = { status: 'running' }; let maxSeen = 0;
+    while (job.status === 'running') { await A.waitForTimeout(500); job = JSON.parse((await apiCall(A, `/api/reports/datasets/${up.id}/job`)).body); maxSeen = Math.max(maxSeen, job.total || 0); if (Date.now() - t1 > 240000) break; }
+    const tRun = Date.now() - t1; const t2 = Date.now(); const d = JSON.parse((await apiCall(A, '/api/reports/datasets/' + up.id)).body); const tOpen = Date.now() - t2;
+    const tags = recorded.slice(before).filter(x => /You label texts/.test(x.raw)).length; const sCol = d.result.table.columns.indexOf('Sentimen');
+    const xl = await A.evaluate(async id => { const r = await fetch(`/api/reports/datasets/${id}/xlsx`); return { status: r.status, size: (await r.arrayBuffer()).byteLength }; }, up.id);
+    return ok(start.status === 202 && quick < 3000 && job.status === 'done' && d.result.table.rows === 48000 && d.result.table.preview.every(r => r[sCol]) && est.aiRows === 600 && tags === Math.ceil(600 / 80) && xl.status === 200,
+      `upload+parse ${(tUp / 1000).toFixed(1)}s · run started in ${quick} ms (background) · finished ${(tRun / 1000).toFixed(1)}s · rows 50,000 → ${d.result.table.rows} · unique texts labelled ${est.aiRows} in ${tags} AI requests (est. $${est.usd}) · reopen ${tOpen} ms · Excel ${(xl.size / 1048576).toFixed(1)} MB`);
+  });
   await step(null, 'no-leaks', 'No sensitive value ever reached a cloud AI provider', async () => ok(cloud().length > 0 && !leaks().length, `${cloud().length} cloud requests inspected (Claude + GPT) · ${recorded.length - cloud().length} on-premise · leaks: ${leaks().length}`));
   await step(A, 'tour', 'Every page renders (screenshots for review)', async () => {
     for (const v of ['home', 'knowledge', 'reports', 'studio', 'prompts', 'skills']) { await A.goto(canopus.url + '#' + v); if (v === 'home') await A.click('[data-go=home]'); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, `server-page-${v}.png`) }); }

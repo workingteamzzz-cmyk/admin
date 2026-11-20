@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { config, ROOT, MODELS, CLASSIFICATIONS, CATEGORIES, TIERS } from './config.mjs';
-import { db, one, all, run, id, now, tx, sha256, getSettings, saveSettings, audit, userGroups, groupSpent, allowedCollections, spentThisMonth, budgetFor, monthStart, projectsFor } from './db.mjs';
+import { db, one, all, run, id, now, tx, sha256, getSettings, saveSettings, audit, userGroups, groupSpent, allowedCollections, spentThisMonth, budgetFor, monthStart, projectsFor, ensureSpaces, canUpload } from './db.mjs';
 import { hashPassword, verifyPassword, passwordProblem, createInvite, inviteUser, consumeInvite, createSession, destroySession, sessionUser, clientIp, loginBlocked, loginFailed, loginOk, createUser, publicUser } from './auth.mjs';
 import { ingestDoc, deleteDoc, deleteCollection, classificationProblem, search } from './knowledge.mjs';
 import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels } from './ai.mjs';
@@ -44,8 +44,10 @@ function setGroups(table, col, ownerId, groupIds) {
   for (const g of [...new Set(groupIds || [])]) if (one(`SELECT 1 FROM groups WHERE id=?`, g)) run(`INSERT INTO ${table}(${col},group_id) VALUES(?,?)`, ownerId, g);
 }
 function knowledgeFor(user) {
-  return allowedCollections(user).map(c => ({ ...c, groups: all(`SELECT g.id,g.name FROM groups g JOIN collection_groups cg ON cg.group_id=g.id WHERE cg.collection_id=?`, c.id),
-    docs: all(`SELECT id,title,filename,size,classification,status,error,chunks,pages,sensitive,created FROM docs WHERE collection_id=? ORDER BY created DESC`, c.id) }));
+  ensureSpaces(user);
+  return allowedCollections(user).map(c => ({ ...c, mine: c.owner_id === user.id, canUpload: canUpload(user, c), ownerName: c.owner_id ? (one(`SELECT name,email FROM users WHERE id=?`, c.owner_id) || {}).name || '' : '',
+    clientId: c.kind === 'client' ? one(`SELECT id FROM clients WHERE collection_id=?`, c.id)?.id || null : null, groups: all(`SELECT g.id,g.name FROM groups g JOIN collection_groups cg ON cg.group_id=g.id WHERE cg.collection_id=?`, c.id),
+    docs: all(`SELECT d.id,d.title,d.filename,d.size,d.classification,d.status,d.error,d.chunks,d.pages,d.sensitive,d.created,d.uploaded_by,COALESCE(NULLIF(u.name,''),u.email) uploader FROM docs d LEFT JOIN users u ON u.id=d.uploaded_by WHERE d.collection_id=? ORDER BY d.created DESC`, c.id) }));
 }
 function mePayload(u) {
   const s = getSettings(); const ms = modelsFor(u, s);
@@ -180,6 +182,28 @@ route('POST', '/api/quick', async (req, res, u) => {
 });
 
 route('GET', '/api/knowledge', (req, res, u) => json(res, 200, knowledgeFor(u)));
+// Everyone can add to the team space, to client spaces and to their own space (admins also to organization collections).
+route('POST', '/api/knowledge/collections/:id/docs', async (req, res, u, p) => {
+  const c = allowedCollections(u).find(x => x.id === p.id); if (!c) throw new HttpError(404, 'Collection not found');
+  if (!canUpload(u, c)) throw new HttpError(403, c.kind === 'person' ? 'You can only add documents to your own space.' : 'Only administrators can add documents to this collection.');
+  const classification = String(req.headers['x-classification'] || 'biasa'); const problem = classificationProblem(classification);
+  if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification, collection: c.id }, clientIp(req)); emitWebhook('knowledge.upload_refused', { file: fileName(req), classification, by: u.email }); throw new HttpError(422, problem); }
+  const buf = await readBody(req, config.maxUploadMb * MB);
+  const doc = await ingestDoc({ collectionId: c.id, filename: fileName(req), mime: String(req.headers['content-type'] || '').split(';')[0], buf, classification, title: req.headers['x-title'] ? decodeURIComponent(req.headers['x-title']) : null, userId: u.id });
+  audit(u.id, 'knowledge.upload', { doc: doc.id, title: doc.title, classification, status: doc.status, collection: c.id, kind: c.kind }, clientIp(req)); json(res, 200, doc);
+});
+// Remove a document: the person who uploaded it, the owner of a personal space, or an administrator.
+route('DELETE', '/api/knowledge/docs/:id', (req, res, u, p) => {
+  const d = one(`SELECT d.*, c.kind, c.owner_id FROM docs d JOIN collections c ON c.id=d.collection_id WHERE d.id=?`, p.id);
+  if (!d || !allowedCollections(u).some(c => c.id === d.collection_id)) throw new HttpError(404, 'Not found');
+  if (u.role !== 'admin' && d.uploaded_by !== u.id && d.owner_id !== u.id) throw new HttpError(403, 'Only the person who added this document (or an administrator) can remove it.');
+  deleteDoc(p.id); audit(u.id, 'knowledge.doc_deleted', { doc: p.id, title: d.title }, clientIp(req)); json(res, 200, { ok: true });
+});
+// Your own space is readable by everyone by default; make it private to keep it to yourself.
+route('PATCH', '/api/knowledge/mine', async (req, res, u) => {
+  const { private: priv } = await readJson(req, 2e3); ensureSpaces(u);
+  run(`UPDATE collections SET private=?, name=? WHERE kind='person' AND owner_id=?`, priv ? 1 : 0, u.name || u.email, u.id); audit(u.id, 'knowledge.space_visibility', { private: !!priv }, clientIp(req)); json(res, 200, { ok: true });
+});
 // Direct document search: no AI involved, nothing leaves the server, no cost.
 route('POST', '/api/knowledge/search', async (req, res, u) => {
   const { query, collection } = await readJson(req, 10e3); const q = String(query || '').trim().slice(0, 300); if (!q) throw new HttpError(400, 'Type something to search for');
@@ -431,10 +455,9 @@ route('POST', '/api/reports/datasets/:id/plan', async (req, res, u, p) => {
   const body = await readJson(req, 50e3); const r = await R.planDataset(u, p.id, body);
   audit(u.id, 'report.plan', { dataset: p.id, model: r.model.id, steps: r.plan.steps.length }, clientIp(req)); json(res, 200, r);
 });
-route('POST', '/api/reports/datasets/:id/run', async (req, res, u, p) => {
-  const body = await readJson(req, 2 * MB); const r = await R.runDataset(u, p.id, body);
-  audit(u.id, 'report.curate', { dataset: p.id, steps: r.log.length, failed: r.log.filter(l => !l.ok).length, aiRows: r.aiRows }, clientIp(req)); json(res, 200, await R.getDataset(u, p.id));
-});
+route('POST', '/api/reports/datasets/:id/run', async (req, res, u, p) => json(res, 202, R.startRun(u, p.id, await readJson(req, 2 * MB))));
+route('GET', '/api/reports/datasets/:id/job', (req, res, u, p) => json(res, 200, R.jobStatus(u, p.id)));
+route('POST', '/api/reports/datasets/:id/estimate', async (req, res, u, p) => json(res, 200, await R.estimateRun(u, p.id, await readJson(req, 2 * MB))));
 route('GET', '/api/reports/datasets/:id/xlsx', async (req, res, u, p) => { const f = await R.datasetXlsx(u, p.id); audit(u.id, 'report.download', { dataset: p.id, type: 'xlsx' }, clientIp(req)); sendFile(res, f.buf, f.name, XLSX_TYPE); });
 route('POST', '/api/reports/datasets/:id/attach', (req, res, u, p) => json(res, 200, R.datasetDigest(u, p.id)));
 route('POST', '/api/reports/sources', async (req, res, u) => { const { datasets } = await readJson(req, 20e3); json(res, 200, R.deckSources(u, Array.isArray(datasets) ? datasets : [])); });

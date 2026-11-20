@@ -95,7 +95,23 @@ async function uploadDataset(files) {
   try { const d = await C.api('/api/reports/datasets', { method: 'POST', raw: f, headers: { 'content-type': f.type || 'application/octet-stream', 'x-filename': encodeURIComponent(f.name), 'x-client': S.client } }); S.ds = d; S.plan = null; S.explanation = ''; S.dsResultTab = 0; await load(); renderReports(); }
   catch (e) { C.toast(e.message, 5000); }
 }
-async function openDataset(did) { try { S.ds = await C.api('/api/reports/datasets/' + did); S.tab = 'data'; S.plan = S.ds.plan; S.explanation = ''; S.dsResultTab = 0; renderReports(); } catch (e) { C.toast(e.message, 4000); } }
+// Polls a background run and keeps the progress visible; reopening the dataset resumes the display.
+async function pollJob(did) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 1200)); let j;
+    try { j = await C.api(`/api/reports/datasets/${did}/job`, { quiet: true }); } catch { continue; }
+    if (S.ds?.id !== did) return; S.job = j;
+    if (j.status === 'running') { const el = $('#rpJob'); if (el) el.outerHTML = jobHTML(j); else if (S.tab === 'data') renderReports(); continue; }
+    S.busy = ''; S.job = null;
+    if (j.status === 'error') C.toast('Run stopped: ' + j.error, 7000);
+    S.ds = await C.api('/api/reports/datasets/' + did); S.plan = S.ds.plan; S.dsResultTab = 0; C.refreshMe?.(); renderReports(); return;
+  }
+}
+function jobHTML(j) {
+  const pct = j.total ? Math.round(j.done / j.total * 100) : Math.round((j.step - 1) / Math.max(1, j.steps) * 100);
+  return `<div id="rpJob" class="rp-job"><div class="rp-job-top"><span class="shimmer">Step ${j.step || 1} of ${j.steps}: ${esc(j.text || '')}</span><b>${pct}%</b></div><div class="rp-bar"><i style="width:${pct}%"></i></div>${j.total ? `<small>${j.done.toLocaleString('id-ID')} of ${j.total.toLocaleString('id-ID')} texts labelled${j.cached ? ` · ${j.cached.toLocaleString('id-ID')} reused from earlier runs` : ''}</small>` : ''}</div>`;
+}
+async function openDataset(did) { try { S.ds = await C.api('/api/reports/datasets/' + did); S.tab = 'data'; S.plan = S.ds.plan; S.explanation = ''; S.dsResultTab = 0; const j = await C.api(`/api/reports/datasets/${did}/job`); if (j.status === 'running') { S.busy = 'run'; S.job = j; pollJob(did); } renderReports(); } catch (e) { C.toast(e.message, 4000); } }
 function dsView() {
   const d = S.ds; const sh = d.sheets.find(s => s.name === d.sheet) || d.sheets[0];
   const steps = S.plan?.steps || [];
@@ -113,6 +129,7 @@ function dsView() {
       ${S.explanation ? `<div class="notice" style="margin-top:10px">${esc(S.explanation)}</div>` : ''}
       ${steps.length ? `<ol class="rp-steps">${steps.map((s, i) => { const l = d.log?.[i]; return `<li class="rp-step ${s.op === 'ai_tag' ? 'ai' : ''}"><span class="badge">${esc(S.meta.ops?.[s.op] || s.op)}</span><span class="t">${esc(s.text || s.op)}</span>${l && JSON.stringify(stepKey(l)) === JSON.stringify(stepKey(s)) ? (l.ok ? `<small class="ok">${l.before !== l.after ? `${l.before} → ${l.after} rows` : l.changed != null ? `${l.changed} changed` : l.aiRows ? `${l.aiRows} labelled` : '✓'}</small>` : `<small class="bad" title="${esc(l.error)}">skipped</small>`) : ''}<span class="acts"><button class="icon-btn" data-r="upstep" data-x="${i}" title="Move up">↑</button><button class="icon-btn" data-r="editstep" data-x="${i}" title="Edit">${ic('edit')}</button><button class="icon-btn" data-r="rmstep" data-x="${i}" title="Remove">${ic('trash')}</button></span></li>`; }).join('')}</ol>`
         : `<p class="help">Describe what you need above and press <b>Draft a plan</b>, load a saved recipe, or add steps yourself — recipes and manual steps use no AI planning.</p>`}
+      ${S.busy === 'run' && S.job ? jobHTML(S.job) : ''}
       ${recipeBar(d)}</div>
     ${d.result ? resultHTML(d) : ''}`);
 }
@@ -321,9 +338,12 @@ async function onClick(e) {
       case 'plan': { const instruction = $('#rpInstr').value.trim(); S.busy = 'plan'; renderReports();
         try { const res = await C.api(`/api/reports/datasets/${S.ds.id}/plan`, { method: 'POST', body: { instruction, model: $('#rpModel')?.value, sheet: S.ds.sheet } }); S.plan = res.plan; S.explanation = res.explanation; S.ds.instruction = instruction; S.ds.log = null; }
         finally { S.busy = ''; renderReports(); } break; }
-      case 'run': { S.busy = 'run'; renderReports();
-        try { S.ds = await C.api(`/api/reports/datasets/${S.ds.id}/run`, { method: 'POST', body: { plan: S.plan, sheet: S.ds.sheet } }); S.plan = S.ds.plan; S.dsResultTab = 0; C.refreshMe?.(); }
-        finally { S.busy = ''; renderReports(); } break; }
+      case 'run': {
+        if (S.plan.steps.some(st => st.op === 'ai_tag')) { // large files: show what AI labelling will cost before starting
+          const est = await C.api(`/api/reports/datasets/${S.ds.id}/estimate`, { method: 'POST', body: { plan: S.plan, sheet: S.ds.sheet } });
+          if (est.aiRows > 1500 && !(await C.confirmBox(`Label ${est.aiRows.toLocaleString('id-ID')} unique texts with AI?`, `Estimated cost about $${est.usd} (≈ Rp${Math.round(est.usd * 16500).toLocaleString('id-ID')}) with ${est.model}, roughly ${est.minutes} minute${est.minutes > 1 ? 's' : ''}. Texts labelled before are reused for free. You can leave this page while it runs.`, 'Start'))) break;
+        }
+        const did = S.ds.id; S.busy = 'run'; S.job = await C.api(`/api/reports/datasets/${did}/run`, { method: 'POST', body: { plan: S.plan, sheet: S.ds.sheet } }); renderReports(); pollJob(did); break; }
       case 'addstep': S.plan ??= { title: '', steps: [] }; stepModal(-1); break;
       case 'editstep': stepModal(+x); break;
       case 'rmstep': S.plan.steps.splice(+x, 1); renderReports(); break;

@@ -46,6 +46,17 @@ Browser (login)  ──HTTPS──▶  Canopus server  ──only relevant excer
 
 Canopus works like a senior communications consultant for the team: it leads with the answer, grounds it in data and internal documents, separates facts from interpretation, and ends with options, a recommendation, risks and next steps. Brainstorming goes wide first, then narrows to the best ideas. The "Communications analyst" skill is on by default (users can turn it off in Skills), and the home page and prompt library start with strategy work: communication strategy, issue analysis, campaign brainstorming, key messages, media Q&A preparation, crisis holding statements, stakeholder maps and executive briefing notes.
 
+## Knowledge spaces for many people
+
+- **Team knowledge — for everyone:** one shared space; every user can add files and everyone can search and open them.
+- **A space for each person:** each user has their own space (created automatically). Others can read it by default, so you can ask "from what Budi collected"; only the owner adds or removes files, and the owner can make it private (then nobody else, administrators included, sees or searches it in the app).
+- **Client spaces** (from Reports) and **organization collections** (managed by administrators, access per group) as before.
+- In the composer, the **Knowledge** button chooses what a chat searches: all knowledge, one space (team, a person, a client, a collection), or off. Direct search on the Knowledge page has the same choice.
+
+## Large spreadsheets
+
+Files with 50,000+ rows are supported (upload limit `MAX_UPLOAD_MB`, default 60). A file is parsed once and kept parsed; curation runs in the background with a progress bar, so you can leave the page. AI labelling sends each **unique** text once, in batches of 80, six batches at a time, retries on rate limits, and caches every label — so a rerun, or next month's file with the same headlines, costs nothing for texts already labelled. Before labelling more than 1,500 texts, Canopus shows the estimated cost and time and asks to confirm. Example: 50,000 rows with fully unique headlines ≈ $0.40 with Claude Haiku and roughly 10–15 minutes.
+
 ## What's new in version 3: Reports
 
 A **Reports** page for communications work: media monitoring, issue analysis and communication strategy.
