@@ -4,7 +4,7 @@ let C; // helpers from app.js
 const S = { tab: 'data', templates: [], datasets: [], decks: [], meta: {}, ds: null, dsResultTab: 0, plan: null, explanation: '', deck: null, sources: [], busy: '', loaded: false };
 const $ = s => document.querySelector(s);
 const esc = s => C.esc(s), ic = (n, c) => C.ic(n, c);
-const KIND_LABEL = { title: 'Cover', section: 'Section', bullets: 'Points', two: 'Two columns', kpi: 'Key numbers', quote: 'Quote', table: 'Table', chart: 'Chart', closing: 'Closing' };
+const KIND_LABEL = { title: 'Cover', section: 'Section', bullets: 'Points', two: 'Two columns', kpi: 'Key numbers', quote: 'Quote', matrix: '2×2 matrix', actions: 'Action plan', table: 'Table', chart: 'Chart', closing: 'Closing' };
 const DATA_CHIPS = ['Bersihkan data, buang berita duplikat, seragamkan nama media, lalu rekap per media, sentimen, dan tren harian',
   'Beri label sentimen (Positif/Netral/Negatif) untuk berita yang belum berlabel', 'Kelompokkan berita ke dalam isu utama secara otomatis lalu rekap per isu',
   'Hanya berita bersentimen negatif; rekap per media dan narasumber'];
@@ -141,6 +141,8 @@ function slideThumb(s, colors) {
     : s.kind === 'kpi' ? `<div class="kpis">${s.items.map(i => `<div><b style="color:${acc}">${esc(i.value)}</b><span>${esc(i.label)}</span></div>`).join('')}</div>`
     : s.kind === 'chart' ? `<div class="viz">${ic('chart')}<span>${esc(s.chart)} · ${esc(s.source)}</span></div>`
     : s.kind === 'table' ? `<div class="viz">${ic('table')}<span>${esc(s.source)}</span></div>`
+    : s.kind === 'matrix' ? `<div class="mx">${s.quadrants.map(q => `<div><b style="color:${acc}">${esc(q.title)}</b>${q.points.slice(0, 2).map(p => `<span>${esc(p)}</span>`).join('')}</div>`).join('')}</div>`
+    : s.kind === 'actions' ? `<div class="act"><div style="background:${acc}"><span>Aksi</span><span>PIC</span><span>Waktu</span></div>${s.rows.slice(0, 4).map(r => `<div><span>${esc(r.action)}</span><span>${esc(r.owner)}</span><span>${esc(r.when)}</span></div>`).join('')}</div>`
     : s.kind === 'quote' ? `<div class="qt" style="border-color:${acc2}">“${esc(s.quote)}”<small>${esc(s.source)}</small></div>` : `<div class="sub">${esc(s.subtitle || '')}</div>`;
   return `<div class="thumb169 ${dark ? 'dark' : ''}" style="${dark ? `background:${navy}` : ''}"><i style="background:${acc2}"></i><h4 style="color:${dark ? '#fff' : navy}">${esc(s.title)}</h4>${inner}</div>`;
 }
@@ -154,9 +156,11 @@ function slideFields(s, i) {
   if (s.kind === 'two') h += `<div class="row2"><div>${f('left_title', 'Left heading', s.left_title)}${f('left', 'Left points', s.left.join('\n'), 4)}</div><div>${f('right_title', 'Right heading', s.right_title)}${f('right', 'Right points', s.right.join('\n'), 4)}</div></div>`;
   if (s.kind === 'kpi') h += f('items', 'Numbers (one per line: value | label | note)', s.items.map(x => [x.value, x.label, x.note].filter(Boolean).join(' | ')).join('\n'), 4);
   if (s.kind === 'quote') h += f('quote', 'Quote', s.quote, 3) + f('source', 'Who said it, where', s.source);
+  if (s.kind === 'matrix') h += `<div class="row2">${s.quadrants.map((q, k) => `<div>${f('q' + k + 't', ['Top left', 'Top right', 'Bottom left', 'Bottom right'][k] + ' — heading', q.title)}${f('q' + k + 'p', 'Points (one per line)', q.points.join('\n'), 3)}</div>`).join('')}</div>`;
+  if (s.kind === 'actions') h += f('rows', 'Actions (one per line: action | owner | when | success indicator)', s.rows.map(r => [r.action, r.owner, r.when, r.kpi].join(' | ')).join('\n'), 6);
   if (s.kind === 'chart') h += `<div class="row2"><div>${srcSel(s.source)}</div><div><label>Chart type</label><select data-f="chart" data-i="${i}" class="vsel" style="width:100%">${['column', 'bar', 'line', 'pie', 'doughnut'].map(c => `<option ${c === s.chart ? 'selected' : ''}>${c}</option>`).join('')}</select></div></div>${f('category', `Category column${cols.length ? ' — ' + cols.join(', ') : ''}`, s.category)}${f('series', 'Value columns (comma-separated)', s.series.join(', '))}<label class="help" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-f="stacked" data-i="${i}" ${s.stacked ? 'checked' : ''}> Stacked</label>`;
   if (s.kind === 'table') h += `${srcSel(s.source)}${f('columns', `Columns (comma-separated, empty = all)${cols.length ? ' — ' + cols.join(', ') : ''}`, s.columns.join(', '))}${f('top', 'Show only the first N rows (0 = all)', s.top || 0)}`;
-  if (['kpi', 'table', 'chart'].includes(s.kind)) h += f('caption', 'Insight (shown under the visual)', s.caption || '', 2);
+  if (['kpi', 'table', 'chart', 'matrix', 'actions'].includes(s.kind)) h += f('caption', 'Insight (shown under the visual)', s.caption || '', 2);
   return h;
 }
 function deckView() {
@@ -174,7 +178,8 @@ function deckView() {
       case 'series': case 'columns': s[el.dataset.f] = v.split(',').map(y => y.trim()).filter(Boolean); break;
       case 'items': s.items = list(v).map(l => { const [value, label, note] = l.split('|').map(y => y.trim()); return { value: value || '', label: label || '', note: note || '' }; }); break;
       case 'top': s.top = +v || 0; break;
-      default: s[el.dataset.f] = v;
+      case 'rows': s.rows = list(v).map(l => { const [action, owner, when, kpi] = l.split('|').map(y => y.trim()); return { action: action || '', owner: owner || '', when: when || '', kpi: kpi || '' }; }); break;
+      default: { const q = el.dataset.f.match(/^q(\d)([tp])$/); if (q) { const quad = s.quadrants[+q[1]]; if (q[2] === 't') quad.title = v; else quad.points = list(v); } else s[el.dataset.f] = v; }
     }
     k.dirty = true; if (e.type === 'change') { const th = el.closest('.rp-slide')?.querySelector('.thumb169'); if (th) th.outerHTML = slideThumb(s, tplColors($('#rpDTpl').value)); }
   };
@@ -185,7 +190,9 @@ async function saveDeck(quiet) {
 }
 const NEW_SLIDE = { title: { kind: 'title', title: 'Judul', subtitle: '' }, section: { kind: 'section', title: 'Bagian baru' }, bullets: { kind: 'bullets', title: 'Judul', bullets: ['Poin pertama'] },
   two: { kind: 'two', title: 'Perbandingan', left_title: 'Kiri', left: ['Poin'], right_title: 'Kanan', right: ['Poin'] }, kpi: { kind: 'kpi', title: 'Angka kunci', items: [{ value: '0', label: 'Label', note: '' }], caption: '' },
-  quote: { kind: 'quote', title: 'Kutipan', quote: 'Teks kutipan', source: '' }, table: { kind: 'table', title: 'Tabel', source: '', columns: [], top: 10, caption: '' },
+  quote: { kind: 'quote', title: 'Kutipan', quote: 'Teks kutipan', source: '' },
+  matrix: { kind: 'matrix', title: 'Analisis SWOT', quadrants: [{ title: 'Kekuatan', points: [] }, { title: 'Kelemahan', points: [] }, { title: 'Peluang', points: [] }, { title: 'Ancaman', points: [] }], caption: '' },
+  actions: { kind: 'actions', title: 'Rencana Aksi', rows: [{ action: 'Aksi', owner: 'PIC', when: 'Minggu ini', kpi: 'Indikator' }], caption: '' }, table: { kind: 'table', title: 'Tabel', source: '', columns: [], top: 10, caption: '' },
   chart: { kind: 'chart', title: 'Grafik', source: '', chart: 'column', category: '', series: [], stacked: false, caption: '' }, closing: { kind: 'closing', title: 'Terima kasih', subtitle: '' } };
 
 /* ================= templates ================= */

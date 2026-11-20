@@ -611,3 +611,9 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 .rp-tplprev .swatches span{width:16px;height:16px;border-radius:50%;border:1px solid rgba(255,255,255,.4)}
 @media (max-width:820px){ .rp-slide{grid-template-columns:1fr} .rp-step{flex-wrap:wrap} }
 #repPage.page-in{width:100%;min-width:0}
+.thumb169 .mx{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.thumb169 .mx div{background:#eef2f7;border-radius:5px;padding:4px 6px;display:flex;flex-direction:column;min-height:34px;overflow:hidden}
+.thumb169 .mx span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:8.5px}
+.thumb169 .act div{display:grid;grid-template-columns:2fr 1fr 1fr;gap:4px;padding:2px 4px;border-bottom:1px solid #e3e7ee;font-size:8.5px}
+.thumb169 .act div:first-child{color:#fff;font-weight:700;border-radius:3px 3px 0 0}
+.thumb169 .act span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

@@ -75,7 +75,7 @@ const KIND_LAYOUT = {
   visual: { types: ['titleOnly'], name: /title only|judul saja/i },
 };
 function chooseLayout(t, kind) {
-  const spec = KIND_LAYOUT[kind === 'closing' ? 'title' : ['table', 'chart', 'kpi', 'quote'].includes(kind) ? 'visual' : kind] || KIND_LAYOUT.bullets;
+  const spec = KIND_LAYOUT[kind === 'closing' ? 'title' : ['table', 'chart', 'kpi', 'quote', 'matrix', 'actions'].includes(kind) ? 'visual' : kind] || KIND_LAYOUT.bullets;
   const L = t.layouts; const hasTitle = l => l.phs.some(isTitle);
   let l = L.find(x => spec.types.includes(x.type) && hasTitle(x)) || L.find(x => spec.name.test(x.name) && hasTitle(x));
   if (l) return { layout: l, exact: true };
@@ -249,6 +249,26 @@ export async function buildDeck(templateBuf, outline, resolve) {
       shapes.push(textBox(11, { x: box.x + 300000, y, w: box.w - 300000, h }, styled(`“${s.quote}”`, { sz: s.quote.length > 220 ? 2000 : 2600, i: true, clr: 'tx2' }) + (s.source ? styled(`— ${s.source}`, { sz: 1400, clr: 'accent1', b: true }) : ''), { anchor: 'ctr' }));
       addSlide(L, shapes); continue;
     }
+    if (s.kind === 'matrix') { // 2×2: SWOT, stakeholder map (influence × support), risk map, options
+      const shapes = titleShapes(L, title); const [area, capBox] = split(contentBox(t, L), s.caption);
+      const gap = Math.min(area.w, area.h) * 0.03, w = (area.w - gap) / 2, h = (area.h - gap) / 2;
+      const fills = ['accent1', 'accent2', 'accent3', 'accent6'];
+      s.quadrants.slice(0, 4).forEach((q, k) => { const x = area.x + (k % 2) * (w + gap), y = area.y + Math.floor(k / 2) * (h + gap);
+        shapes.push(rectShape(20 + k * 2, { x, y, w: 64008, h }, fills[k]));
+        shapes.push(textBox(21 + k * 2, { x: x + 64008, y, w: w - 64008, h }, styled(q.title, { sz: 1500, b: true, clr: fills[k] }) + q.points.map(pt => styled('• ' + pt, { sz: q.points.join(' ').length > 220 ? 1100 : 1250 })).join(''), { fillClr: 'lt2', inset: 118872 })); });
+      if (capBox) shapes.push(...caption(40, capBox, s.caption));
+      addSlide(L, shapes); continue;
+    }
+    if (s.kind === 'actions') { // action plan: what, who, when, how success is measured
+      const heads = s.headers?.length === 4 ? s.headers : ['Aksi', 'PIC', 'Waktu', 'Indikator keberhasilan'];
+      const rows = s.rows.map(r => [r.action, r.owner, r.when, r.kpi]); const fontSize = rows.length > 6 ? 1100 : 1200; const rowH = fontSize / 100 * 12700 * 2.1;
+      const [area, capBox] = split(contentBox(t, L), s.caption); const per = Math.max(3, Math.floor(area.h / (rowH * 1.4)) - 1);
+      for (let pg = 0; pg * per < rows.length && pg < 3; pg++) {
+        const shapes = titleShapes(L, pg ? `${title} (lanjutan)` : title); shapes.push(tableFrame(10, area, heads, rows.slice(pg * per, (pg + 1) * per), { fontSize, numericCols: [false, false, false, false] }));
+        if (capBox && pg === 0) shapes.push(...caption(30, capBox, s.caption)); addSlide(L, shapes);
+      }
+      continue;
+    }
     if (s.kind === 'table') {
       const data = resolve(s.source); if (!data) { warnings.push(`Slide “${title}”: data “${s.source}” not found`); continue; }
       let cols = s.columns?.length ? s.columns.map(c => data.columns.findIndex(x => x.toLowerCase() === c.toLowerCase())).filter(i => i >= 0) : data.columns.map((_, i) => i);
@@ -312,7 +332,7 @@ export async function buildDeck(templateBuf, outline, resolve) {
 }
 
 /* ================= outline validation ================= */
-export const SLIDE_KINDS = ['title', 'section', 'bullets', 'two', 'kpi', 'quote', 'table', 'chart', 'closing'];
+export const SLIDE_KINDS = ['title', 'section', 'bullets', 'two', 'kpi', 'quote', 'matrix', 'actions', 'table', 'chart', 'closing'];
 const st = (v, n) => String(v ?? '').trim().slice(0, n);
 const lines = (v, max, n = 400) => (Array.isArray(v) ? v : v ? String(v).split('\n') : []).map(x => st(x, n)).filter(Boolean).slice(0, max);
 export function sanitizeOutline(o) {
@@ -327,7 +347,9 @@ export function sanitizeOutline(o) {
     if (r.kind === 'quote') { s.quote = st(r.quote, 400); s.source = st(r.source, 120); if (!s.quote) continue; }
     if (r.kind === 'table') { s.source = st(r.source, 120); s.columns = lines(r.columns, 8, 120); s.top = Math.max(0, Math.min(200, +r.top || 0)); }
     if (r.kind === 'chart') { s.source = st(r.source, 120); s.chart = ['bar', 'column', 'line', 'pie', 'doughnut'].includes(r.chart) ? r.chart : 'column'; s.category = st(r.category, 120); s.series = lines(r.series, 6, 120); s.stacked = !!r.stacked; }
-    if (['kpi', 'table', 'chart'].includes(r.kind)) s.caption = st(r.caption, 300);
+    if (r.kind === 'matrix') { s.quadrants = (Array.isArray(r.quadrants) ? r.quadrants : []).slice(0, 4).map(q => ({ title: st(q?.title, 80), points: lines(q?.points, 5, 160) })); while (s.quadrants.length < 4) s.quadrants.push({ title: '', points: [] }); if (!s.quadrants.some(q => q.title || q.points.length)) continue; }
+    if (r.kind === 'actions') { s.rows = (Array.isArray(r.rows) ? r.rows : []).slice(0, 15).map(x => ({ action: st(x?.action, 200), owner: st(x?.owner, 80), when: st(x?.when, 60), kpi: st(x?.kpi, 160) })).filter(x => x.action); s.headers = lines(r.headers, 4, 40); if (s.headers.length !== 4) delete s.headers; if (!s.rows.length) continue; }
+    if (['kpi', 'table', 'chart', 'matrix', 'actions'].includes(r.kind)) s.caption = st(r.caption, 300);
     if (r.kind === 'bullets' && !s.bullets.length) continue;
     if (r.kind === 'kpi' && !s.items.length) continue;
     slides.push(s);

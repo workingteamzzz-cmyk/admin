@@ -88,6 +88,8 @@ function reportMock(sys, q) {
       { kind: 'table', title: 'Rekap per Media', source: `${ds} / Rekap per Media`, caption: 'Kompas paling aktif.' },
       { kind: 'table', title: 'Daftar Berita Negatif', source: `${ds} / Data`, columns: ['Tanggal', 'Nama Media', 'Judul Berita', 'Sentimen'], top: 8 },
       { kind: 'bullets', title: 'Rekomendasi Strategi Komunikasi', bullets: ['Klarifikasi isu **distribusi**', '- Siapkan data per provinsi', 'Perkuat cerita penerima manfaat'] },
+      { kind: 'matrix', title: 'SWOT Komunikasi', quadrants: [{ title: 'Kekuatan', points: ['Program populer'] }, { title: 'Kelemahan', points: ['Distribusi terlambat'] }, { title: 'Peluang', points: ['Cerita UMKM'] }, { title: 'Ancaman', points: ['Kritik DPR'] }], caption: 'Fokus menutup kelemahan distribusi.' },
+      { kind: 'actions', title: 'Rencana Aksi', rows: [{ action: 'Rilis data distribusi per provinsi', owner: 'Biro Humas', when: 'Minggu ini', kpi: 'Sentimen negatif turun 20%' }, { action: 'Briefing media mingguan', owner: 'Jubir', when: 'Setiap Senin', kpi: '3 media nasional hadir' }] },
       { kind: 'closing', title: 'Terima kasih', subtitle: 'Biro Komunikasi' }] }); }
   return null;
 }
@@ -494,7 +496,7 @@ try {
     const outlineReq = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const sawMasked = outlineReq && !outlineReq.raw.includes(SECRETS.term) && !outlineReq.raw.includes(SECRETS.mediaPhone);
     let rendered = 'not rendered';
     try { require('child_process').execFileSync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', OUT, deckFile], { timeout: 120000, stdio: 'ignore' }); require('child_process').execFileSync('pdftoppm', ['-r', '50', '-png', path.join(OUT, 'harness-deck.pdf'), path.join(OUT, 'server-deck')], { timeout: 60000 }); rendered = 'rendered with LibreOffice'; } catch {}
-    return ok(twoStage && slides === 8 && nSlides >= 8 && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT finalization: ${twoStage} (chart sources kept) · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · AI saw masked term & no phone: ${sawMasked} · ${rendered}`);
+    return ok(twoStage && slides === 10 && nSlides >= 10 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT finalization: ${twoStage} (chart sources kept) · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · AI saw masked term & no phone: ${sawMasked} · ${rendered}`);
   });
   await step(A, 'report-template', 'Reports: an earlier report uploaded as template gives its design and its structure to the next deck', async () => {
     const before = recorded.length;
