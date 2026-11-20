@@ -5,9 +5,11 @@ const S = { tab: 'clients', client: '', clients: [], clientDocs: null, templates
 const $ = s => document.querySelector(s);
 const esc = s => C.esc(s), ic = (n, c) => C.ic(n, c);
 const KIND_LABEL = { title: 'Cover', section: 'Section', bullets: 'Points', two: 'Two columns', kpi: 'Key numbers', quote: 'Quote', matrix: '2×2 matrix', actions: 'Action plan', table: 'Table', chart: 'Chart', closing: 'Closing' };
-const DATA_CHIPS = ['Bersihkan data, buang berita duplikat, seragamkan nama media, lalu rekap per media, sentimen, dan tren harian',
-  'Beri label sentimen (Positif/Netral/Negatif) untuk berita yang belum berlabel', 'Kelompokkan berita ke dalam isu utama secara otomatis lalu rekap per isu',
-  'Hanya berita bersentimen negatif; rekap per media dan narasumber'];
+const DATA_CHIPS = ['Per sentimen: bersihkan data, buang duplikat, beri label sentimen (Positif/Netral/Negatif) yang kosong, lalu rekap sebaran sentimen, sentimen per media, dan tren harian',
+  'Per topik: bersihkan data, buang duplikat, kelompokkan berita ke dalam topik/isu utama secara otomatis, lalu rekap per topik, topik per media, dan tren harian',
+  'Sentimen dan topik: bersihkan, buang duplikat, beri label sentimen dan topik, lalu rekap topik × sentimen, per media, dan tren harian',
+  'Hanya berita bersentimen negatif; rekap per topik, media dan narasumber'];
+const CHIP_LABELS = ['By sentiment', 'By topic', 'Sentiment + topic', 'Negative coverage only'];
 const DECK_CHIPS = ['Laporan monitoring media mingguan untuk pimpinan', 'Analisis isu negatif dan rekomendasi strategi komunikasi', 'Ringkasan eksekutif 5 slide', 'Bahan rapat koordinasi humas: temuan, risiko, dan rencana aksi'];
 
 export function initReports(ctx) {
@@ -40,7 +42,15 @@ export async function renderReports(fresh) {
   ({ clients: clientsView, data: S.ds ? dsView : dataHome, decks: S.deck ? deckView : deckHome, templates: tplView }[S.tab])();
   C.hydrateIcons(page);
 }
-const body = html => { $('#rpBody').innerHTML = html; C.hydrateIcons($('#rpBody')); };
+// The report flow: Excel → curate (topic / sentiment) → Claude builds the deck & analysis → GPT finalizes → download.
+function stepper() {
+  if (!['data', 'decks'].includes(S.tab)) return '';
+  const d = S.ds, k = S.deck; const final = k && /finali[sz]ed by/i.test(k.notes || '');
+  const at = S.tab === 'data' ? (!d ? 1 : d.result ? 3 : 2) : !k ? 3 : final ? 5 : 4;
+  const steps = ['Upload Excel', 'Curate: topic / sentiment', 'Claude: deck & analysis', 'GPT: finalize language & analysis', 'Download PowerPoint'];
+  return `<ol class="rp-flow">${steps.map((t, i) => `<li class="${i + 1 < at ? 'done' : i + 1 === at ? 'now' : ''}"><span>${i + 1 < at ? '✓' : i + 1}</span>${t}</li>`).join('')}</ol>`;
+}
+const body = html => { $('#rpBody').innerHTML = stepper() + html; C.hydrateIcons($('#rpBody')); };
 const modelSelect = (sel, id) => { const ms = C.me().config.models; return `<select id="${id}" class="vsel" title="AI model">${ms.length > 1 ? `<option value="auto">Auto (recommended)</option>` : ''}${ms.map(m => `<option value="${m.id}" ${sel === m.id ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select>`; };
 // Two-stage decks: one model analyzes (default: a Claude model), another finalizes the wording (default: a GPT model).
 const PREF_KEY = 'canopus.reports.models';
@@ -97,7 +107,7 @@ function dsView() {
       ${tableHTML(sh.columns, sh.preview, sh.personal)}</div>
     <div class="set-sec"><h3>${ic('sparkle')}What should Canopus do with this data?</h3>
       <textarea id="rpInstr" rows="3" placeholder="e.g. Buang duplikat, seragamkan nama media, beri label sentimen yang kosong, lalu buat rekap per media, per sentimen dan tren harian.">${esc(d.instruction || '')}</textarea>
-      <div class="chips" style="margin:8px 0 12px">${DATA_CHIPS.map((c, i) => `<button class="chip" data-r="dchip" data-x="${i}">${esc(c)}</button>`).join('')}</div>
+      <div class="chips" style="margin:8px 0 12px">${DATA_CHIPS.map((c, i) => `<button class="chip" data-r="dchip" data-x="${i}" title="${esc(c)}"><b>${CHIP_LABELS[i]}</b></button>`).join('')}</div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">${modelSelect('auto', 'rpModel')}<button class="btn primary" data-r="plan" ${S.busy ? 'disabled' : ''}>${S.busy === 'plan' ? spin('Planning…') : ic('sparkle') + 'Draft a plan'}</button><span class="help" style="margin:0">Uses a little AI; nothing is changed until you run the plan.</span></div></div>
     <div class="set-sec"><div style="display:flex;align-items:center;gap:10px"><h3 style="flex:1;margin:0">${ic('memo')}Plan${steps.length ? ` · ${steps.length} steps` : ''}</h3><button class="btn sm" data-r="addstep">${ic('plus')}Add step</button>${steps.length ? `<button class="btn primary" data-r="run" ${S.busy ? 'disabled' : ''}>${S.busy === 'run' ? spin('Running…') : ic('bolt') + 'Run plan'}</button>` : ''}</div>
       ${S.explanation ? `<div class="notice" style="margin-top:10px">${esc(S.explanation)}</div>` : ''}
@@ -118,7 +128,7 @@ function recipeBar(d) {
 function resultHTML(d) {
   const tabs = [{ name: `Data (${d.result.table.rows.toLocaleString('id-ID')} rows)`, columns: d.result.table.columns, rows: d.result.table.preview }, ...d.result.summaries.map(s => ({ name: s.name, columns: s.columns, rows: s.rows }))];
   const cur = tabs[Math.min(S.dsResultTab, tabs.length - 1)]; const failed = (d.log || []).filter(l => !l.ok);
-  return `<div class="set-sec"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="flex:1;margin:0">${ic('check')}Result</h3><button class="btn sm" data-r="todeck">${ic('layers')}Make a presentation</button><button class="btn sm primary" data-r="xlsx">${ic('download')}Download Excel</button></div>
+  return `<div class="set-sec"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="flex:1;margin:0">${ic('check')}Result</h3><button class="btn sm primary" data-r="todeck">${ic('layers')}Next: Claude builds the deck →</button><button class="btn sm" data-r="xlsx">${ic('download')}Download Excel</button></div>
     ${failed.length ? `<div class="notice" style="margin-top:10px">${failed.length} step${failed.length > 1 ? 's were' : ' was'} skipped: ${failed.map(l => `${esc(l.text)} — ${esc(l.error)}`).join('; ')}</div>` : ''}
     <div class="seg" style="margin:12px 0;flex-wrap:wrap">${tabs.map((t, i) => `<button class="${t === cur ? 'on' : ''}" data-r="rtab" data-x="${i}">${esc(t.name)}</button>`).join('')}</div>
     ${tableHTML(cur.columns, cur.rows)}${cur === tabs[0] && d.result.table.rows > cur.rows.length ? `<p class="help">Showing the first ${cur.rows.length} rows. The Excel file has all of them, plus the summaries and a sheet listing each curation step.</p>` : ''}</div>`;

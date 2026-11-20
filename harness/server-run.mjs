@@ -106,7 +106,7 @@ function handleOA(req, res, raw, kind) {
   const sys = msgs.find(m => m.role === 'system')?.content || '';
   const lu = [...msgs].reverse().find(m => m.role === 'user'); const q = typeof lu?.content === 'string' ? lu.content : (lu?.content || []).filter(p => p.type === 'text').map(p => p.text).join('\n');
   if (!body.stream) { let content = /Classify the user/.test(sys) ? classifyMock(q) : 'Harness Chat';
-    if (/final editor of a report presentation/.test(sys)) { // polishes titles, and (wrongly) tries to change a chart's data source
+    if (/senior reviewer of a report presentation/.test(sys)) { // polishes titles, and (wrongly) tries to change a chart's data source
       const j = JSON.parse(q.slice(q.indexOf('Draft outline to finalize:') + 'Draft outline to finalize:'.length)); j.slides.forEach(x => { if (!['title', 'closing'].includes(x.kind)) x.title += ' (final)'; if (x.source) x.source = 'Lain / Sumber'; }); j.notes = 'Judul dipertajam.'; content = JSON.stringify(j); }
     res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }], usage: { prompt_tokens: 40, completion_tokens: 3 } })); }
   const tools = msgs.filter(m => m.role === 'tool'); const lastIsTool = msgs.at(-1)?.role === 'tool';
@@ -280,7 +280,7 @@ try {
   });
   await step(A, 'models', 'Admin adds a GPT model and an on-premise model', async () => {
     await A.goto(canopus.url + '#admin'); await A.click('[data-atab=models]');
-    const add = async (sel, api, label, tier) => { await A.click(sel); await A.fill('#oaApi', api); await A.fill('#oaLabel', label); await A.selectOption('#oaTier', tier); if (await A.isVisible('#oaIn')) { await A.fill('#oaIn', '1'); await A.fill('#oaOut', '4'); } await A.click('[data-act=saveoa]'); await A.waitForTimeout(500); };
+    const add = async (sel, api, label, tier) => { await A.click(sel); await A.waitForTimeout(150); await A.fill('#oaApi', api); await A.fill('#oaLabel', label); await A.selectOption('#oaTier', tier); if (await A.isVisible('#oaIn')) { await A.fill('#oaIn', '1'); await A.fill('#oaOut', '4'); } await A.click('[data-act=saveoa]'); await A.waitForTimeout(500); };
     await add('[data-editoa=""]:not([data-prov=local])', 'gpt-sim', 'GPT Standard', 'standard');
     await add('[data-editoa=""][data-prov=local]', 'llama-sim', 'Local Llama', 'standard');
     const o = JSON.parse((await apiCall(A, '/api/admin/overview')).body);
@@ -496,7 +496,7 @@ try {
     await A.waitForSelector('.rp-slide', { timeout: TIMEOUT }); const slides = await A.locator('.rp-slide').count();
     const kid = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.decks[0].id));
     const deck = JSON.parse((await apiCall(A, '/api/reports/decks/' + kid)).body); const unmasked = deck.outline.slides[1].caption.includes(SECRETS.term);
-    const finReq = recorded.slice(before).find(r => r.kind === 'openai' && /final editor of a report presentation/.test(r.raw));
+    const finReq = recorded.slice(before).find(r => r.kind === 'openai' && /senior reviewer of a report presentation/.test(r.raw));
     const twoStage = !!finReq && /Analysis: Claude Core · finalized by GPT Standard/.test(deck.notes) && deck.outline.slides[2].title.endsWith('(final)') && deck.outline.slides[2].source.endsWith('/ Sebaran Sentimen');
     await A.click('[data-r=refinal]'); await A.waitForFunction(() => /\(final\) \(final\)/.test(document.querySelector('.rp-slide:nth-child(3) input[data-f=title]')?.value || ''), null, { timeout: TIMEOUT });
     const b64 = await A.evaluate(async kid => { const r = await fetch(`/api/reports/decks/${kid}/pptx`); const b = new Uint8Array(await r.arrayBuffer()); let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s); }, kid);

@@ -627,3 +627,10 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 .rp-clients .card:hover{border-color:var(--gold)}
 #repPage .doc-row .t{flex:1;min-width:0}
 @media (max-width:820px){ .rp-clientbar{width:100%} .rp-clientbar .vsel{flex:1} }
+.rp-flow{list-style:none;display:flex;gap:6px;margin:0 0 16px;padding:0;flex-wrap:wrap}
+.rp-flow li{display:flex;align-items:center;gap:8px;padding:7px 12px 7px 8px;border:1px solid var(--line);border-radius:999px;font-size:13px;color:var(--muted);background:var(--field)}
+.rp-flow li span{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;background:var(--chip)}
+.rp-flow li.done{color:var(--fg)}
+.rp-flow li.done span{background:rgba(70,180,120,.2);color:#3fae74}
+.rp-flow li.now{color:var(--active-fg);border-color:var(--active-fg);background:var(--active);font-weight:600}
+.rp-flow li.now span{background:var(--active-fg);color:var(--bg)}
