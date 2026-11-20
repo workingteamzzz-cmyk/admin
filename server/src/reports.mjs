@@ -278,19 +278,26 @@ Slide kinds:
 Think and write like a strategy consultant: lead with an executive summary (the 3–4 most important findings and what to do), make every slide title the slide's conclusion ("so what"), separate evidence from interpretation, and end with clear recommendations plus an action plan (owner, timing, success indicator) and the main risks to watch.
 Rules: use only numbers and facts present in the data or brief; never invent figures, quotes or outlets. Chart/table sources and column names must match the data catalog exactly. Prefer charts for trends and shares (line for time, doughnut/pie for shares with ≤6 parts, bar for rankings), tables for top lists. Every chart/table slide gets a caption stating the insight. Write in the user's language (usually Indonesian), concise slide titles that state the point. A typical media-monitoring report: title, executive summary, key numbers, sentiment, trend, top outlets, issues, notable coverage/quotes, issue/stakeholder or SWOT matrix, recommendations for communication strategy (key messages, spokespeople, channels), action plan, closing. Follow the template's reference structure when one is given. 8–16 slides unless the brief says otherwise.`;
 
-const FINALIZE_SYSTEM = `You are the second, senior reviewer of a report presentation that an analyst drafted from data. Finalize both the language and the analysis for senior readers.
+const FINALIZE_SYSTEM = `You are the second, senior analyst on a report presentation. Another analyst drafted it from the same data. Your job: analyze the data yourself, then finalize both the analysis and the language.
 
-Reply with ONE JSON object only, in the same format you receive: {"title": ..., "notes": one or two sentences on what you improved, "slides": [ ...same slides, same order, same kinds... ]}
-Language: make every slide title a short statement of the point (e.g. "Sentimen negatif naik karena isu distribusi"); tighten bullets (parallel, concise, max ~15 words); formal, clear language in the brief's language (usually Indonesian, following EYD); consistent terms and number formats.
-Analysis: sharpen each insight (what happened, why it matters, so what for the organization); make implications explicit; make recommendations specific and actionable (who, what, when, how success is measured) and consistent with the findings; strengthen the executive summary so it states the 3–4 most important findings and actions; fix reasoning that the data does not support. Check every number in the text against the data catalog and correct it if needed.
-Do not: add or remove slides, change slide kinds, change "source", "columns", "chart", "category", "series", "stacked" or "top", or invent facts, quotes, figures or outlets that are not in the data or brief. Keep placeholders like ⟦NAME_1⟧ exactly.`;
+Work in this order:
+1. Read the data catalog (curated spreadsheet: summaries and rows) on your own and note the key findings: volumes, shares, trends, peaks, outlets, topics/issues, spokespeople, notable coverage, anything unusual.
+2. Compare with the draft: correct claims the data does not support, sharpen weak insights, and add important findings the draft missed.
+3. Finalize the language for senior readers.
+
+Reply with ONE JSON object only: {"title": ..., "notes": 1–2 sentences on what you found and changed, "slides": [ ... ]}
+- Keep every draft slide, with its "n" number, kind and order. You may rewrite their text: titles as short statements of the point (e.g. "Sentimen negatif naik karena isu distribusi"), concise parallel bullets (max ~15 words), captions as one clear insight, specific recommendations (who, what, when, how success is measured), a strong executive summary (3–4 key findings and actions).
+- You may add up to 3 NEW slides (without "n") where the data shows something important the draft missed. Place them where they fit. A new chart or table must use a "source" and column names exactly as in the data catalog.
+- Never change "source", "columns", "chart", "category", "series", "stacked" or "top" of draft slides. Never invent facts, quotes, figures or outlets; every number must match the data. Keep placeholders like ⟦NAME_1⟧ exactly.
+- Language: the brief's language (usually Indonesian, formal, EYD), consistent terms and number formats.
+Slide formats are the same as in the draft (kinds: title, section, bullets, two, kpi, quote, matrix, actions, chart, table, closing).`;
 
 // The data the AI may read about a deck's datasets: summaries in full, the curated table as a sample without personal columns.
-function catalogText(tables) {
+function catalogText(tables, sampleRows = 40) {
   const extra = extraCols(); const cell = v => String(v ?? '').replace(/\s+/g, ' ').slice(0, 200); let catalog = '';
   for (const t of tables) {
     const keep = t.columns.map((c, i) => (reportSensitive(c, extra) ? -1 : i)).filter(i => i >= 0);
-    if (t.main) catalog += `\n### ${t.ref}  (${t.rows.length} rows; columns: ${t.columns.map(c => `"${c}"`).join(', ')})\nSample rows (personal-data columns left out):\n${t.rows.slice(0, 40).map(r => keep.map(i => `${t.columns[i]}: ${cell(r[i])}`).join(' · ')).join('\n')}\n`;
+    if (t.main) catalog += `\n### ${t.ref}  (${t.rows.length} rows; columns: ${t.columns.map(c => `"${c}"`).join(', ')})\n${sampleRows < t.rows.length ? `Sample of ${sampleRows} rows` : 'All rows'} (personal-data columns left out):\n${t.rows.slice(0, sampleRows).map(r => keep.map(i => `${t.columns[i]}: ${cell(r[i])}`).join(' · ')).join('\n')}\n`;
     else catalog += `\n### ${t.ref}  (columns: ${t.columns.map(c => `"${c}"`).join(', ')})\n${t.rows.slice(0, 60).map(r => r.map(cell).join(' | ')).join('\n')}\n`;
   }
   return catalog;
@@ -299,13 +306,24 @@ function catalogText(tables) {
 // and chart settings stay as the analysis set them, so the visuals remain tied to the real data.
 async function finalizeOutline(user, outline, { brief, catalog, finalizeModel, red }) {
   const finalizer = reportModel(user, finalizeModel, 'writing'); checkLimits(user);
-  const draft = red.mask(JSON.stringify({ title: outline.title, slides: outline.slides }));
-  const fin = await askJson(user, finalizer, FINALIZE_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), `Brief from the user:\n${red.mask(String(brief || '').slice(0, 4000))}\n\nData catalog (for checking numbers):${red.mask(catalog).slice(0, 60000)}\n\nDraft outline to finalize:\n${draft}`, 'report.finalize', 12000, 'medium');
-  const polished = sanitizeOutline(unmaskDeep(red, fin));
+  const draft = red.mask(JSON.stringify({ title: outline.title, slides: outline.slides.map((x, i) => ({ n: i + 1, ...x })) }));
+  const fin = await askJson(user, finalizer, FINALIZE_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), `Brief from the user:\n${red.mask(String(brief || '').slice(0, 4000))}\n\nData catalog (the curated spreadsheet — analyze it yourself):${red.mask(catalog).slice(0, 90000)}\n\nDraft outline from the first analyst:\n${draft}`, 'report.finalize', 16000, 'medium');
+  const one_ = r => sanitizeOutline({ slides: [r] }).slides[0];
   const LOCK = ['kind', 'source', 'columns', 'top', 'chart', 'category', 'series', 'stacked'];
-  const same = polished.slides.length === outline.slides.length && polished.slides.every((p, i) => p.kind === outline.slides[i].kind);
-  const result = same ? { title: polished.title || outline.title, slides: polished.slides.map((p, i) => ({ ...p, ...Object.fromEntries(LOCK.filter(k => outline.slides[i][k] !== undefined).map(k => [k, outline.slides[i][k]])) })) } : outline;
-  return { outline: result, finalizer, note: same ? red.unmask(String(fin.notes || '')) : `${finalizer.label} changed the slide structure, so its edits were not applied.` };
+  const out = []; const used = new Set(); let added = 0, kept = 0;
+  for (const r of Array.isArray(fin.slides) ? fin.slides : []) {
+    const n = Number.isInteger(r?.n) ? r.n - 1 : -1; const orig = outline.slides[n];
+    if (orig && !used.has(n)) { // a draft slide: take the new text, keep its kind and data settings
+      const p = r.kind === orig.kind ? one_(unmaskDeep(red, r)) : null; used.add(n);
+      out.push(p ? { ...p, ...Object.fromEntries(LOCK.filter(k => orig[k] !== undefined).map(k => [k, orig[k]])), _n: n } : { ...orig, _n: n }); continue;
+    }
+    if (n < 0 && added < 3) { const p = one_(unmaskDeep(red, r)); if (p) { out.push({ ...p, added: true }); added++; } }
+  }
+  // Draft slides the reviewer left out are put back where they were.
+  outline.slides.forEach((s0, i) => { if (!used.has(i)) { kept++; const at = out.findIndex(x => x._n > i); out.splice(at < 0 ? out.length : at, 0, { ...s0, _n: i }); } });
+  const result = { title: (typeof fin.title === 'string' && fin.title.trim() ? red.unmask(fin.title).slice(0, 160) : outline.title), slides: out.map(({ added: _a, _n: _b, ...x }) => x).slice(0, 40) };
+  const note = [red.unmask(String(fin.notes || '')), added ? `${finalizer.label} added ${added} slide${added > 1 ? 's' : ''} from its own reading of the data.` : '', kept ? `${kept} draft slide${kept > 1 ? 's were' : ' was'} kept unchanged.` : ''].filter(Boolean).join(' ');
+  return { outline: result, finalizer, note };
 }
 
 export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId }) {
@@ -323,7 +341,7 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   let outline = sanitizeOutline(unmaskDeep(red, raw)); let notes = red.unmask(String(raw.notes || ''));
   if (!outline.slides.length) throw err(502, 'The AI did not return any slides. Try again with a more specific brief.');
   let finalizer = null;
-  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: (client?.instructions ? `Client guidelines: ${client.instructions}\n\n` : '') + (brief || ''), catalog, finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
+  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: (client?.instructions ? `Client guidelines: ${client.instructions}\n\n` : '') + (brief || ''), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
   notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, notes].filter(Boolean).join(' ');
   const t = String(title || outline.title || 'Presentation').slice(0, 160);
   run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null);
@@ -334,7 +352,7 @@ export async function refinalizeDeck(user, kid, { finalizeModel }) {
   checkLimits(user); const k = getDeck(user, kid); if (!k.outline) throw err(409, 'This presentation has no outline yet.');
   const red = redactorFor(user, 'deck:' + kid);
   const c = k.clientId ? one(`SELECT instructions FROM clients WHERE id=?`, k.clientId) : null;
-  const f = await finalizeOutline(user, k.outline, { brief: (c?.instructions ? `Client guidelines: ${c.instructions}\n\n` : '') + k.brief, catalog: catalogText(deckTables(user, k.datasets)), finalizeModel, red });
+  const f = await finalizeOutline(user, k.outline, { brief: (c?.instructions ? `Client guidelines: ${c.instructions}\n\n` : '') + k.brief, catalog: catalogText(deckTables(user, k.datasets), 150), finalizeModel, red });
   run(`UPDATE decks SET outline=?, notes=?, updated=? WHERE id=?`, JSON.stringify(f.outline), `Finalized by ${f.finalizer.label}. ${f.note}`.trim().slice(0, 1000), now(), kid);
   return { ...getDeck(user, kid), finalizer: { id: f.finalizer.id, label: f.finalizer.label } };
 }

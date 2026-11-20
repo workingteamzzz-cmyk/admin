@@ -106,8 +106,12 @@ function handleOA(req, res, raw, kind) {
   const sys = msgs.find(m => m.role === 'system')?.content || '';
   const lu = [...msgs].reverse().find(m => m.role === 'user'); const q = typeof lu?.content === 'string' ? lu.content : (lu?.content || []).filter(p => p.type === 'text').map(p => p.text).join('\n');
   if (!body.stream) { let content = /Classify the user/.test(sys) ? classifyMock(q) : 'Harness Chat';
-    if (/senior reviewer of a report presentation/.test(sys)) { // polishes titles, and (wrongly) tries to change a chart's data source
-      const j = JSON.parse(q.slice(q.indexOf('Draft outline to finalize:') + 'Draft outline to finalize:'.length)); j.slides.forEach(x => { if (!['title', 'closing'].includes(x.kind)) x.title += ' (final)'; if (x.source) x.source = 'Lain / Sumber'; }); j.notes = 'Judul dipertajam.'; content = JSON.stringify(j); }
+    if (/second, senior analyst on a report presentation/.test(sys)) { // polishes titles, and (wrongly) tries to change a chart's data source
+      // reads the data itself (adds a finding from it), sharpens titles, wrongly tries to change a chart source, and drops the KPI slide
+      const j = JSON.parse(q.slice(q.indexOf('Draft outline from the first analyst:') + 'Draft outline from the first analyst:'.length)); j.slides.forEach(x => { if (!['title', 'closing'].includes(x.kind)) x.title += ' (final)'; if (x.source) x.source = 'Lain / Sumber'; });
+      const top = q.match(/\n(\S[^\n|]*) \| (\d+) \| [\d.]+\n/); j.slides = j.slides.filter(x => x.kind !== 'kpi');
+      j.slides.splice(j.slides.length - 1, 0, { kind: 'bullets', title: 'Temuan Tambahan dari Data', bullets: [`Media teraktif: ${top ? top[1] + ' (' + top[2] + ' berita)' : '-'}`, 'Puncak pemberitaan perlu diantisipasi'] });
+      j.notes = 'Judul dipertajam; satu temuan ditambahkan dari data.'; content = JSON.stringify(j); }
     res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }], usage: { prompt_tokens: 40, completion_tokens: 3 } })); }
   const tools = msgs.filter(m => m.role === 'tool'); const lastIsTool = msgs.at(-1)?.role === 'tool';
   const chunks = []; const say = t => { for (const c of t.match(/[\s\S]{1,25}/g)) chunks.push({ choices: [{ index: 0, delta: { content: c }, finish_reason: null }] }); };
@@ -496,8 +500,10 @@ try {
     await A.waitForSelector('.rp-slide', { timeout: TIMEOUT }); const slides = await A.locator('.rp-slide').count();
     const kid = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.decks[0].id));
     const deck = JSON.parse((await apiCall(A, '/api/reports/decks/' + kid)).body); const unmasked = deck.outline.slides[1].caption.includes(SECRETS.term);
-    const finReq = recorded.slice(before).find(r => r.kind === 'openai' && /senior reviewer of a report presentation/.test(r.raw));
-    const twoStage = !!finReq && /Analysis: Claude Core · finalized by GPT Standard/.test(deck.notes) && deck.outline.slides[2].title.endsWith('(final)') && deck.outline.slides[2].source.endsWith('/ Sebaran Sentimen');
+    const finReq = recorded.slice(before).find(r => r.kind === 'openai' && /second, senior analyst on a report presentation/.test(r.raw));
+    const added = deck.outline.slides.find(x => x.title === 'Temuan Tambahan dari Data');
+    const twoStage = !!finReq && finReq.raw.includes('analyze it yourself') && finReq.raw.includes('Kompas | 15') && /Analysis: Claude Core · finalized by GPT Standard/.test(deck.notes) && deck.outline.slides[2].title.endsWith('(final)') && deck.outline.slides[2].source.endsWith('/ Sebaran Sentimen')
+      && deck.outline.slides[1].kind === 'kpi' && !!added && /Kompas \(15 berita\)/.test(added.bullets[0]) && deck.outline.slides.length === 11;
     await A.click('[data-r=refinal]'); await A.waitForFunction(() => /\(final\) \(final\)/.test(document.querySelector('.rp-slide:nth-child(3) input[data-f=title]')?.value || ''), null, { timeout: TIMEOUT });
     const b64 = await A.evaluate(async kid => { const r = await fetch(`/api/reports/decks/${kid}/pptx`); const b = new Uint8Array(await r.arrayBuffer()); let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s); }, kid);
     deckFile = path.join(OUT, 'harness-deck.pptx'); fs.writeFileSync(deckFile, Buffer.from(b64, 'base64'));
@@ -508,7 +514,7 @@ try {
     const outlineReq = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const sawMasked = outlineReq && !outlineReq.raw.includes(SECRETS.term) && !outlineReq.raw.includes(SECRETS.mediaPhone) && outlineReq.raw.includes('Gunakan istilah penerima manfaat. Hindari kata gratisan.') && outlineReq.raw.includes('ALFA-12');
     let rendered = 'not rendered';
     try { require('child_process').execFileSync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', OUT, deckFile], { timeout: 120000, stdio: 'ignore' }); require('child_process').execFileSync('pdftoppm', ['-r', '50', '-png', path.join(OUT, 'harness-deck.pdf'), path.join(OUT, 'server-deck')], { timeout: 60000 }); rendered = 'rendered with LibreOffice'; } catch {}
-    return ok(twoStage && slides === 10 && nSlides >= 10 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT finalization: ${twoStage} (chart sources kept) · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · AI got client guidelines + client document, masked term, no phone: ${sawMasked} · ${rendered}`);
+    return ok(twoStage && slides === 11 && nSlides >= 11 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT read the data itself and added “${added?.bullets[0]}”, sharpened titles, chart sources kept, dropped slide restored: ${twoStage} · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · AI got client guidelines + client document, masked term, no phone: ${sawMasked} · ${rendered}`);
   });
   await step(A, 'report-template', 'Reports: client B gets its own template from an earlier report, and can also reuse client A’s template', async () => {
     const before = recorded.length; await A.click('[data-r=backdeck]').catch(() => {});
