@@ -9,6 +9,7 @@ import { ingestDoc, deleteDoc, deleteCollection, classificationProblem, search }
 import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels } from './ai.mjs';
 import { emit as emitWebhook } from './webhooks.mjs';
 import * as R from './reports.mjs';
+import { ANALYST_FIELDS, CLIENT_FIELDS, parsePersona } from './persona.mjs';
 import { bootstrapAdmin } from './cli.mjs';
 import { newTicket, useTicket, dropTicket, twoFactorRequired, newTotpSecret, verifyTotp, otpauthUrl, qrSvg, seal, unseal, ipAllowed, purge } from './security.mjs';
 
@@ -52,7 +53,7 @@ function knowledgeFor(user) {
 function mePayload(u) {
   const s = getSettings(); const ms = modelsFor(u, s);
   const groups = userGroups(u.id);
-  return { user: { ...publicUser(u), twoFactor: !!u.totp_secret }, groups: groups.map(g => ({ id: g.id, name: g.name })),
+  return { personaFields: { analyst: ANALYST_FIELDS, client: CLIENT_FIELDS }, user: { ...publicUser(u), twoFactor: !!u.totp_secret, persona: parsePersona(u.persona, ANALYST_FIELDS) }, groups: groups.map(g => ({ id: g.id, name: g.name })),
     config: { models: ms.map(m => ({ id: m.id, label: m.label, d: m.d, provider: m.provider, tier: m.tier, vision: m.vision })), auto: ms.length > 1, defaultModel: s.defaultModel === 'auto' && ms.length > 1 ? 'auto' : (ms.find(m => m.id === s.defaultModel) || ms[0])?.id,
       webSearch: s.webSearch && ms.some(m => m.provider === 'anthropic'), canvas: !!s.canvas, imageUploads: s.imageUploads, redaction: s.redaction.enabled, maxUploadMb: config.maxUploadMb, classifications: CLASSIFICATIONS, categories: CATEGORIES, apiConfigured: ms.length > 0, rateLimits: s.rateLimits },
     budget: { limit: budgetFor(u), spent: +spentThisMonth(u.id).toFixed(4), groups: groups.filter(g => g.budget_usd > 0).map(g => ({ name: g.name, limit: g.budget_usd, spent: +groupSpent(g.id).toFixed(4) })) },
@@ -130,6 +131,7 @@ route('POST', '/api/auth/accept', async (req, res) => {
 }, { public: true });
 
 route('GET', '/api/me', (req, res, u) => json(res, 200, mePayload(u)));
+route('PUT', '/api/me/persona', async (req, res, u) => { const { persona } = await readJson(req, 30e3); run(`UPDATE users SET persona=? WHERE id=?`, JSON.stringify(parsePersona(persona || {}, ANALYST_FIELDS)), u.id); audit(u.id, 'persona.updated', { self: true }, clientIp(req)); json(res, 200, mePayload(one(`SELECT * FROM users WHERE id=?`, u.id))); });
 route('PATCH', '/api/me', async (req, res, u) => { const { name } = await readJson(req, 10e3); run(`UPDATE users SET name=? WHERE id=?`, String(name || '').trim().slice(0, 80), u.id); json(res, 200, mePayload(one(`SELECT * FROM users WHERE id=?`, u.id))); });
 route('POST', '/api/me/password', async (req, res, u) => {
   const { current, next } = await readJson(req, 10e3);
@@ -223,7 +225,7 @@ route('GET', '/api/knowledge/docs/:id/file', (req, res, u, p) => {
 /* ---------- admin ---------- */
 route('GET', '/api/admin/overview', (req, res, u) => {
   requireAdmin(u);
-  const users = all(`SELECT id,email,name,role,disabled,budget_usd,created,last_login, (pw_hash IS NOT NULL) active, (totp_secret IS NOT NULL) twofa FROM users ORDER BY created`).map(x => ({ ...x, groups: userGroups(x.id).map(g => g.id), spent: +spentThisMonth(x.id).toFixed(4), budget: budgetFor(x) }));
+  const users = all(`SELECT id,email,name,role,disabled,budget_usd,created,last_login,persona, (pw_hash IS NOT NULL) active, (totp_secret IS NOT NULL) twofa FROM users ORDER BY created`).map(x => ({ ...x, persona: parsePersona(x.persona, ANALYST_FIELDS), groups: userGroups(x.id).map(g => g.id), spent: +spentThisMonth(x.id).toFixed(4), budget: budgetFor(x) }));
   const s = getSettings(); const webhook = { ...s.webhook, secret: s.webhook.secret ? s.webhook.secret.slice(0, 6) + '…' : '' };
   const groups = all(`SELECT g.*, (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_id=g.id) members FROM groups g ORDER BY name`).map(g => ({ ...g, models: g.models ? JSON.parse(g.models) : null, spent: +groupSpent(g.id).toFixed(4) }));
   const tokens = all(`SELECT t.id, t.name, t.prefix, t.scopes, t.created, t.last_used, t.revoked, u2.email FROM api_tokens t JOIN users u2 ON u2.id=t.user_id ORDER BY t.created DESC`).map(t => ({ ...t, scopes: JSON.parse(t.scopes) }));
@@ -247,6 +249,7 @@ route('PATCH', '/api/admin/users/:id', async (req, res, u, p) => {
     if (b.budget_usd !== undefined) run(`UPDATE users SET budget_usd=? WHERE id=?`, clampBudget(b.budget_usd), t.id);
     if (b.disabled !== undefined) { run(`UPDATE users SET disabled=? WHERE id=?`, b.disabled ? 1 : 0, t.id); if (b.disabled) run(`DELETE FROM sessions WHERE user_id=?`, t.id); }
     if (Array.isArray(b.groups)) setGroups('user_groups', 'user_id', t.id, b.groups);
+    if (b.persona !== undefined) run(`UPDATE users SET persona=? WHERE id=?`, JSON.stringify(parsePersona(b.persona || {}, ANALYST_FIELDS)), t.id);
   });
   audit(u.id, 'admin.user_updated', { user: t.email, changes: Object.keys(b) }, clientIp(req)); json(res, 200, { ok: true });
 });

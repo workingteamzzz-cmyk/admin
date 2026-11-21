@@ -466,9 +466,21 @@ try {
     return ok(await B.locator('[data-go=studio]').isHidden(), 'Studio hidden for users with no canvases');
   });
   const TPL = path.join(SERVER_DIR, 'assets', 'default-template.pptx');
+  await step(A, 'persona', 'Personas: each analyst has one (set by themselves or the admin) and it shapes every chat', async () => {
+    await A.goto(canopus.url + '#home'); await A.click('[data-act=settings]'); await A.waitForSelector('#ap_title'); await A.waitForTimeout(150);
+    await A.fill('#ap_title', 'Analis Isu Senior'); await A.fill('#ap_format', 'Selalu mulai dengan ringkasan eksekutif tiga poin'); await A.fill('#ap_focus', 'Isu sosial dan program pemerintah'); await A.screenshot({ path: path.join(OUT, 'server-persona-settings.png') }); await A.click('[data-act=savesettings]'); await A.waitForTimeout(500);
+    const meA = JSON.parse((await apiCall(A, '/api/me')).body).user.persona;
+    const uidB = JSON.parse((await apiCall(A, '/api/admin/overview')).body).users.find(u => u.email === 'staf@kantor.go.id').id;
+    await putJson(A, '/api/admin/users/' + uidB, { persona: { title: 'Analis Data Media', style: 'Angka dulu, baru narasi' } }, 'PATCH');
+    const meB = JSON.parse((await apiCall(B, '/api/me')).body).user.persona;
+    const before = recorded.length; await A.evaluate(() => { window.__canopus.state.knowledgeScope = null; }); await ask(A, 'Reply with exactly: PERSONA-OK');
+    const sent = recorded.slice(before).filter(r => r.kind !== 'local' && /PERSONA-OK/.test(r.raw)).map(r => r.raw).join('');
+    return ok(meA.title === 'Analis Isu Senior' && meB.title === 'Analis Data Media' && sent.includes('Analis Isu Senior') && sent.includes('ringkasan eksekutif tiga poin'),
+      `A (own settings): ${meA.title} · B (set by admin): ${meB.title} · persona reached the AI in chat: ${sent.includes('Analis Isu Senior')}`);
+  });
   await step(A, 'report-client', 'Reports: a client folder holds its guidelines, templates and documents (no built-in template)', async () => {
     await A.goto(canopus.url + '#reports'); await A.waitForSelector('[data-r=newclient]'); const before = JSON.parse((await apiCall(A, '/api/reports')).body);
-    await A.click('[data-r=newclient] >> nth=0'); await A.waitForTimeout(150); await A.fill('#clName', 'Kementerian A'); await A.fill('#clDesc', 'Monitoring bulanan'); await A.fill('#clInstr', 'Gunakan istilah penerima manfaat. Hindari kata gratisan.');
+    await A.click('[data-r=newclient] >> nth=0'); await A.waitForTimeout(150); await A.fill('#clName', 'Kementerian A'); await A.fill('#clDesc', 'Monitoring bulanan'); await A.fill('#cp_voice', 'Tegas namun empatik'); await A.fill('#cp_avoid', 'gratisan'); await A.fill('#clInstr', 'Gunakan istilah penerima manfaat. Hindari kata gratisan.');
     await A.click('[data-r=saveclient]'); await A.waitForSelector('[data-r=picktpl]'); await A.setInputFiles('#rpTplFile', TPL); await A.waitForSelector('.rp-tpls .card', { timeout: 10000 });
     fs.writeFileSync(path.join(FIX, 'brief-klien-a.txt'), 'Brief Kementerian A: fokus pada isu distribusi dan cerita penerima manfaat. Marker brief ALFA-12.');
     await A.setInputFiles('#rpDocFile', path.join(FIX, 'brief-klien-a.txt')); await A.waitForFunction(() => /brief-klien-a/i.test(document.querySelector('#rpBody')?.textContent || ''), null, { timeout: 10000 });
@@ -511,10 +523,10 @@ try {
     const nSlides = files.filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f)).length, nCharts = files.filter(f => /^ppt\/charts\/chart\d+\.xml$/.test(f)).length, nEmb = files.filter(f => /^ppt\/embeddings\/.*\.xlsx$/.test(f)).length;
     const all = (await Promise.all(files.filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f)).map(f => z.file(f).async('string')))).join('');
     const realData = all.includes('Kompas') && all.includes(SECRETS.term) && !all.includes('⟦');
-    const outlineReq = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const sawMasked = outlineReq && !outlineReq.raw.includes(SECRETS.term) && !outlineReq.raw.includes(SECRETS.mediaPhone) && outlineReq.raw.includes('Gunakan istilah penerima manfaat. Hindari kata gratisan.') && outlineReq.raw.includes('ALFA-12');
+    const outlineReq = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const sawMasked = outlineReq && !outlineReq.raw.includes(SECRETS.term) && !outlineReq.raw.includes(SECRETS.mediaPhone) && outlineReq.raw.includes('Gunakan istilah penerima manfaat. Hindari kata gratisan.') && outlineReq.raw.includes('ALFA-12') && outlineReq.raw.includes('Tegas namun empatik') && outlineReq.raw.includes('Analis Isu Senior') && /Tegas namun empatik/.test(finReq?.raw || '');
     let rendered = 'not rendered';
     try { require('child_process').execFileSync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', OUT, deckFile], { timeout: 120000, stdio: 'ignore' }); require('child_process').execFileSync('pdftoppm', ['-r', '50', '-png', path.join(OUT, 'harness-deck.pdf'), path.join(OUT, 'server-deck')], { timeout: 60000 }); rendered = 'rendered with LibreOffice'; } catch {}
-    return ok(twoStage && slides === 11 && nSlides >= 11 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT read the data itself and added “${added?.bullets[0]}”, sharpened titles, chart sources kept, dropped slide restored: ${twoStage} · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · AI got client guidelines + client document, masked term, no phone: ${sawMasked} · ${rendered}`);
+    return ok(twoStage && slides === 11 && nSlides >= 11 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT read the data itself and added “${added?.bullets[0]}”, sharpened titles, chart sources kept, dropped slide restored: ${twoStage} · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · Claude & GPT got client persona + analyst persona + client document, masked term, no phone: ${sawMasked} · ${rendered}`);
   });
   await step(A, 'report-template', 'Reports: client B gets its own template from an earlier report, and can also reuse client A’s template', async () => {
     const before = recorded.length; await A.click('[data-r=backdeck]').catch(() => {});

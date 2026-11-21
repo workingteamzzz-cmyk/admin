@@ -171,7 +171,7 @@ function stepModal(i) {
 /* ================= presentations ================= */
 function deckHome() {
   const curated = S.datasets.filter(d => d.curated && inClient(d));
-  body(`<div class="set-sec"><h3>${ic('sparkle')}New presentation${curClient() ? ` for ${esc(curClient().name)}` : ''}</h3>${curClient()?.instructions ? `<p class="help">${ic('check')} ${esc(curClient().name)}'s guidelines are applied automatically.</p>` : ''}
+  body(`<div class="set-sec"><h3>${ic('sparkle')}New presentation${curClient() ? ` for ${esc(curClient().name)}` : ''}</h3>${curClient() && (Object.keys(curClient().persona || {}).length || curClient().instructions) ? `<p class="help">${ic('check')} ${esc(curClient().name)}'s persona and your analyst persona are applied automatically.</p>` : ''}
     <div class="row2"><div><label for="rpTitle">Title</label><input type="text" id="rpTitle" placeholder="e.g. Laporan Monitoring Media 1–14 November 2026"></div>
       <div><label for="rpTpl">Template — any client's template can be used</label><select id="rpTpl" class="vsel" style="width:100%">${templateOptions()}</select></div></div>
     <label>Data to use</label>${curated.length ? `<div class="checks" id="rpDs">${curated.map(d => `<label><input type="checkbox" value="${d.id}" ${S.prefDs === d.id ? 'checked' : ''}>${esc(d.name)} <span class="muted">(${(d.result_rows || 0).toLocaleString('id-ID')} rows)</span></label>`).join('')}</div>` : `<p class="help">No curated datasets yet — curate one in <a href="#" data-r="tab" data-x="data">Data curation</a>, or write the presentation from your brief alone.</p>`}
@@ -270,22 +270,28 @@ function clientModal(c) {
   C.openModal(`<h3>${c ? 'Edit client' : 'New client'}</h3><p class="s">A client keeps its templates, saved data recipes, guidelines and documents together. The whole team can use them.</p>
     <label for="clName">Name</label><input type="text" id="clName" value="${esc(c?.name || '')}" autofocus placeholder="e.g. Kementerian X">
     <label for="clDesc">Short description</label><input type="text" id="clDesc" value="${esc(c?.description || '')}" placeholder="e.g. Ministry, monthly media monitoring + quarterly strategy">
-    <label for="clInstr">Guidelines for the AI</label><textarea id="clInstr" rows="6" placeholder="Voice and tone, key messages, terms to use or avoid, sensitive issues, audiences, report structure they expect, who signs off…">${esc(c?.instructions || '')}</textarea>
+    <div class="persona-box"><b>${ic('star')}Client persona</b><p>The client's voice and boundaries. Applied to every deck for this client and to chats aimed at this client's space, on top of each analyst's own persona.</p>${C.personaFields('cp', C.me().personaFields.client, c?.persona || {})}</div>
+    <label for="clInstr">Other guidelines</label><textarea id="clInstr" rows="3" placeholder="Report structure they expect, who signs off, deadlines…">${esc(c?.instructions || '')}</textarea>
     <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-r="saveclient" data-x="${c?.id || ''}">Save</button></div>`, 'wide');
+}
+function personaView(c) {
+  const f = C.me().personaFields.client; const p = c.persona || {};
+  const rows = [...f.filter(([k]) => p[k]).map(([k, label]) => [label, p[k]]), ...(c.instructions ? [['Other guidelines', c.instructions]] : [])];
+  return rows.length ? `<dl class="persona-view">${rows.map(([l, v]) => `<dt>${esc(l)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : '';
 }
 async function loadClientDocs() { const c = curClient(); if (!c) return; const k = await C.api('/api/knowledge').catch(() => []); S.clientDocs = k.find(x => x.id === c.collection_id)?.docs || []; }
 function clientsView() {
   const c = curClient();
   if (!c) {
     body(S.clients.length ? `<div class="cards rp-clients">${S.clients.map(k => `<div class="card" data-r="openclient" data-x="${k.id}" role="button"><div class="card-body"><div class="card-top"><h3>${esc(k.name)}</h3></div><div class="date">${esc(k.description || 'Client')}</div>
-        <div class="badges"><span class="badge">${k.templates} template${k.templates === 1 ? '' : 's'}</span><span class="badge">${k.recipes} recipe${k.recipes === 1 ? '' : 's'}</span><span class="badge">${k.docs} document${k.docs === 1 ? '' : 's'}</span>${k.instructions ? '<span class="badge gold">Guidelines</span>' : ''}</div></div></div>`).join('')}</div>`
+        <div class="badges"><span class="badge">${k.templates} template${k.templates === 1 ? '' : 's'}</span><span class="badge">${k.recipes} recipe${k.recipes === 1 ? '' : 's'}</span><span class="badge">${k.docs} document${k.docs === 1 ? '' : 's'}</span>${Object.keys(k.persona || {}).length || k.instructions ? '<span class="badge gold">Persona</span>' : ''}</div></div></div>`).join('')}</div>`
       : `<div class="empty-box"><div class="e-ic">${ic('users')}</div><b>No clients yet</b><p>Create a client for each customer. Their templates, data recipes, guidelines and documents stay together, ready for the next report.</p><button class="cta" data-r="newclient">${ic('plus')}New client</button></div>`);
     return;
   }
   if (S.clientDocs === null) { S.clientDocs = []; loadClientDocs().then(() => S.tab === 'clients' && curClient()?.id === c.id && renderReports()); }
   const tpls = S.templates.filter(t => t.clientId === c.id), ds = S.datasets.filter(d => d.clientId === c.id), decks = S.decks.filter(k => k.clientId === c.id);
   body(`<div class="bar" style="align-items:center;flex-wrap:wrap"><h2 style="flex:1;margin:0;font-size:22px">${esc(c.name)}</h2><button class="btn sm" data-r="editclient">${ic('edit')}Edit</button><button class="btn sm" data-r="tab" data-x="data">${ic('table')}Curate data</button><button class="btn sm primary" data-r="tab" data-x="decks">${ic('layers')}New presentation</button><button class="icon-btn" data-r="delclient" title="Delete client">${ic('trash')}</button></div>
-    <div class="set-sec"><h3>${ic('memo')}Guidelines for the AI</h3>${c.instructions ? `<div class="rp-guide">${esc(c.instructions)}</div>` : `<p>No guidelines yet. Add the client's voice, key messages, terms to use or avoid and sensitive issues — they are applied to every deck for this client. <a href="#" data-r="editclient">Add guidelines</a></p>`}</div>
+    <div class="set-sec"><h3>${ic('star')}Client persona</h3>${personaView(c) || `<p>No persona yet. Describe the client's voice, audiences, key messages, terms to use or avoid and sensitive issues — applied to every deck and to chats aimed at this client. <a href="#" data-r="editclient">Add persona</a></p>`}</div>
     ${tplUploadBox()}${tpls.length ? `<div class="cards rp-tpls">${tpls.map(tplCard).join('')}</div>` : ''}
     <div class="set-sec"><h3>${ic('refresh')}Data recipes</h3><p>Curation plans saved from earlier work for this client. Load one on next month's file: no AI planning needed.</p>
       ${c.recipeList.length ? c.recipeList.map(r => `<div class="doc-row">${ic('bolt')}<span class="t">${esc(r.name)}</span><small>${r.columns.length} columns · ${C.ago(r.created)}</small><button class="icon-btn" data-r="delrecipe" data-x="${r.id}" title="Delete">${ic('trash')}</button></div>`).join('') : '<p class="help">Run a plan in Data curation, then “Save plan as recipe”.</p>'}</div>
@@ -318,7 +324,7 @@ async function onClick(e) {
       case 'newclient': clientModal(null); break;
       case 'editclient': clientModal(curClient()); break;
       case 'openclient': S.client = x; savePrefs({ client: x }); S.clientDocs = null; renderReports(); break;
-      case 'saveclient': { const body = { name: $('#clName').value.trim(), description: $('#clDesc').value.trim(), instructions: $('#clInstr').value.trim() };
+      case 'saveclient': { const body = { name: $('#clName').value.trim(), description: $('#clDesc').value.trim(), instructions: $('#clInstr').value.trim(), persona: C.readPersona('cp', C.me().personaFields.client) };
         if (x) await C.api('/api/reports/clients/' + x, { method: 'PUT', body }); else { const r = await C.api('/api/reports/clients', { method: 'POST', body }); S.client = r.id; savePrefs({ client: r.id }); S.clientDocs = null; S.tab = 'clients'; }
         C.closeModal(); await load(); renderReports(); C.toast('Saved'); break; }
       case 'delclient': if (await C.confirmBox('Delete client?', 'Its recipes are deleted. Templates, datasets, presentations and documents are kept, without a client.')) { await C.api('/api/reports/clients/' + S.client, { method: 'DELETE' }); S.client = ''; savePrefs({ client: '' }); await load(); renderReports(); } break;

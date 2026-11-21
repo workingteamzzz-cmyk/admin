@@ -8,6 +8,7 @@ import { one, all, run, now, getSettings, audit, spentThisMonth, budgetFor, user
 import { search, extractDoc, sensitiveValues } from './knowledge.mjs';
 import { Redactor, SYSTEM_NOTE } from './redact.mjs';
 import { emitOnce } from './webhooks.mjs';
+import { analystBlock, clientBlock } from './persona.mjs';
 
 /* ================= clients ================= */
 let anthropicClient, proxyFetch;
@@ -146,6 +147,9 @@ Style: well-structured text with Markdown (headings, lists, tables) when it help
   if (useKnowledge) parts.push(`Internal knowledge: you have a search_knowledge tool over the organization's documents${project?.collections?.length ? ' (limited to this project\'s collections)' : body.scopeLabel ? ` (limited to: ${String(body.scopeLabel).slice(0, 200)})` : ''}. Table files are indexed row by row as "Column: value" lines, so search for names, record numbers or values directly. For questions about the organization, its programs, policies, data or documents, search first and base your answer on what you find. If the documents do not contain the answer, say so plainly instead of guessing; only then add general knowledge, clearly labelled as such. Never present information as coming from internal documents unless a search result supports it.${oaStyle(provider) ? ' Search results are numbered like [1], [2]. Cite them inline with the same number in square brackets right after the sentence that uses them, e.g. "... Rp71 triliun [1]." Only cite numbers that appear in the results.' : ''}`);
   if (red.enabled) parts.push(SYSTEM_NOTE);
   if (user.name?.trim()) parts.push(`The user's name is ${user.name.trim()}.`);
+  const ap = analystBlock(user); if (ap) parts.push(ap);
+  // When the chat is aimed at a client's space, that client's persona applies too.
+  if (Array.isArray(body.scope) && body.scope.length) { try { const c = one(`SELECT * FROM clients WHERE collection_id=?`, String(body.scope[0])); if (c) parts.push(clientBlock(c)); } catch {} }
   if (s.instructions) parts.push(`<user_instructions>\n${red.mask(clip(s.instructions, 8000))}\n</user_instructions>`);
   if (s.spaceName) parts.push(`This chat is in the space "${clip(s.spaceName, 100)}".${s.spaceInstructions ? `\n<space_instructions>\n${red.mask(clip(s.spaceInstructions, 8000))}\n</space_instructions>` : ''}`);
   const skills = [...settings.orgSkills.filter(k => k.enabled !== false), ...(Array.isArray(s.skills) ? s.skills.slice(0, 20) : [])];

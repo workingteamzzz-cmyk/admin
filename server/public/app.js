@@ -216,7 +216,7 @@ async function start(meData){
 }
 // Opens a new chat with a file attached and a prompt to complete (used by Reports → Ask in chat).
 function chatWith(rec, text=''){ addFileRecord({...rec, ftype:ftypeOf(rec.name), added:Date.now()}); save(); state.current=null; pendingSpace=null; closePanel(); attachments=[{...rec, ftype:ftypeOf(rec.name)}]; go('home'); setTimeout(()=>{ renderChips(); input.value=text; autosize(); input.focus(); },40); }
-initReports({ api, esc, ic, hydrateIcons, toast, openModal, closeModal, confirmBox, ask, fmtSize, ago, isAdmin, me:()=>me, refreshMe:()=>refreshMe(), chatWith });
+initReports({ api, esc, ic, hydrateIcons, toast, openModal, closeModal, confirmBox, ask, fmtSize, ago, isAdmin, me:()=>me, refreshMe:()=>refreshMe(), chatWith, personaFields, readPersona });
 async function refreshMe(){ try{ me=await api('/api/me'); renderSide(); updateTools(); }catch{} }
 
 /* ================= Routing ================= */
@@ -287,7 +287,7 @@ function updateTools(){
   $('#modeLabel').textContent=mode().name;
   $('#webBtn').hidden=!me.config.webSearch; $('#webBtn').classList.toggle('on', !!state.web&&me.config.webSearch);
   $('#knowBtn').classList.toggle('on', state.knowledge!==false);
-  { const sp=scopeSpace(); $('#knowBtn .wl').textContent=state.knowledge===false?'Knowledge':sp?spaceName(sp):'Knowledge'; $('#knowBtn').title=state.knowledge===false?'Knowledge search is off':sp?`Searching only: ${spaceName(sp)}`:'Searching all knowledge you can access'; }
+  { const sp=scopeSpace(); $('#knowBtn .wl').textContent=state.knowledge===false?'Knowledge':sp?spaceName(sp):'Knowledge'; $('#knowBtn').title=state.knowledge===false?'Knowledge search is off':sp?`Searching only: ${spaceName(sp)}${sp.kind==='client'?' — this client’s persona applies':''}`:'Searching all knowledge you can access'; }
   $('#keybar').hidden=!!me.config.apiConfigured;
   const b=me.budget; const warn=[...(b.limit>0&&b.spent>=b.limit*.8?[`You have used ${Math.round(b.spent/b.limit*100)}% of your monthly AI budget (${usd(b.spent)} of ${usd(b.limit)}).`]:[]), ...(b.groups||[]).filter(g=>g.spent>=g.limit*.8).map(g=>`Group “${g.name}” has used ${Math.round(g.spent/g.limit*100)}% of its monthly budget.`)];
   let bn=$('#budgetWarn'); if(!bn){ bn=document.createElement('div'); bn.id='budgetWarn'; bn.className='notice'; $('#composer').before(bn); }
@@ -750,6 +750,7 @@ function userModal(u){
     <div class="row2"><div><label for="uRole">Role</label><select id="uRole"><option value="user" ${u?.role!=='admin'?'selected':''}>User</option><option value="admin" ${u?.role==='admin'?'selected':''}>Administrator</option></select></div>
     <div><label for="uBudget">Monthly AI budget (USD)</label><input type="text" id="uBudget" value="${u?.budget_usd??''}" placeholder="Default: ${usd(admin.settings.monthlyBudgetUsd)}"></div></div>
     <label>Groups <span style="font-weight:400;color:var(--dim)">— control which knowledge collections they can search</span></label><div id="uGroups">${groupChecks(u?.groups||[])}</div>
+    ${u?`<div class="persona-box"><b>${ic('star')}Analyst persona</b><p>How Canopus works with this analyst. They can also edit it in their Settings.</p>${personaFields('up', me.personaFields.analyst, u.persona||{})}</div>`:''}
     <div class="dlg-actions">${u?.twofa?`<button class="btn" data-act="reset2fa" data-uid="${u.id}">${ic('key')}Reset 2FA</button>`:''}${u?`<button class="btn ${u.disabled?'':'danger'}" data-act="toggleuser" data-uid="${u.id}" data-dis="${u.disabled?0:1}">${u.disabled?'Enable':'Disable'} account</button><span class="grow"></span>`:''}<button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="saveuser" data-uid="${u?.id||''}">${u?'Save':'Create invitation'}</button></div>`,'wide');
 }
 function showLink(title, link){ modalDone=null; openModal(`<h3>${esc(title)}</h3><p class="s">Copy this one-time link and send it to the user through a trusted internal channel. It expires in 72 hours and can be used once.</p><div class="linkbox"><input type="text" id="linkIn" value="${esc(link)}" readonly><button class="btn primary" data-act="copylink">${ic('copy')}Copy</button></div><div class="dlg-actions"><button class="btn" data-dlg="cancel">Done</button></div>`,'wide'); }
@@ -898,11 +899,15 @@ function openModal(html,cls=''){ const m=$('#modal'); m.innerHTML=`<div class="d
 function closeModal(v=null){ $('#modal').hidden=true; $('#modal').innerHTML=''; const d=modalDone; modalDone=null; d&&d(v); }
 function ask(title,{value='',placeholder='',ok='Save',sub=''}={}){ return new Promise(res=>{ modalDone=res; openModal(`<h3>${esc(title)}</h3>${sub?`<p class="s">${esc(sub)}</p>`:''}<input type="text" id="askIn" value="${esc(value)}" placeholder="${esc(placeholder)}" autofocus><div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-dlg="ok">${esc(ok)}</button></div>`); setTimeout(()=>$('#askIn')?.select(),40); }); }
 function confirmBox(title,sub,ok='Delete'){ return new Promise(res=>{ modalDone=res; openModal(`<h3>${esc(title)}</h3><p class="s">${esc(sub)}</p><div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-dlg="yes" autofocus style="background:var(--red);color:#fff">${esc(ok)}</button></div>`); }); }
+// Persona editor: one labelled field per persona attribute (fields come from the server).
+function personaFields(prefix, fields, values={}){ return `<div class="persona-grid">${fields.map(([k,label,hint])=>`<div><label for="${prefix}_${k}">${esc(label)}</label><textarea id="${prefix}_${k}" rows="2" placeholder="${esc(hint)}">${esc(values[k]||'')}</textarea></div>`).join('')}</div>`; }
+function readPersona(prefix, fields){ const o={}; for(const [k] of fields){ const v=document.getElementById(`${prefix}_${k}`)?.value.trim(); if(v) o[k]=v; } return o; }
 function openSettings(){
   modalDone=null; const b=me.budget;
   openModal(`<h3>Settings</h3><p class="s">Signed in as <b>${esc(me.user.email)}</b>${me.groups.length?` · ${me.groups.map(g=>esc(g.name)).join(', ')}`:''}</p>
     <label for="sName">Your name</label><input type="text" id="sName" value="${esc(me.user.name)}">
-    <label for="sInstr">Custom instructions</label><textarea id="sInstr" placeholder="Your role, preferred language, tone, formats…">${esc(state.instructions)}</textarea>
+    <div class="persona-box"><b>${ic('star')}My analyst persona</b><p>How Canopus works with you in every chat and report: your role, focus, analysis style, tone and formats. A client's persona (voice, key messages, terms) is added on top when you work for that client.</p>${personaFields('ap', me.personaFields.analyst, me.user.persona)}</div>
+    <label for="sInstr">Other instructions</label><textarea id="sInstr" placeholder="Anything else Canopus should always keep in mind…">${esc(state.instructions)}</textarea>
     <label>Theme</label><div class="seg"><button type="button" data-settheme="dark" class="${state.theme==='dark'?'on':''}">Dark</button><button type="button" data-settheme="light" class="${state.theme==='light'?'on':''}">Light</button></div>
     <label>Two-step verification</label><div style="font-size:14px">${me.user.twoFactor?'✅ On (authenticator app)':'Off'}</div>
     <label>AI usage this month</label><div style="font-size:14px">${usd(b.spent)}${b.limit>0?` of ${usd(b.limit)}`:''}</div>${b.limit>0?`<div class="budget"><i style="width:${Math.min(100,b.spent/b.limit*100)}%"></i></div>`:''}
@@ -1066,7 +1071,7 @@ document.addEventListener('click',async e=>{
     case 'fullpanel': panel.full=!panel.full; renderPanel(); break;
     case 'copycode': { const c=state.canvases.find(x=>x.id===panel.cid); navigator.clipboard.writeText(c.versions[panel.v].html).then(()=>toast('Code copied')); break; }
     case 'settings': openSettings(); break;
-    case 'savesettings': { const name=$('#sName').value.trim(); state.instructions=$('#sInstr').value; save(); if(name!==me.user.name){ me=await api('/api/me',{method:'PATCH', body:{name}}); } closeModal(); route(); toast('Settings saved'); break; }
+    case 'savesettings': { const name=$('#sName').value.trim(); state.instructions=$('#sInstr').value; save(); me=await api('/api/me/persona',{method:'PUT', body:{persona:readPersona('ap', me.personaFields.analyst)}}); if(name!==me.user.name){ me=await api('/api/me',{method:'PATCH', body:{name}}); } closeModal(); route(); toast('Settings saved'); break; }
     case 'changepw': modalDone=null; openModal(`<h3>Change password</h3><p class="s">You'll stay signed in on this device; other sessions are signed out.</p><label for="pwCur">Current password</label><input type="password" id="pwCur" autofocus autocomplete="current-password"><label for="pwNew">New password</label><input type="password" id="pwNew" autocomplete="new-password"><div class="help">At least 10 characters, with letters and numbers.</div><div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-act="savepw">Change password</button></div>`); break;
     case 'savepw': await api('/api/me/password',{method:'POST', body:{current:$('#pwCur').value, next:$('#pwNew').value}}); closeModal(); toast('Password changed'); break;
     case 'logout': await flush(); await api('/api/auth/logout',{method:'POST'}).catch(()=>{}); closeModal(); location.hash=''; showLogin(); break;
@@ -1077,7 +1082,7 @@ document.addEventListener('click',async e=>{
     case 'reset2fa': if(await confirmBox('Reset two-step verification?','The user is signed out and must set up their authenticator again at the next sign-in. Use this only after verifying who is asking.','Reset')){ await api(`/api/admin/users/${t.dataset.uid}/reset2fa`,{method:'POST'}); renderAdmin(); toast('Two-step verification reset'); } break;
     case 'savesecurity': await api('/api/admin/settings',{method:'PUT', body:{security:{require2fa:$('#sec2fa').value, maskingRetentionDays:+$('#secMask').value||0, logRetentionDays:+$('#secLogs').value||0}}}); await loadAdmin(); adminSecurity(); toast('Policies saved'); break;
     case 'saveuser': { const uid_=t.dataset.uid; const body={name:$('#uName').value.trim(), role:$('#uRole').value, budget_usd:$('#uBudget').value.trim()===''?null:+$('#uBudget').value, groups:checked('#uGroups')};
-      if(uid_){ await api('/api/admin/users/'+uid_,{method:'PATCH', body}); closeModal(); renderAdmin(); toast('User updated'); }
+      if(uid_){ body.persona=readPersona('up', me.personaFields.analyst); await api('/api/admin/users/'+uid_,{method:'PATCH', body}); if(uid_===me.user.id) await refreshMe(); closeModal(); renderAdmin(); toast('User updated'); }
       else { body.email=$('#uEmail').value.trim(); const r=await api('/api/admin/users',{method:'POST', body}); await loadAdmin(); renderAdmin(); showLink('Invitation created', r.invite); } break; }
     case 'toggleuser': await api('/api/admin/users/'+t.dataset.uid,{method:'PATCH', body:{disabled:t.dataset.dis==='1'}}); closeModal(); renderAdmin(); break;
     case 'copylink': navigator.clipboard.writeText($('#linkIn').value).then(()=>toast('Link copied')); $('#linkIn').select(); break;

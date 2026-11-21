@@ -46,6 +46,12 @@ Browser (login)  ──HTTPS──▶  Canopus server  ──only relevant excer
 
 Canopus works like a senior communications consultant for the team: it leads with the answer, grounds it in data and internal documents, separates facts from interpretation, and ends with options, a recommendation, risks and next steps. Brainstorming goes wide first, then narrows to the best ideas. The "Communications analyst" skill is on by default (users can turn it off in Skills), and the home page and prompt library start with strategy work: communication strategy, issue analysis, campaign brainstorming, key messages, media Q&A preparation, crisis holding statements, stakeholder maps and executive briefing notes.
 
+## Personas
+
+- **Analyst persona** (one per person): role, expertise and focus, analysis style, tone, preferred formats, language. Each analyst edits their own in Settings; administrators can set or adjust it in Admin → Users. It shapes every chat and report that person makes (curation plans, Claude's analysis and GPT's finalization).
+- **Client persona** (one per client): voice and character, audiences, key messages, terms to use, terms to avoid, sensitive issues, plus other guidelines. Applied to every deck for that client and to chats where Knowledge is aimed at that client's space.
+- Both apply together: the client persona decides what may be said and in whose voice; the analyst persona decides how the analysis is done and presented.
+
 ## Knowledge spaces for many people
 
 - **Team knowledge — for everyone:** one shared space; every user can add files and everyone can search and open them.

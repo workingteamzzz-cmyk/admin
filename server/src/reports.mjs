@@ -11,6 +11,7 @@ import { complete, reportModel, helperModel, limitProblem } from './ai.mjs';
 import { search } from './knowledge.mjs';
 import { loadWorkbook, profile, sanitizePlan, describe, runPlan, writeXlsx, reportSensitive, OPS, FILTERS, CLEANS, DERIVES, MEASURES } from './tables.mjs';
 import { openTemplate, describeTemplate, buildDeck, sanitizeOutline, SLIDE_KINDS } from './slides.mjs';
+import { CLIENT_FIELDS, parsePersona, analystBlock, clientBlock } from './persona.mjs';
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS report_templates(id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT, filename TEXT NOT NULL, size INTEGER, info TEXT NOT NULL, created INTEGER NOT NULL, created_by TEXT);
@@ -22,7 +23,7 @@ CREATE TABLE IF NOT EXISTS ai_tag_cache(key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', collection_id TEXT, created_by TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS client_recipes(id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL, plan TEXT NOT NULL, columns TEXT NOT NULL DEFAULT '[]', created_by TEXT, created INTEGER NOT NULL);
 `);
-for (const sql of ['ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT']) { try { db.exec(sql); } catch {} }
+for (const sql of ['ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT']) { try { db.exec(sql); } catch {} }
 try { db.exec(`UPDATE collections SET kind='client' WHERE kind='admin' AND id IN (SELECT collection_id FROM clients)`); } catch {}
 const DIR = path.join(config.dataDir, 'reports');
 fs.mkdirSync(path.join(DIR, 'datasets'), { recursive: true, mode: 0o700 });
@@ -37,16 +38,17 @@ const dsDir = d => path.join(DIR, 'datasets', d);
 const clientRow = cid => { if (!cid) return null; const c = one(`SELECT * FROM clients WHERE id=?`, cid); if (!c) throw err(404, 'Client not found'); return c; };
 export function listClients() {
   return all(`SELECT c.*, (SELECT COUNT(*) FROM report_templates t WHERE t.client_id=c.id) templates, (SELECT COUNT(*) FROM client_recipes r WHERE r.client_id=c.id) recipes,
-    (SELECT COUNT(*) FROM docs d WHERE d.collection_id=c.collection_id) docs FROM clients c ORDER BY c.name COLLATE NOCASE`).map(c => ({ ...c,
+    (SELECT COUNT(*) FROM docs d WHERE d.collection_id=c.collection_id) docs FROM clients c ORDER BY c.name COLLATE NOCASE`).map(c => ({ ...c, persona: parsePersona(c.persona, CLIENT_FIELDS),
     recipeList: all(`SELECT id,name,columns,created FROM client_recipes WHERE client_id=? ORDER BY created DESC`, c.id).map(r => ({ ...r, columns: JSON.parse(r.columns) })) }));
 }
-export function saveClient(user, cid, { name, description, instructions }) {
+export function saveClient(user, cid, { name, description, instructions, persona }) {
+  const pj = JSON.stringify(parsePersona(persona || {}, CLIENT_FIELDS));
   const nm = String(name || '').trim().slice(0, 120); if (!nm) throw err(400, 'Give the client a name.');
   if (one(`SELECT 1 FROM clients WHERE name=? COLLATE NOCASE AND id IS NOT ?`, nm, cid || null)) throw err(409, 'A client with this name already exists.');
-  if (cid) { clientRow(cid); run(`UPDATE clients SET name=?, description=?, instructions=?, updated=? WHERE id=?`, nm, String(description || '').slice(0, 500), String(instructions || '').slice(0, 8000), now(), cid); return cid; }
+  if (cid) { clientRow(cid); run(`UPDATE clients SET name=?, description=?, instructions=?, persona=?, updated=? WHERE id=?`, nm, String(description || '').slice(0, 500), String(instructions || '').slice(0, 8000), pj, now(), cid); return cid; }
   const nid = id(), col = id();
   run(`INSERT INTO collections(id,name,description,created,kind) VALUES(?,?,?,?,?)`, col, `Klien · ${nm}`.slice(0, 120), `Documents for client ${nm}: earlier reports, briefs, guidelines.`, now(), 'client');
-  run(`INSERT INTO clients(id,name,description,instructions,collection_id,created_by,created,updated) VALUES(?,?,?,?,?,?,?,?)`, nid, nm, String(description || '').slice(0, 500), String(instructions || '').slice(0, 8000), col, user.id, now(), now());
+  run(`INSERT INTO clients(id,name,description,instructions,collection_id,created_by,created,updated,persona) VALUES(?,?,?,?,?,?,?,?,?)`, nid, nm, String(description || '').slice(0, 500), String(instructions || '').slice(0, 8000), col, user.id, now(), now(), pj);
   return nid;
 }
 export function deleteClient(user, cid) {
@@ -181,7 +183,8 @@ export async function planDataset(user, did, { instruction, model: requested, sh
   const d = ownDataset(user, did); const sheets = await loadSource(d); const t = pickSheet(sheets, sheet || d.sheet);
   const red = redactorFor(user, 'report:' + did); const model = reportModel(user, requested, 'writing');
   const prof = profile(t, extraCols());
-  const prompt = red.mask(`Sheets in the file: ${sheets.map(s => `"${s.name}" (${s.rows.length} rows)`).join(', ')}. Planning for sheet "${t.name}".\n\nColumn profile:\n${JSON.stringify(prof, null, 1)}\n\nUser's instruction:\n${String(instruction || 'Clean this data and prepare the usual summaries for a report.').slice(0, 4000)}`);
+  const ctx = [clientBlock(d.client_id ? one(`SELECT * FROM clients WHERE id=?`, d.client_id) : null), analystBlock(user)].filter(Boolean).join('\n\n');
+  const prompt = red.mask(`${ctx ? ctx + '\n\n' : ''}Sheets in the file: ${sheets.map(s => `"${s.name}" (${s.rows.length} rows)`).join(', ')}. Planning for sheet "${t.name}".\n\nColumn profile:\n${JSON.stringify(prof, null, 1)}\n\nUser's instruction:\n${String(instruction || 'Clean this data and prepare the usual summaries for a report.').slice(0, 4000)}`);
   const raw = await askJson(user, model, PLAN_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt, 'report.plan', 6000, 'medium');
   const plan = sanitizePlan(unmaskDeep(red, raw));
   run(`UPDATE datasets SET instruction=?, plan=?, sheet=?, updated=? WHERE id=?`, String(instruction || '').slice(0, 4000), JSON.stringify(plan), t.name, now(), did);
@@ -378,13 +381,13 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   let excerpts = '';
   if (knowledge && brief) { const hits = search(user, String(brief).slice(0, 300), { limit: 6, collections: client?.collection_id ? [client.collection_id] : null }).filter(h => !h.localOnly); if (hits.length) excerpts = `\n\nRelevant internal documents:\n${hits.map((h, i) => `[${i + 1}] ${h.title}${h.page ? ' p.' + h.page : ''}: ${h.text.slice(0, 900)}`).join('\n')}`; }
   const struct = tdesc.info.structure?.length ? `\n\nReference structure from the template "${tdesc.name}" (slides in an earlier report; follow its order and style, with new content):\n${tdesc.info.structure.map((s, i) => `${i + 1}. ${s.title || '(no title)'}${s.has?.length ? ` [${s.has.join(', ')}]` : ''}${s.text ? ' — ' + s.text.slice(0, 160) : ''}`).join('\n')}` : '';
-  const clientNote = client ? `Client: ${client.name}${client.description ? ` — ${client.description}` : ''}${client.instructions ? `\nClient guidelines (voice, key messages, terms to use or avoid, audiences) — follow them:\n${client.instructions}` : ''}\n\n` : '';
+  const clientNote = [clientBlock(client), analystBlock(user)].filter(Boolean).join('\n\n') + '\n\n';
   const prompt = red.mask(`${clientNote}Brief from the user:\n${String(brief || 'Create a report presentation from this data.').slice(0, 6000)}${title ? `\n\nWorking title: ${title}` : ''}\n\nToday: ${new Date().toISOString().slice(0, 10)}${struct}\n\nData catalog:${catalog || '\n(no datasets attached — write from the brief only, without charts or tables)'}${excerpts}`);
   const raw = await askJson(user, model, OUTLINE_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt, 'report.outline', 12000, 'medium');
   let outline = sanitizeOutline(unmaskDeep(red, raw)); let notes = red.unmask(String(raw.notes || ''));
   if (!outline.slides.length) throw err(502, 'The AI did not return any slides. Try again with a more specific brief.');
   let finalizer = null;
-  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: (client?.instructions ? `Client guidelines: ${client.instructions}\n\n` : '') + (brief || ''), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
+  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: [clientBlock(client), analystBlock(user), brief || ''].filter(Boolean).join('\n\n'), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
   notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, notes].filter(Boolean).join(' ');
   const t = String(title || outline.title || 'Presentation').slice(0, 160);
   run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null);
@@ -394,8 +397,8 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
 export async function refinalizeDeck(user, kid, { finalizeModel }) {
   checkLimits(user); const k = getDeck(user, kid); if (!k.outline) throw err(409, 'This presentation has no outline yet.');
   const red = redactorFor(user, 'deck:' + kid);
-  const c = k.clientId ? one(`SELECT instructions FROM clients WHERE id=?`, k.clientId) : null;
-  const f = await finalizeOutline(user, k.outline, { brief: (c?.instructions ? `Client guidelines: ${c.instructions}\n\n` : '') + k.brief, catalog: catalogText(deckTables(user, k.datasets), 150), finalizeModel, red });
+  const c = k.clientId ? one(`SELECT * FROM clients WHERE id=?`, k.clientId) : null;
+  const f = await finalizeOutline(user, k.outline, { brief: [clientBlock(c), analystBlock(user), k.brief].filter(Boolean).join('\n\n'), catalog: catalogText(deckTables(user, k.datasets), 150), finalizeModel, red });
   run(`UPDATE decks SET outline=?, notes=?, updated=? WHERE id=?`, JSON.stringify(f.outline), `Finalized by ${f.finalizer.label}. ${f.note}`.trim().slice(0, 1000), now(), kid);
   return { ...getDeck(user, kid), finalizer: { id: f.finalizer.id, label: f.finalizer.label } };
 }
