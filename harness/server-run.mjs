@@ -712,6 +712,20 @@ try {
     return ok(start.status === 202 && quick < 3000 && job.status === 'done' && d.result.table.rows === 48000 && d.result.table.preview.every(r => r[sCol]) && est.aiRows === 600 && tags === Math.ceil(600 / 80) && xl.status === 200,
       `upload+parse ${(tUp / 1000).toFixed(1)}s · run started in ${quick} ms (background) · finished ${(tRun / 1000).toFixed(1)}s · rows 50,000 → ${d.result.table.rows} · unique texts labelled ${est.aiRows} in ${tags} AI requests (est. $${est.usd}) · reopen ${tOpen} ms · Excel ${(xl.size / 1048576).toFixed(1)} MB`);
   });
+  await step(A, 'roles', 'Roles: Analyst uses, Ultimate (senior) also uploads shared knowledge and URS reports, Admin manages', async () => {
+    const kB = JSON.parse((await apiCall(B, '/api/knowledge')).body); const team = kB.find(c => c.kind === 'team');
+    const upload = cid => apiCall(B, `/api/knowledge/collections/${cid}/docs`, { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': `catatan-${Date.now()}.txt`, 'content-type': 'text/plain' }, body: 'Catatan tim ' + Date.now() });
+    const asAnalyst = await upload(team.id);
+    const uidB = JSON.parse((await apiCall(A, '/api/admin/overview')).body).users.find(u => u.email === 'staf@kantor.go.id').id;
+    const ursToAnalyst = await putJson(A, '/api/knowledge/seniors', { name: 'Vega', userId: uidB }, 'POST');
+    await putJson(A, '/api/admin/users/' + uidB, { role: 'ultimate' }, 'PATCH');
+    const asUltimate = await upload(team.id); const ursOk = await putJson(A, '/api/knowledge/seniors', { name: 'Vega', userId: uidB }, 'POST');
+    const role = JSON.parse((await apiCall(A, '/api/admin/overview')).body).users.find(u => u.id === uidB).role;
+    const vega = JSON.parse((await apiCall(B, '/api/knowledge')).body).find(c => c.name === 'Vega'); const ownUrs = await upload(vega.id);
+    await A.goto(canopus.url + '#admin'); await A.click('[data-atab=users]'); await A.waitForTimeout(300); await A.screenshot({ path: path.join(OUT, 'server-roles.png') });
+    return ok(asAnalyst.status === 403 && ursToAnalyst.status === 400 && role === 'ultimate' && asUltimate.status === 200 && ursOk.status === 200 && ownUrs.status === 200,
+      `analyst → team ${asAnalyst.status} · URS linked to an analyst ${ursToAnalyst.status} · role ${role} · ultimate → team ${asUltimate.status} · URS created ${ursOk.status} · ultimate → own URS ${ownUrs.status}`);
+  });
   await step(null, 'no-leaks', 'No sensitive value ever reached a cloud AI provider', async () => ok(cloud().length > 0 && !leaks().length, `${cloud().length} cloud requests inspected (Claude + GPT) · ${recorded.length - cloud().length} on-premise · leaks: ${leaks().length}`));
   await step(A, 'tour', 'Every page renders (screenshots for review)', async () => {
     for (const v of ['home', 'knowledge', 'reports', 'studio', 'prompts', 'skills']) { await A.goto(canopus.url + '#' + v); if (v === 'home') await A.click('[data-go=home]'); await A.waitForTimeout(400); await A.screenshot({ path: path.join(OUT, `server-page-${v}.png`) }); }

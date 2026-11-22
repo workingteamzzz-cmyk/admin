@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { config, ROOT, MODELS, CLASSIFICATIONS, CATEGORIES, TIERS } from './config.mjs';
 import { db, one, all, run, id, now, tx, sha256, getSettings, saveSettings, audit, userGroups, groupSpent, allowedCollections, spentThisMonth, budgetFor, monthStart, projectsFor, ensureSpaces, canUpload } from './db.mjs';
-import { hashPassword, verifyPassword, passwordProblem, createInvite, inviteUser, consumeInvite, createSession, destroySession, sessionUser, clientIp, loginBlocked, loginFailed, loginOk, createUser, publicUser } from './auth.mjs';
+import { hashPassword, verifyPassword, passwordProblem, createInvite, inviteUser, consumeInvite, createSession, destroySession, sessionUser, clientIp, loginBlocked, loginFailed, loginOk, createUser, publicUser, normalizeRole } from './auth.mjs';
 import { ingestDoc, deleteDoc, deleteCollection, classificationProblem, search } from './knowledge.mjs';
 import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels } from './ai.mjs';
 import { emit as emitWebhook } from './webhooks.mjs';
@@ -188,7 +188,7 @@ route('GET', '/api/knowledge', (req, res, u) => json(res, 200, knowledgeFor(u)))
 // Everyone can add to the team space, to client spaces and to their own space (admins also to organization collections).
 route('POST', '/api/knowledge/collections/:id/docs', async (req, res, u, p) => {
   const c = allowedCollections(u).find(x => x.id === p.id); if (!c) throw new HttpError(404, 'Collection not found');
-  if (!canUpload(u, c)) throw new HttpError(403, c.kind === 'person' ? 'You can only add documents to your own space.' : 'Only administrators can add documents to this collection.');
+  if (!canUpload(u, c)) throw new HttpError(403, c.kind === 'person' ? 'You can only add documents to your own space.' : c.kind === 'senior' ? 'Only the Ultimate account linked to this URS can add reports to it.' : 'Only Ultimate (senior) accounts and administrators can add documents here.');
   const classification = String(req.headers['x-classification'] || 'biasa'); const problem = classificationProblem(classification);
   if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification, collection: c.id }, clientIp(req)); emitWebhook('knowledge.upload_refused', { file: fileName(req), classification, by: u.email }); throw new HttpError(422, problem); }
   const buf = await readBody(req, config.maxUploadMb * MB);
@@ -209,20 +209,21 @@ route('DELETE', '/api/knowledge/docs/:id', (req, res, u, p) => {
 route('POST', '/api/knowledge/seniors', async (req, res, u) => {
   requireAdmin(u); const { name, userId } = await readJson(req, 5e3); const nm = String(name || '').trim().slice(0, 60); if (!nm) throw new HttpError(400, 'Give the senior a codename.');
   if (one(`SELECT 1 FROM collections WHERE kind='senior' AND name=? COLLATE NOCASE`, nm)) throw new HttpError(409, 'This codename is already used.');
-  if (userId && !one(`SELECT 1 FROM users WHERE id=?`, userId)) throw new HttpError(404, 'User not found');
+  if (userId && !one(`SELECT 1 FROM users WHERE id=? AND role IN ('ultimate','admin')`, userId)) throw new HttpError(400, 'A URS can only be linked to an Ultimate (senior) account.');
   const cid = id(); run(`INSERT INTO collections(id,name,description,created,kind,owner_id) VALUES(?,?,?,?,?,?)`, cid, nm, 'Best reports shared by a senior analyst.', now(), 'senior', userId || null);
   audit(u.id, 'knowledge.senior_created', { collection: cid, codename: nm }, clientIp(req)); json(res, 200, { id: cid });
 });
 route('PATCH', '/api/knowledge/seniors/:id', async (req, res, u, p) => {
   requireAdmin(u); const c = one(`SELECT * FROM collections WHERE id=? AND kind='senior'`, p.id); if (!c) throw new HttpError(404, 'Not found'); const b = await readJson(req, 5e3);
   const nm = b.name !== undefined ? String(b.name).trim().slice(0, 60) || c.name : c.name; if (one(`SELECT 1 FROM collections WHERE kind='senior' AND name=? COLLATE NOCASE AND id<>?`, nm, c.id)) throw new HttpError(409, 'This codename is already used.');
+  if (b.userId && !one(`SELECT 1 FROM users WHERE id=? AND role IN ('ultimate','admin')`, b.userId)) throw new HttpError(400, 'A URS can only be linked to an Ultimate (senior) account.');
   run(`UPDATE collections SET name=?, owner_id=? WHERE id=?`, nm, b.userId !== undefined ? (b.userId || null) : c.owner_id, c.id); audit(u.id, 'knowledge.senior_updated', { collection: c.id }, clientIp(req)); json(res, 200, { ok: true });
 });
 route('DELETE', '/api/knowledge/seniors/:id', (req, res, u, p) => { requireAdmin(u); const c = one(`SELECT * FROM collections WHERE id=? AND kind='senior'`, p.id); if (!c) throw new HttpError(404, 'Not found'); deleteCollection(c.id); audit(u.id, 'knowledge.senior_deleted', { codename: c.name }, clientIp(req)); json(res, 200, { ok: true }); });
 route('POST', '/api/knowledge/spaces/:id/style', async (req, res, u, p) => { const prof = await R.buildStyleProfile(u, p.id); audit(u.id, 'knowledge.style_profile_built', { collection: p.id }, clientIp(req)); json(res, 200, prof); });
 route('PUT', '/api/knowledge/spaces/:id/style', async (req, res, u, p) => { const prof = R.saveStyleProfile(u, p.id, (await readJson(req, 30e3)).profile); audit(u.id, 'knowledge.style_profile_edited', { collection: p.id }, clientIp(req)); json(res, 200, prof); });
 route('GET', '/api/knowledge/style-fields', (req, res) => json(res, 200, R.STYLE_PROFILE_FIELDS));
-route('GET', '/api/knowledge/seniors/users', (req, res, u) => { requireAdmin(u); json(res, 200, all(`SELECT id, COALESCE(NULLIF(name,''),email) name FROM users WHERE disabled=0 ORDER BY name`)); });
+route('GET', '/api/knowledge/seniors/users', (req, res, u) => { requireAdmin(u); json(res, 200, all(`SELECT id, COALESCE(NULLIF(name,''),email) name, role FROM users WHERE disabled=0 AND role IN ('ultimate','admin') ORDER BY name`)); });
 route('PATCH', '/api/knowledge/mine', async (req, res, u) => {
   const { private: priv } = await readJson(req, 2e3); ensureSpaces(u);
   run(`UPDATE collections SET private=?, name=? WHERE kind='person' AND owner_id=?`, priv ? 1 : 0, u.name || u.email, u.id); audit(u.id, 'knowledge.space_visibility', { private: !!priv }, clientIp(req)); json(res, 200, { ok: true });
@@ -266,7 +267,7 @@ route('PATCH', '/api/admin/users/:id', async (req, res, u, p) => {
   if (t.role === 'admin' && admins <= 1 && ((b.role && b.role !== 'admin') || b.disabled)) throw new HttpError(400, 'Keep at least one active administrator.');
   tx(() => {
     if (b.name !== undefined) run(`UPDATE users SET name=? WHERE id=?`, String(b.name).slice(0, 80), t.id);
-    if (b.role) run(`UPDATE users SET role=? WHERE id=?`, b.role === 'admin' ? 'admin' : 'user', t.id);
+    if (b.role) run(`UPDATE users SET role=? WHERE id=?`, normalizeRole(b.role), t.id);
     if (b.budget_usd !== undefined) run(`UPDATE users SET budget_usd=? WHERE id=?`, clampBudget(b.budget_usd), t.id);
     if (b.disabled !== undefined) { run(`UPDATE users SET disabled=? WHERE id=?`, b.disabled ? 1 : 0, t.id); if (b.disabled) run(`DELETE FROM sessions WHERE user_id=?`, t.id); }
     if (Array.isArray(b.groups)) setGroups('user_groups', 'user_id', t.id, b.groups);

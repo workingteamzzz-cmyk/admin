@@ -68,6 +68,7 @@ Ad-hoc, Daily, Weekly, Bi-weekly, Monthly, Bi-monthly, Quarterly, Semesterly and
 ## Channels and senior reference reports
 
 - **Channel**: media massa, media sosial, or both. Social media switches the vocabulary and slides to platforms, accounts/KOL, engagement, viral content, hashtags, complaints and post samples (account, platform, date, link); "both" adds a news-versus-social comparison. Structures can differ per channel (client page → Report structures); curation plans know about PLATFORM columns and reposts.
+- **Roles**: administrators create three kinds of accounts in Admin → Users. **Analyst** (default) makes chats and reports, adds files to their own knowledge space and to client spaces. **Ultimate** (senior) can also add to the shared Team knowledge and organization collections, and owns a URS. **Administrator** manages everything (users, models, budgets, settings) and can add knowledge anywhere. A URS can only be linked to an Ultimate or Administrator account.
 - **Senior reference reports**: seniors upload their best reports (PPTX or PDF) to their own knowledge space. In Reports → New presentation, an analyst can “Follow a senior's report”: Canopus follows its slide structure, depth, tone and writing style (never its numbers), and for a PPTX can also use its design (masters, colours, fonts). PowerPoint files are indexed slide by slide, so they are searchable too.
 
 ## Knowledge spaces for many people

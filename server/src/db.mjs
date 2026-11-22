@@ -88,7 +88,15 @@ export function ensureSpaces(user) {
   if (!one(`SELECT 1 FROM collections WHERE kind='team'`)) run(`INSERT INTO collections(id,name,description,created,kind) VALUES(?,?,?,?,?)`, id(), 'Team knowledge', 'Documents and files for everyone in the organization.', now(), 'team');
   if (!one(`SELECT 1 FROM collections WHERE kind='person' AND owner_id=?`, user.id)) run(`INSERT INTO collections(id,name,description,created,kind,owner_id) VALUES(?,?,?,?,?,?)`, id(), user.name || user.email, 'Personal knowledge', now(), 'person', user.id);
 }
-export function canUpload(user, c) { return user.role === 'admin' && (c.kind === 'admin' || c.kind === 'senior') || c.kind === 'team' || c.kind === 'client' || ((c.kind === 'person' || c.kind === 'senior') && c.owner_id === user.id); }
+// Analysts add to their own space and client spaces; Ultimate (senior) accounts also to the team space, organization
+// collections and their own URS; administrators everywhere.
+export function canUpload(user, c) {
+  if (user.role === 'admin') return true;
+  if (c.kind === 'person') return c.owner_id === user.id;
+  if (c.kind === 'client') return true;
+  if (user.role !== 'ultimate') return false;
+  return c.kind === 'team' || c.kind === 'admin' || (c.kind === 'senior' && c.owner_id === user.id);
+}
 
 // Shared projects a user may use: no group restriction, or sharing a group with the user (admins see all).
 export function projectsFor(user) {

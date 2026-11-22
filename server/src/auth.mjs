@@ -84,12 +84,14 @@ export function loginFailed(key) {
 export function loginOk(key) { attempts.delete(key); }
 
 /* ---------- users ---------- */
+// Roles: admin (everything), ultimate (senior: uploads shared knowledge and URS reports), user (analyst).
+export const normalizeRole = r => (['admin', 'ultimate'].includes(r) ? r : 'user');
 export function createUser({ email, name = '', role = 'user', budget_usd = null }) {
   email = String(email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw Object.assign(new Error('Invalid email address'), { status: 400 });
   if (one(`SELECT 1 FROM users WHERE email=?`, email)) throw Object.assign(new Error('A user with this email already exists'), { status: 409 });
   const uid = id();
-  run(`INSERT INTO users(id,email,name,role,created,budget_usd) VALUES(?,?,?,?,?,?)`, uid, email, String(name).slice(0, 80), role === 'admin' ? 'admin' : 'user', now(), budget_usd);
+  run(`INSERT INTO users(id,email,name,role,created,budget_usd) VALUES(?,?,?,?,?,?)`, uid, email, String(name).slice(0, 80), normalizeRole(role), now(), budget_usd);
   return one(`SELECT * FROM users WHERE id=?`, uid);
 }
 export function publicUser(u) { return { id: u.id, email: u.email, name: u.name, role: u.role }; }
