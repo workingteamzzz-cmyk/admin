@@ -24,7 +24,7 @@ const pickType = t => (TYPES.includes(t) ? t : 'weekly'), pickChan = c => (CHANS
 const canManage = (user, f) => user.role === 'admin' || user.role === 'ultimate' || f.created_by === user.id;
 
 const out = (f, user) => ({ id: f.id, clientId: f.client_id, reportType: f.report_type, channel: f.channel, period: f.period, title: f.title, filename: f.filename, size: f.size,
-  slides: f.slides, deckId: f.deck_id, learn: !!f.learn, note: f.note, created: f.created, updated: f.updated,
+  slides: f.slides, deckId: f.deck_id, analyst: f.analyst_id ? (one(`SELECT COALESCE(NULLIF(name,''),email) n FROM users WHERE id=?`, f.analyst_id)?.n || '') : '', learn: !!f.learn, note: f.note, created: f.created, updated: f.updated,
   by: f.created_by ? (one(`SELECT COALESCE(NULLIF(name,''),email) n FROM users WHERE id=?`, f.created_by)?.n || '') : '', canManage: user ? canManage(user, f) : false });
 
 export function listFinals(user, clientId) {

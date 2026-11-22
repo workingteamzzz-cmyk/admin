@@ -506,6 +506,9 @@ route('POST', '/api/reports/decks/:id/submit', async (req, res, u, p) => {
   const buf = await readBody(req, config.maxUploadMb * MB); const s = await RV.submitWork(u, { deckId: p.id, buf, filename: req.headers['x-filename'] ? fileName(req) : null, note: decodeURIComponent(String(req.headers['x-note'] || '')) });
   audit(u.id, 'report.work_submitted', { submission: s.id, deck: p.id, version: s.version }, clientIp(req)); json(res, 200, s);
 });
+route('POST', '/api/reports/decks/:id/review', async (req, res, u, p) => { const b = await readJson(req, 10e3); const r = await RV.reviewDeck(u, p.id, { urs: b.urs || null }); audit(u.id, 'report.deck_reviewed', { deck: p.id, urs: r.urs?.id || null, items: r.items.length }, clientIp(req)); json(res, 200, r); });
+route('GET', '/api/reports/urs', (req, res, u) => json(res, 200, RV.ursFor(u).map(x => ({ id: x.id, name: x.name, reports: x.reports }))));
+route('GET', '/api/reports/clients/:id/decks', (req, res, u, p) => json(res, 200, RV.clientDecks(u, p.id)));
 route('GET', '/api/reports/work/:id', (req, res, u, p) => json(res, 200, RV.getSubmission(u, p.id)));
 route('GET', '/api/reports/work/:id/file', (req, res, u, p) => { const f = RV.submissionFile(p.id); audit(u.id, 'report.work_download', { submission: p.id }, clientIp(req)); sendFile(res, f.buf, f.name, FINAL_MIME[f.name.split('.').pop().toLowerCase()] || 'application/octet-stream'); });
 route('POST', '/api/reports/work/:id/check', async (req, res, u, p) => { const { urs } = await readJson(req, 10e3); const c = await RV.checkAgainstUrs(u, p.id, String(urs || '')); audit(u.id, 'report.urs_check', { submission: p.id, urs }, clientIp(req)); json(res, 200, c); });
@@ -523,7 +526,7 @@ route('GET', '/api/reports/finals', (req, res, u) => { const q = new URL(req.url
 route('POST', '/api/reports/finals', async (req, res, u) => {
   const buf = await readBody(req, config.maxUploadMb * MB); const h = k => decodeURIComponent(String(req.headers['x-' + k] || ''));
   const f = await F.addFinal(u, { clientId: h('client'), buf, filename: fileName(req), reportType: h('type'), channel: h('channel'), period: h('period'), title: h('title'), deckId: h('deck') || null, learn: h('learn') !== '0', note: h('note') });
-  audit(u.id, 'report.final_added', { final: f.id, client: f.clientId, type: f.reportType, channel: f.channel, file: f.filename }, clientIp(req)); json(res, 200, f);
+  RV.linkFinal(u, f); audit(u.id, 'report.final_added', { final: f.id, client: f.clientId, type: f.reportType, channel: f.channel, file: f.filename, deck: f.deckId }, clientIp(req)); json(res, 200, F.listFinals(u, f.clientId).find(x => x.id === f.id) || f);
 });
 route('PATCH', '/api/reports/finals/:id', async (req, res, u, p) => json(res, 200, F.updateFinal(u, p.id, await readJson(req, 20e3))));
 route('DELETE', '/api/reports/finals/:id', (req, res, u, p) => { const f = F.deleteFinal(u, p.id); audit(u.id, 'report.final_deleted', { final: f.id, client: f.client_id, file: f.filename }, clientIp(req)); json(res, 200, { ok: true }); });
@@ -574,6 +577,7 @@ route('PUT', '/api/reports/decks/:id', async (req, res, u, p) => json(res, 200, 
 route('DELETE', '/api/reports/decks/:id', (req, res, u, p) => { R.deleteDeck(u, p.id); json(res, 200, { ok: true }); });
 route('GET', '/api/reports/decks/:id/pptx', async (req, res, u, p) => {
   const r = await R.deckPptx(u, p.id); audit(u.id, 'report.download', { deck: p.id, type: 'pptx', slides: r.slides }, clientIp(req));
+  try { RV.recordDownload(u, p.id, r.buf, r.name); } catch (e) { console.warn('[analyst work]', e.message); } // kept in Analyst work for offline editing
   res.setHeader('x-canopus-warnings', encodeURIComponent(JSON.stringify(r.warnings).slice(0, 2000))); sendFile(res, r.buf, r.name, PPTX_TYPE);
 });
 

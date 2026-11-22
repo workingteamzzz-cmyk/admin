@@ -228,7 +228,7 @@ export async function planDataset(user, did, { instruction, model: requested, sh
   const d = ownDataset(user, did); const sheets = await loadSource(d); const t = pickSheet(sheets, sheet || d.sheet);
   const red = redactorFor(user, 'report:' + did); const model = reportModel(user, requested, 'writing');
   const prof = profile(t, extraCols());
-  const ctx = [clientBlock(d.client_id ? one(`SELECT * FROM clients WHERE id=?`, d.client_id) : null), analystBlock(user)].filter(Boolean).join('\n\n');
+  const ctx = [clientBlock(d.client_id ? one(`SELECT * FROM clients WHERE id=?`, d.client_id) : null), analystBlock(user), analystStyle(user)].filter(Boolean).join('\n\n');
   const chn = channelOf(channel); const tp = reportType(rt); const tnote = `${chn.note}${chn.id === 'medsos' ? ' Use a PLATFORM column (from the file, the URL domain or a source column); reposts by different accounts are separate exposures, not duplicates; detect account categories when useful.' : ''}\n` + (tp ? `${typeNote(tp)}${tp.derive ? ` For the trend summary, derive a period column from the date with fn "${tp.derive}" and pivot it by sentiment.` : ''}\n\n` : '');
   const prompt = red.mask(`${ctx ? ctx + '\n\n' : ''}${tnote}Sheets in the file: ${sheets.map(s => `"${s.name}" (${s.rows.length} rows)`).join(', ')}. Planning for sheet "${t.name}".\n\nColumn profile:\n${JSON.stringify(prof, null, 1)}\n\nUser's instruction:\n${String(instruction || 'Clean this data and prepare the usual summaries for a report.').slice(0, 4000)}`);
   const raw = await askJson(user, model, PLAN_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt, 'report.plan', 6000, 'medium');
@@ -464,12 +464,15 @@ export async function buildStyleProfile(user, cid) {
   const c = one(`SELECT * FROM collections WHERE id=? AND kind IN ('senior','person')`, cid); if (!c || !allowedCollections(user).some(x => x.id === cid)) throw err(404, 'Space not found');
   if (user.role !== 'admin' && c.owner_id !== user.id) throw err(403, 'Only the owner of this space or an administrator can rebuild its style profile.');
   if (c.local_only) throw err(403, 'This space is on-premise only, so its reports cannot be sent to a cloud AI to build a style profile.');
-  const docs = all(`SELECT id, title FROM docs WHERE collection_id=? AND status='ready' ORDER BY created DESC LIMIT 8`, cid); if (!docs.length) throw err(409, 'Add at least one report first.');
-  const per = Math.floor(16000 / docs.length); const red = redactorFor(user, 'style:' + cid);
-  const text = docs.map(d => `=== ${d.title} ===\n${all(`SELECT text FROM kchunks WHERE doc_id=? ORDER BY idx`, d.id).map(r => r.text).join('\n').slice(0, per)}`).join('\n\n');
+  // A URS learns from its reports; an analyst's own space also from the work they downloaded or submitted (Analyst work).
+  const items = all(`SELECT id, title FROM docs WHERE collection_id=? AND status='ready' ORDER BY created DESC LIMIT 8`, cid).map(d => ({ title: d.title, text: all(`SELECT text FROM kchunks WHERE doc_id=? ORDER BY idx`, d.id).map(r => r.text).join('\n') }));
+  if (c.kind === 'person' && c.owner_id) { try { items.push(...all(`SELECT title, text FROM report_submissions WHERE analyst_id=? ORDER BY created DESC LIMIT 4`, c.owner_id)); } catch {} }
+  if (!items.length) throw err(409, c.kind === 'person' ? 'Add a report to this space, or download or submit a presentation first.' : 'Add at least one report first.');
+  const per = Math.floor(16000 / items.length); const red = redactorFor(user, 'style:' + cid);
+  const text = items.map(d => `=== ${d.title} ===\n${String(d.text || '').slice(0, per)}`).join('\n\n');
   checkLimits(user); const model = reportModel(user, null, 'writing');
-  const raw = await askJson(user, model, `You are an editor who reverse-engineers a writing and presentation style. Below are excerpts of reports by one senior analyst (codename "${c.name}"). Describe the style so other analysts and AI models can write new reports the same way. Describe patterns, never facts. Reply with JSON only: {${PROFILE_FIELDS.map(([k]) => `"${k}": ${k === 'summary' ? '2–3 sentences' : 'one short paragraph'}`).join(', ')}, "examples": [4–6 short sentences or titles copied from the text that typify the style, with every number replaced by "X" and every name of a person replaced by "[nama]"]}.${red.enabled ? ' ' + SYSTEM_NOTE : ''}`, red.mask(text), 'report.style', 4000, 'medium');
-  const prof = { ...Object.fromEntries(PROFILE_FIELDS.map(([k]) => [k, String(red.unmask(String(raw[k] || ''))).slice(0, 1200)])), examples: (Array.isArray(raw.examples) ? raw.examples : []).slice(0, 6).map(x => String(red.unmask(String(x))).replace(/\d[\d.,]*/g, 'X').slice(0, 240)), from: docs.length };
+  const raw = await askJson(user, model, `You are an editor who reverse-engineers a writing and presentation style. Below are excerpts of reports by ${c.kind === 'senior' ? `one senior analyst (codename "${c.name}")` : `one analyst ("${c.name}")`}. Describe the style so other analysts and AI models can write new reports the same way. Describe patterns, never facts. Reply with JSON only: {${PROFILE_FIELDS.map(([k]) => `"${k}": ${k === 'summary' ? '2–3 sentences' : 'one short paragraph'}`).join(', ')}, "examples": [4–6 short sentences or titles copied from the text that typify the style, with every number replaced by "X" and every name of a person replaced by "[nama]"]}.${red.enabled ? ' ' + SYSTEM_NOTE : ''}`, red.mask(text), 'report.style', 4000, 'medium');
+  const prof = { ...Object.fromEntries(PROFILE_FIELDS.map(([k]) => [k, String(red.unmask(String(raw[k] || ''))).slice(0, 1200)])), examples: (Array.isArray(raw.examples) ? raw.examples : []).slice(0, 6).map(x => String(red.unmask(String(x))).replace(/\d[\d.,]*/g, 'X').slice(0, 240)), from: items.length };
   run(`UPDATE collections SET style_profile=?, style_updated=? WHERE id=?`, JSON.stringify(prof), now(), cid); return prof;
 }
 export function saveStyleProfile(user, cid, profile) {
@@ -479,6 +482,11 @@ export function saveStyleProfile(user, cid, profile) {
   run(`UPDATE collections SET style_profile=?, style_updated=? WHERE id=?`, JSON.stringify(prof), now(), cid); return prof;
 }
 export const STYLE_PROFILE_FIELDS = PROFILE_FIELDS;
+// The analyst's own style: the profile of their knowledge space (built from their reports and their own work).
+function analystStyle(user) {
+  const c = one(`SELECT * FROM collections WHERE kind='person' AND owner_id=?`, user.id); const p = c?.style_profile ? JSON.parse(c.style_profile) : null; if (!p || c.local_only) return '';
+  return `The analyst's own style (from what they have worked on; follow it where the client's final reports or a chosen URS do not say otherwise):\n${PROFILE_FIELDS.filter(([k]) => p[k]).map(([k, l]) => `- ${l}: ${p[k]}`).join('\n')}`;
+}
 function styleBlock(c) {
   const p = c?.style_profile ? JSON.parse(c.style_profile) : null; if (!p) return '';
   const who = c.kind === 'senior' ? `★${c.name}` : c.name;
@@ -511,7 +519,8 @@ const maxSlidesOf = client => { const m = (parsePersona(client?.persona, CLIENT_
 
 /* ================= decks ================= */
 function ownDeck(user, kid) { const k = one(`SELECT * FROM decks WHERE id=? AND user_id=?`, kid, user.id); if (!k) throw err(404, 'Presentation not found'); return k; }
-const deckOut = k => ({ id: k.id, clientId: k.client_id, channel: k.channel || 'medmas', reference: k.reference || null, reportType: k.report_type || null, period: k.period || '', structure: k.structure || '', style: k.style ? JSON.parse(k.style) : null, images: JSON.parse(k.images || '[]'), title: k.title, template: k.template_id || 'plain', datasets: JSON.parse(k.datasets), brief: k.brief, outline: k.outline ? JSON.parse(k.outline) : null, notes: k.notes || '', created: k.created, updated: k.updated });
+try { db.exec(`ALTER TABLE decks ADD COLUMN review TEXT`); } catch {}
+const deckOut = k => ({ review: k.review ? JSON.parse(k.review) : null, id: k.id, clientId: k.client_id, channel: k.channel || 'medmas', reference: k.reference || null, reportType: k.report_type || null, period: k.period || '', structure: k.structure || '', style: k.style ? JSON.parse(k.style) : null, images: JSON.parse(k.images || '[]'), title: k.title, template: k.template_id || 'plain', datasets: JSON.parse(k.datasets), brief: k.brief, outline: k.outline ? JSON.parse(k.outline) : null, notes: k.notes || '', created: k.created, updated: k.updated });
 export function listDecks(user) { return all(`SELECT * FROM decks WHERE user_id=? ORDER BY updated DESC`, user.id).map(k => { const o = deckOut(k); return { ...o, slides: o.outline?.slides.length || 0, outline: undefined, brief: o.brief.slice(0, 200) }; }); }
 export function getDeck(user, kid) { return deckOut(ownDeck(user, kid)); }
 export function deleteDeck(user, kid) { const k = ownDeck(user, kid); run(`DELETE FROM decks WHERE id=?`, k.id); return k; }
@@ -619,7 +628,7 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   let excerpts = '';
   if (knowledge && brief) { const hits = search(user, String(brief).slice(0, 300), { limit: 6, collections: client?.collection_id ? [client.collection_id] : null }).filter(h => !h.localOnly); if (hits.length) excerpts = `\n\nRelevant internal documents:\n${hits.map((h, i) => `[${i + 1}] ${h.title}${h.page ? ' p.' + h.page : ''}: ${h.text.slice(0, 900)}`).join('\n')}`; }
   const struct = !reference && tdesc.info.structure?.length ? `\n\nReference structure from the template "${tdesc.name}" (slides in an earlier report; follow its order and style, with new content):\n${tdesc.info.structure.map((s, i) => `${i + 1}. ${s.title || '(no title)'}${s.has?.length ? ` [${s.has.join(', ')}]` : ''}${s.text ? ' — ' + s.text.slice(0, 160) : ''}`).join('\n')}` : '';
-  const clientNote = [clientBlock(client), analystBlock(user)].filter(Boolean).join('\n\n') + '\n\n';
+  const clientNote = [clientBlock(client), analystBlock(user), reference ? '' : analystStyle(user)].filter(Boolean).join('\n\n') + '\n\n';
   const prompt = red.mask(`${clientNote}Brief from the user:\n${String(brief || 'Create a report presentation from this data.').slice(0, 6000)}${title ? `\n\nWorking title: ${title}` : ''}\n\nToday: ${new Date().toISOString().slice(0, 10)}${struct}\n\nData catalog:${catalog || '\n(no datasets attached — write from the brief only, without charts or tables)'}${excerpts}`);
   // Screenshots (e.g. dashboard word cloud, map) go into the deck; the analysis model also reads them when image uploads are allowed.
   const imgs = (Array.isArray(images) ? images : []).slice(0, 8).map(x => ({ id: String(x.id || ''), label: String(x.label || x.name || '').slice(0, 120) })).filter(x => loadImage(user, x.id));
@@ -701,4 +710,4 @@ export function checkDeck(user, kid) {
 export function deckSources(user, datasetIds) { return deckTables(user, datasetIds).map(t => ({ ref: t.ref, columns: t.columns, rows: t.rows.length, main: !!t.main })); }
 export const REPORT_META = { channels: CHANNELS.map(({ id, label }) => ({ id, label })), ops: OPS, kinds: SLIDE_KINDS, presets: STYLE_PRESETS, types: REPORT_TYPES.map(({ id, label, short, period, maxSlides, structure, focus }) => ({ id, label, short, period, maxSlides, structure, focus })) };
 // Shared with the editor review (review.mjs).
-export const aiHelpers = { askJson, redactorFor, checkLimits, styleBlock, reportModel };
+export const aiHelpers = { askJson, redactorFor, checkLimits, styleBlock, reportModel, analystStyle };

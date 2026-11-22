@@ -726,3 +726,6 @@ div.k-style{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .rp-check-item{padding:8px 0;border-bottom:1px dashed var(--line)}
 .rp-slidelist{margin:10px 0 0 18px;font-size:13.5px;line-height:1.6}
 .rp-worktext{white-space:pre-wrap;max-height:360px;overflow:auto;font-size:12.5px;background:var(--field);padding:10px;border-radius:10px}
+.rp-change{margin:6px 0;padding:8px 10px;border-left:3px solid var(--gold);background:var(--field);border-radius:6px;font-size:13px}
+.rp-check-item.done{opacity:.6}
+.rp-reviewbox{margin-top:10px}

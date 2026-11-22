@@ -76,8 +76,8 @@ export async function renderReports(fresh) {
 function stepper() {
   if (!['data', 'decks'].includes(S.tab)) return '';
   const d = S.ds, k = S.deck; const final = k && /finali[sz]ed by/i.test(k.notes || '');
-  const at = S.tab === 'data' ? (!d ? 1 : d.result ? 3 : 2) : !k ? 3 : final ? 5 : 4;
-  const steps = ['Upload Excel', 'Curate: topic / sentiment', 'Claude: deck & analysis', 'GPT: finalize language & analysis', 'Download PowerPoint'];
+  const at = S.tab === 'data' ? (!d ? 1 : d.result ? 3 : 2) : !k ? 3 : k.review ? 6 : final ? 5 : 4;
+  const steps = ['Upload Excel', 'Curate (your style)', 'Claude: deck & analysis', 'GPT: check the narrative', 'Review with editor knowledge', 'Download & edit offline', 'Editor uploads the final'];
   return `<ol class="rp-flow">${steps.map((t, i) => `<li class="${i + 1 < at ? 'done' : i + 1 === at ? 'now' : ''}"><span>${i + 1 < at ? '✓' : i + 1}</span>${t}</li>`).join('')}</ol>`;
 }
 const body = html => { $('#rpBody').innerHTML = stepper() + html; C.hydrateIcons($('#rpBody')); };
@@ -313,6 +313,7 @@ function deckView() {
       <select id="rpDTpl" class="vsel" title="Template">${templateOptions(k.template)}</select>
       ${finalizeSelect()}<button class="btn sm" data-r="refinal" ${S.busy ? 'disabled' : ''}>${S.busy === 'final' ? spin('Finalizing…') : ic('sparkle') + 'Finalize again'}</button><button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="btn sm" data-r="submitwork" title="Send this presentation to an editor for review">${ic('mail')}Submit to editor</button><button class="btn sm" data-r="filefinal" title="After the editor has finished: upload the edited version so Canopus learns from it">${ic('archive')}File the edited final</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
     ${k.notes ? `<div class="notice">${esc(k.notes)}</div>` : ''}
+    ${reviewPanel(k)}
     <details class="rp-deckstyle"><summary>${ic('sparkle')}Style: <b>${esc(k.style?.name || 'Template as is')}</b> — change colours and fonts</summary>${styleCards([{ id: 'template', name: 'Template as is', description: "Keep the template's own colours", colors: { dk2: '3A4250', accent1: '8892A0', accent2: 'B8C0CC', accent3: '1FA971', accent4: 'E04A4A', lt2: 'EEF1F5' } }, ...stylesOf(k.clientId).styles], k.style?.id || 'template', 'deckstyle')}</details>
     ${k.outline.cover?.candidates?.length ? `<details class="rp-deckstyle"><summary>${ic('image')}Cover: <b>${k.outline.cover.mode === 'pick' ? 'your choice' : 'chosen by Canopus'} · ${({ full: 'full photo with overlay', split: 'photo on the right', none: 'no photo' })[k.outline.cover.layout] || ''}</b></summary>
       <div class="rp-shots" style="margin-top:8px">${k.outline.cover.candidates.map(id_ => `<button type="button" class="rp-shot rp-cover ${k.outline.cover.image === id_ ? 'on' : ''}" data-r="deckcover" data-x="${id_}"><img src="/api/reports/images/${id_}" alt=""></button>`).join('')}<button type="button" class="btn sm" data-r="deckcover" data-x="auto">Choose for me</button>
@@ -441,7 +442,7 @@ function finalsView() {
   const src = S.finQ ? (S.finHits || []) : (S.finals || []); const list = src.filter(f => (!fch || f.channel === fch) && (!ft || f.reportType === ft));
   const count = t => (S.finals || []).filter(f => (!fch || f.channel === fch) && f.reportType === t).length;
   const row = f => `<div class="rp-final"><div style="flex:1;min-width:220px"><b>${esc(f.title)}</b> <span class="badge">${esc(chanLabel(f.channel))} · ${esc(typeLabel(f.reportType))}${f.period ? ' · ' + esc(f.period) : ''}</span> ${f.learn ? `<span class="badge gold" title="Canopus learns from it when making this client's next ${esc(typeLabel(f.reportType))} report">${ic('sparkle')}Learning</span>` : `<span class="badge" title="Never sent to AI; searchable and downloadable on this server only">${ic('lock')}Server only</span>`}
-      <div class="muted">${c ? '' : esc(clientName(f.clientId) || 'No client') + ' · '}${esc(f.filename)}${f.slides ? ` · ${f.slides} slides` : ''} · filed by ${esc(f.by || '—')} ${C.ago(f.created)}${f.deckId ? ' · from a Canopus draft (the editor’s changes are learned)' : ''}</div>${f.note ? `<div class="muted">Editor's note: ${esc(f.note)}</div>` : ''}${f.snippet ? `<div class="muted" style="font-style:italic">…${esc(f.snippet)}…</div>` : ''}</div>
+      <div class="muted">${c ? '' : esc(clientName(f.clientId) || 'No client') + ' · '}${esc(f.filename)}${f.slides ? ` · ${f.slides} slides` : ''} · ${f.analyst ? `analyst ${esc(f.analyst)} · ` : ''}filed by ${esc(f.by || '—')} ${C.ago(f.created)}${f.deckId ? ' · from a Canopus draft (the editor’s changes are learned)' : ''}</div>${f.note ? `<div class="muted">Editor's note: ${esc(f.note)}</div>` : ''}${f.snippet ? `<div class="muted" style="font-style:italic">…${esc(f.snippet)}…</div>` : ''}</div>
     <div style="display:flex;gap:6px;align-items:center"><a class="btn sm" href="/api/reports/finals/${f.id}/file">${ic('download')}Download</a>${f.canManage ? `<button class="icon-btn" data-r="editfinal" data-x="${f.id}" title="Edit">${ic('edit')}</button><button class="icon-btn" data-r="delfinal" data-x="${f.id}" title="Delete">${ic('trash')}</button>` : ''}</div></div>`;
   const groups = (S.meta.types || []).map(t => [t, list.filter(f => f.reportType === t.id)]).filter(([, l]) => l.length);
   body(`<div class="set-sec"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:260px"><h3>${ic('archive')}Final reports${c ? ` — ${esc(c.name)}` : ''}</h3>
@@ -452,35 +453,57 @@ function finalsView() {
       ${c ? `<div style="display:flex;gap:8px;margin-bottom:12px"><input type="text" id="rpFinQ" value="${esc(S.finQ || '')}" placeholder="Search the text of ${esc(c.name)}'s finals (on this server, no AI)" style="flex:1"><button class="btn sm" data-r="finsearch">${ic('search')}Search</button>${S.finQ ? '<button class="btn sm" data-r="finclear">Clear</button>' : ''}</div>` : ''}
       ${groups.length ? groups.map(([t, l]) => `<h4 style="margin:14px 0 6px">${esc(t.label)} <span class="muted">(${l.length})</span></h4>${l.map(row).join('')}`).join('') : `<p class="help">${S.finQ ? 'Nothing matches.' : 'No final reports here yet.'}</p>`}</div>`);
 }
+async function fillDecks(cid, keep) {
+  const sel = $('#fnDeck'); if (!sel || !cid) return; let list = []; try { list = await C.api(`/api/reports/clients/${cid}/decks`); } catch {}
+  sel.innerHTML = '<option value="">— Not linked —</option>' + list.map(d => `<option value="${d.id}" data-t="${esc(d.title)}" data-p="${esc(d.period || '')}" data-c="${d.channel}" data-y="${d.reportType || ''}" ${d.id === keep ? 'selected' : ''}>${esc(d.title)}${d.period ? ' · ' + esc(d.period) : ''} — ${esc(d.analyst)}${d.work ? ` · v${d.work.version} ${d.work.status === 'final' ? '(already final)' : d.work.status === 'offline' ? '(downloaded)' : ''}` : ''}</option>`).join('');
+  sel.onchange = () => { const o = sel.selectedOptions[0]; if (!o?.value) return; if (!$('#fnTitle').value) $('#fnTitle').value = o.dataset.t; if (!$('#fnPeriod').value) $('#fnPeriod').value = o.dataset.p; if (o.dataset.c) $('#fnChan').value = o.dataset.c; if (o.dataset.y) $('#fnType').value = o.dataset.y; };
+}
 function finalModal(f, preset = {}) {
   const v = f || preset; const types = S.meta.types || [], chans = S.meta.channels || [];
   C.openModal(`<h3>${f ? 'Edit final report' : 'File a final report'}</h3><p class="s">The version the editor approved and sent to the client. It is stored on this server.</p>
     ${f ? '' : `<label for="fnClient">Client</label><select id="fnClient" class="vsel" style="width:100%">${S.clients.map(c => `<option value="${c.id}" ${c.id === (v.clientId || S.client) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
     <label for="fnFile">File (PowerPoint, PDF or Word)</label><input type="file" id="fnFile" accept=".pptx,.pdf,.docx">`}
+    ${f ? '' : `<label for="fnDeck">Analyst's presentation (optional) — link the final to the work it came from, so Canopus learns what the editor changed</label><select id="fnDeck" class="vsel" style="width:100%"><option value="">— Not linked —</option>${preset.deckId ? `<option value="${esc(preset.deckId)}" selected>${esc(preset.title || 'This presentation')}</option>` : ''}</select>`}
     <label for="fnTitle">Title</label><input type="text" id="fnTitle" value="${esc(v.title || '')}" placeholder="e.g. Weekly Report Media Massa — Minggu 2 November">
     <div class="row2"><div><label for="fnChan">Channel</label><select id="fnChan" class="vsel" style="width:100%">${chans.map(c => `<option value="${c.id}" ${c.id === (v.channel || 'medmas') ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select></div>
       <div><label for="fnType">Report type</label><select id="fnType" class="vsel" style="width:100%">${types.map(t => `<option value="${t.id}" ${t.id === (v.reportType || 'weekly') ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div></div>
     <label for="fnPeriod">Period</label><input type="text" id="fnPeriod" value="${esc(v.period || '')}" placeholder="e.g. 8–14 November 2026">
     <label for="fnNote">Editor's note (optional)</label><textarea id="fnNote" rows="2" placeholder="What the editor changed or wants next time, e.g. “judul slide berupa topik, bukan kesimpulan”">${esc(v.note || '')}</textarea>
     <label style="display:flex;gap:8px;align-items:flex-start;margin-top:10px"><input type="checkbox" id="fnLearn" ${v.learn === false ? '' : 'checked'}> <span>Canopus learns from it for this client's next reports of this type<br><span class="help">Unchecked = <b>Server only</b>: never sent to AI, only searchable and downloadable here.</span></span></label>
-    <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-r="savefinal" data-x="${f ? f.id : ''}" data-deck="${preset.deckId || ''}">${f ? 'Save' : ic('upload') + 'File it'}</button></div>`);
+    <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-r="savefinal" data-x="${f ? f.id : ''}">${f ? 'Save' : ic('upload') + 'File it'}</button></div>`);
+  if (!f) { fillDecks(v.clientId || S.client, preset.deckId); const cs = $('#fnClient'); if (cs) cs.onchange = () => fillDecks(cs.value, null); }
 }
+
+/* ---------- the analyst's Review: Canopus reviews as the editor would (URS + client's finals + editors' notes) ---------- */
+function reviewPanel(k) {
+  const r = k.review; const urs = S.ursList || []; if (!S.ursList) { S.ursList = []; C.api('/api/reports/urs').then(x => { S.ursList = x; if (S.deck) renderReports(); }).catch(() => {}); }
+  const applied = S.applied?.[k.id] || [];
+  const items = r?.items || []; const pending = items.map((it, i) => [it, i]).filter(([it, i]) => it.change && !applied.includes(i));
+  return `<div class="set-sec rp-reviewbox"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="flex:1;margin:0">${ic('check')}Review with editor knowledge</h3>
+      ${urs.length ? `<select id="rpRevUrs" class="vsel" title="URS the editor follows">${urs.map(u => `<option value="${u.id}" ${(r?.urs?.id || S.revUrs) === u.id ? 'selected' : ''}>★ ${esc(u.name)}</option>`).join('')}</select>` : ''}
+      <button class="btn sm primary" data-r="reviewdeck" ${S.busy ? 'disabled' : ''}>${S.busy === 'review' ? spin('Reviewing…') : ic('sparkle') + (r ? 'Review again' : 'Review')}</button></div>
+    <p class="help" style="margin:6px 0 0">Before you download: Canopus reviews the slides the way the editor would — with the URS, ${esc(clientName(k.clientId) || 'the client')}'s final reports (and what editors corrected) and editors' notes. Numbers and charts are never changed.</p>
+    ${r ? `<div class="rp-check"><div><b>Ready for the editor: ${r.score ? '★'.repeat(r.score) + '☆'.repeat(5 - r.score) : '—'}</b> <span class="muted">· ${r.urs ? `★ ${esc(r.urs.name)} · ` : ''}${r.finals?.length ? `${r.finals.length} final report${r.finals.length > 1 ? 's' : ''} · ` : ''}${esc(r.model)} · ${C.ago(r.at)}</span></div><p>${esc(r.summary)}</p>
+      ${pending.length > 1 ? `<button class="btn sm" data-r="applyall">${ic('check')}Apply all ${pending.length} rewrites</button>` : ''}
+      ${items.map((it, i) => `<div class="rp-check-item ${applied.includes(i) ? 'done' : ''}"><b>${it.slide ? 'Slide ' + it.slide : 'Overall'}</b> — ${esc(it.issue)}<div class="muted">→ ${esc(it.suggestion)}</div>${it.change ? `<div class="rp-change"><span class="muted">${esc(it.change.field)}:</span> ${Array.isArray(it.change.value) ? it.change.value.map(v => '• ' + esc(v)).join('<br>') : esc(it.change.value)}</div>${applied.includes(i) ? '<span class="badge green">Applied</span>' : `<button class="btn sm" data-r="applyrev" data-x="${i}">Apply</button>`}` : ''}</div>`).join('')}</div>` : ''}</div>`;
+}
+function applyChange(k, i) { const it = k.review.items[i]; const sl = k.outline.slides[it.slide - 1]; if (!sl || !it.change || sl[it.change.field] === undefined) return false; sl[it.change.field] = it.change.value; S.applied = S.applied || {}; (S.applied[k.id] ||= []).push(i); return true; }
 
 /* ---------- analyst work and the editor stage ---------- */
 async function loadWork() { const cid = S.client || ''; S.workFor = cid; try { const r = await C.api(`/api/reports/work?client=${cid}`); S.work = r.items; S.pending = r.pending; S.isEditor = r.editor; } catch (e) { S.work = []; C.toast(e.message, 5000); } if (S.tab === 'work' || S.pending) renderReports(); }
-const STATUS_BADGE = { review: 'gold', returned: 'red', final: 'green', superseded: '' };
+const STATUS_BADGE = { offline: '', review: 'gold', returned: 'red', final: 'green', superseded: '' };
 function workView() {
   if (S.work == null || S.workFor !== (S.client || '')) { S.work = S.work || []; loadWork(); }
-  const st = S.workSt ?? (S.isEditor ? 'review' : 'mine'); const me = C.me()?.id;
+  const st = S.workSt ?? (S.isEditor ? 'offline' : 'mine'); const me = C.me()?.id;
   const list = (S.work || []).filter(w => st === 'all' ? true : st === 'mine' ? w.mine : w.status === st);
   const n = k => (S.work || []).filter(w => (k === 'mine' ? w.mine : w.status === k)).length;
   const row = w => `<div class="rp-final"><div style="flex:1;min-width:240px"><a href="#" data-r="openwork" data-x="${w.id}"><b>${esc(w.title)}</b></a> <span class="badge">v${w.version}</span> <span class="badge">${esc(chanLabel(w.channel))} · ${esc(typeLabel(w.reportType))}${w.period ? ' · ' + esc(w.period) : ''}</span> <span class="badge ${STATUS_BADGE[w.status] || ''}">${esc(w.statusLabel)}</span>
       <div class="muted">${S.client ? '' : esc(clientName(w.clientId) || 'No client') + ' · '}by ${esc(w.analyst)}${w.mine ? ' (you)' : ''} · ${C.ago(w.created)}${w.slides ? ` · ${w.slides} slides` : ''}${w.editor ? ` · editor ${esc(w.editor)}` : ''}</div>${w.editorNote && w.status === 'returned' ? `<div class="muted">Editor: ${esc(w.editorNote)}</div>` : ''}</div>
-    <div style="display:flex;gap:6px;align-items:center">${w.canReview && w.status === 'review' ? `<button class="btn sm primary" data-r="openwork" data-x="${w.id}">Review</button>` : `<button class="btn sm" data-r="openwork" data-x="${w.id}">Open</button>`}</div></div>`;
+    <div style="display:flex;gap:6px;align-items:center">${S.isEditor && w.status === 'offline' ? `<button class="btn sm primary" data-r="workfinal" data-x="${w.id}">${ic('upload')}Upload final</button> ` : ''}${w.canReview && w.status === 'review' ? `<button class="btn sm primary" data-r="openwork" data-x="${w.id}">Review</button>` : `<button class="btn sm" data-r="openwork" data-x="${w.id}">Open</button>`}</div></div>`;
   void me;
   body(`<div class="set-sec"><h3>${ic('check')}Analyst work${curClient() ? ` — ${esc(curClient().name)}` : ''}</h3>
       <p class="help" style="margin:0">Every version an analyst submits is kept here — the analysts' own knowledge, separate from URS and from final reports. Submitted work waits for an editor, who reviews it with the URS next to it, then returns it with notes or approves it into <a href="#" data-r="tab" data-x="finals">Final reports</a>. Analysts submit from a presentation: <b>Submit to editor</b>.</p></div>
-    <div class="set-sec"><div class="seg" style="margin-bottom:12px">${[['review', 'Waiting for editor'], ['returned', 'Returned'], ['final', 'Approved'], ['mine', 'My work'], ['all', 'All']].map(([k, l]) => `<button type="button" data-r="workst" data-x="${k}" class="${st === k ? 'on' : ''}">${l}${k !== 'all' && n(k) ? ` · ${n(k)}` : ''}</button>`).join('')}</div>
+    <div class="set-sec"><div class="seg" style="margin-bottom:12px">${[['offline', 'Edited offline'], ['review', 'Waiting for editor'], ['returned', 'Returned'], ['final', 'Final'], ['mine', 'My work'], ['all', 'All']].map(([k, l]) => `<button type="button" data-r="workst" data-x="${k}" class="${st === k ? 'on' : ''}">${l}${k !== 'all' && n(k) ? ` · ${n(k)}` : ''}</button>`).join('')}</div>
       ${list.length ? list.map(row).join('') : `<p class="help">${st === 'review' ? 'Nothing is waiting for an editor.' : 'Nothing here yet.'}</p>`}</div>`);
 }
 function ursPanel(w) {
@@ -528,9 +551,14 @@ async function onClick(e) {
       case 'tab': S.tab = x; if (x === 'decks') S.deck = null; renderReports(); break;
       case 'uploadfinal': finalModal(null, { clientId: S.client }); break;
       case 'submitwork': submitModal(S.deck); break;
+      case 'reviewdeck': { await saveDeck(true); S.busy = 'review'; renderReports(); const urs = $('#rpRevUrs')?.value || null; S.revUrs = urs;
+        try { const r = await C.api(`/api/reports/decks/${S.deck.id}/review`, { method: 'POST', body: { urs } }); S.deck.review = r; if (S.applied) S.applied[S.deck.id] = []; C.refreshMe?.(); } finally { S.busy = ''; renderReports(); } break; }
+      case 'applyrev': if (applyChange(S.deck, +x)) { await saveDeck(true); renderReports(); C.toast('Applied'); } break;
+      case 'applyall': { let n = 0; S.deck.review.items.forEach((it, i) => { if (it.change && !(S.applied?.[S.deck.id] || []).includes(i) && applyChange(S.deck, i)) n++; }); await saveDeck(true); renderReports(); C.toast(`${n} rewrite${n === 1 ? '' : 's'} applied`); break; }
       case 'dosubmitwork': { const f = $('#swFile').files?.[0]; const hd = { 'content-type': 'application/octet-stream', 'x-note': encodeURIComponent($('#swNote').value.trim()) }; if (f) hd['x-filename'] = encodeURIComponent(f.name);
         C.toast('Submitting…', 6000); const r = await C.api(`/api/reports/decks/${S.deck.id}/submit`, { method: 'POST', raw: f || new Blob([]), headers: hd }); C.closeModal(); S.work = null; C.toast(`Submitted as version ${r.version} — waiting for an editor`); break; }
       case 'workst': S.workSt = x; renderReports(); break;
+      case 'workfinal': { const w = (S.work || []).find(y => y.id === x); if (!w?.clientId) { C.toast('This presentation has no client.'); break; } finalModal(null, { clientId: w.clientId, title: w.title, period: w.period, channel: w.channel, reportType: w.reportType, deckId: w.deckId }); break; }
       case 'openwork': S.tab = 'work'; S.workItem = await C.api('/api/reports/work/' + x); S.workUrs = null; renderReports(); break;
       case 'backwork': S.workItem = null; S.work = null; renderReports(); break;
       case 'urscheck': { S.busy = 'urs'; renderReports(); try { S.workItem.ursCheck = await C.api(`/api/reports/work/${S.workItem.id}/check`, { method: 'POST', body: { urs: x } }); S.workUrs = x; } finally { S.busy = null; renderReports(); } break; }
@@ -539,11 +567,11 @@ async function onClick(e) {
         C.toast('Filing the final…', 6000); await C.api(`/api/reports/work/${x}/approve`, { method: 'POST', raw: f || new Blob([]), headers: hd }); S.workItem = null; S.work = null; S.finals = null; S.structCache = {}; renderReports(); C.toast('Approved and filed in Final reports'); break; }
       case 'filefinal': { const k = S.deck; if (!S.clients.length) { C.toast('Create a client first.'); break; } finalModal(null, { clientId: k.clientId || S.client, title: k.title, period: k.period, channel: k.channel, reportType: k.reportType || 'adhoc', deckId: k.id }); break; }
       case 'editfinal': finalModal((S.finals || []).find(f => f.id === x) || (S.finHits || []).find(f => f.id === x)); break;
-      case 'savefinal': {
+      case 'savefinal': { S.work = null;
         const meta = { title: $('#fnTitle').value.trim(), period: $('#fnPeriod').value.trim(), channel: $('#fnChan').value, reportType: $('#fnType').value, note: $('#fnNote').value.trim(), learn: $('#fnLearn').checked };
         if (x) await C.api('/api/reports/finals/' + x, { method: 'PATCH', body: meta });
         else { const f = $('#fnFile').files?.[0]; if (!f) { C.toast('Choose the file first.'); break; } C.toast('Reading ' + f.name + '…', 6000); const e_ = v => encodeURIComponent(v || '');
-          await C.api('/api/reports/finals', { method: 'POST', raw: f, headers: { 'content-type': 'application/octet-stream', 'x-filename': e_(f.name), 'x-client': e_($('#fnClient').value), 'x-type': e_(meta.reportType), 'x-channel': e_(meta.channel), 'x-period': e_(meta.period), 'x-title': e_(meta.title), 'x-note': e_(meta.note), 'x-learn': meta.learn ? '1' : '0', 'x-deck': e_(t.dataset.deck) } }); }
+          await C.api('/api/reports/finals', { method: 'POST', raw: f, headers: { 'content-type': 'application/octet-stream', 'x-filename': e_(f.name), 'x-client': e_($('#fnClient').value), 'x-type': e_(meta.reportType), 'x-channel': e_(meta.channel), 'x-period': e_(meta.period), 'x-title': e_(meta.title), 'x-note': e_(meta.note), 'x-learn': meta.learn ? '1' : '0', 'x-deck': e_($('#fnDeck')?.value) } }); }
         C.closeModal(); S.finals = null; S.structCache = {}; S.finQ = ''; renderReports(); C.toast(x ? 'Saved' : 'Final report filed'); break; }
       case 'delfinal': if (await C.confirmBox('Delete this final report?', 'The file is removed from this server and Canopus stops learning from it.')) { await C.api('/api/reports/finals/' + x, { method: 'DELETE' }); S.finals = null; S.structCache = {}; renderReports(); } break;
       case 'finch': S.finCh = x; renderReports(); break;
