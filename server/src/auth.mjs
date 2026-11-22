@@ -84,8 +84,9 @@ export function loginFailed(key) {
 export function loginOk(key) { attempts.delete(key); }
 
 /* ---------- users ---------- */
-// Roles: admin (everything), ultimate (senior: uploads shared knowledge and URS reports), user (analyst).
-export const normalizeRole = r => (['admin', 'ultimate'].includes(r) ? r : 'user');
+// Roles: admin (everything), ultimate (senior: uploads shared knowledge and URS reports), editor (reviews analysts' work
+// and files finals), user (analyst).
+export const normalizeRole = r => (['admin', 'ultimate', 'editor'].includes(r) ? r : 'user');
 export function createUser({ email, name = '', role = 'user', budget_usd = null }) {
   email = String(email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw Object.assign(new Error('Invalid email address'), { status: 400 });

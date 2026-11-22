@@ -700,3 +700,5 @@ export function checkDeck(user, kid) {
 // The catalog the outline editor needs to offer valid sources and columns.
 export function deckSources(user, datasetIds) { return deckTables(user, datasetIds).map(t => ({ ref: t.ref, columns: t.columns, rows: t.rows.length, main: !!t.main })); }
 export const REPORT_META = { channels: CHANNELS.map(({ id, label }) => ({ id, label })), ops: OPS, kinds: SLIDE_KINDS, presets: STYLE_PRESETS, types: REPORT_TYPES.map(({ id, label, short, period, maxSlides, structure, focus }) => ({ id, label, short, period, maxSlides, structure, focus })) };
+// Shared with the editor review (review.mjs).
+export const aiHelpers = { askJson, redactorFor, checkLimits, styleBlock, reportModel };

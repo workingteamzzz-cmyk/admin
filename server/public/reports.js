@@ -46,7 +46,7 @@ export function initReports(ctx) {
     if (e.target.classList?.contains('rp-flabel')) { try { S.ds = await C.api(`/api/reports/datasets/${S.ds.id}/files/${e.target.dataset.fi}`, { method: 'PATCH', body: { label: e.target.value } }); renderReports(); C.toast('Label saved'); } catch (err) { C.toast(err.message, 4000); } } if (e.target.id === 'rpTplFile') uploadTemplate(e.target.files); if (e.target.id === 'rpDocFile') uploadClientDocs(e.target.files);
     if (e.target.dataset?.tplmove) { try { await C.api('/api/reports/templates/' + e.target.dataset.tplmove, { method: 'PATCH', body: { clientId: e.target.value || null } }); await load(); renderReports(); C.toast('Template moved'); } catch (err) { C.toast(err.message, 4000); } } });
 }
-async function load() { const r = await C.api('/api/reports'); Object.assign(S, { references: r.references || [], clients: r.clients, templates: r.templates, datasets: r.datasets, decks: r.decks, meta: r.meta });
+async function load() { const r = await C.api('/api/reports'); Object.assign(S, { pending: r.pending || 0, isEditor: !!r.editor, references: r.references || [], clients: r.clients, templates: r.templates, datasets: r.datasets, decks: r.decks, meta: r.meta });
   if (!S.loaded) { S.client = prefs().client || ''; if (r.clients.length && !S.client) S.tab = 'clients'; } if (S.client && !S.clients.some(c => c.id === S.client)) S.client = ''; S.loaded = true; }
 const skey = t => ((S.cchan || 'medmas') === 'medmas' ? t : `${t}:${S.cchan}`);
 const curClient = () => S.clients.find(c => c.id === S.client) || null;
@@ -66,10 +66,10 @@ export async function renderReports(fresh) {
   if (!S.loaded) { page.innerHTML = '<div class="help" style="padding:40px">Loading…</div>'; try { await load(); } catch (e) { page.innerHTML = `<div class="help" style="color:var(--red)">${esc(e.message)}</div>`; return; } }
   page.innerHTML = `<div class="page-head"><div><h1><span class="h-ic c-orange">${ic('chart')}</span>Reports</h1><p class="sub">Your clients' data and templates in one place. Upload a client's spreadsheet and PowerPoint, describe what you need, and Canopus curates the data and builds the deck on that client's template. Data is processed and files are built on this server.</p></div>
       <div class="rp-clientbar"><label for="rpClient">Client</label><select id="rpClient" class="vsel"><option value="">All clients</option>${S.clients.map(c => `<option value="${c.id}" ${c.id === S.client ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><button class="btn sm" data-r="newclient">${ic('plus')}New client</button></div></div>
-    <div class="tabs">${[['clients', 'users', 'Clients'], ['data', 'table', 'Data curation'], ['decks', 'layers', 'Presentations'], ['finals', 'archive', 'Final reports'], ['templates', 'grid', 'Templates']].map(([k, i, l]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-r="tab" data-x="${k}">${ic(i)}${l}</button>`).join('')}</div>
+    <div class="tabs">${[['clients', 'users', 'Clients'], ['data', 'table', 'Data curation'], ['decks', 'layers', 'Presentations'], ['work', 'check', 'Analyst work' + (S.pending ? ` · ${S.pending} to review` : '')], ['finals', 'archive', 'Final reports'], ['templates', 'grid', 'Templates']].map(([k, i, l]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-r="tab" data-x="${k}">${ic(i)}${l}</button>`).join('')}</div>
     <div id="rpBody" style="padding-top:14px"></div>`;
-  $('#rpClient').onchange = e => { S.form = null; S.client = e.target.value; savePrefs({ client: S.client }); S.ds = null; S.deck = null; S.clientDocs = null; S.finals = null; S.finQ = ''; renderReports(); };
-  ({ clients: clientsView, data: S.ds ? dsView : dataHome, decks: S.deck ? deckView : deckHome, finals: finalsView, templates: tplView }[S.tab])();
+  $('#rpClient').onchange = e => { S.form = null; S.client = e.target.value; savePrefs({ client: S.client }); S.ds = null; S.deck = null; S.clientDocs = null; S.finals = null; S.finQ = ''; S.work = null; S.workItem = null; renderReports(); };
+  ({ clients: clientsView, data: S.ds ? dsView : dataHome, decks: S.deck ? deckView : deckHome, finals: finalsView, work: S.workItem ? workItemView : workView, templates: tplView }[S.tab])();
   C.hydrateIcons(page);
 }
 // The report flow: Excel → curate (topic / sentiment) → Claude builds the deck & analysis → GPT finalizes → download.
@@ -311,7 +311,7 @@ function deckView() {
   const k = S.deck; const colors = tplColors(k.template);
   body(`<div class="bar" style="align-items:center;flex-wrap:wrap;gap:8px"><button class="btn sm" data-r="backdeck">← All presentations</button><input type="text" id="rpDTitle" value="${esc(k.title)}" style="flex:1 1 320px;min-width:260px;font-size:18px;font-weight:600">
       <select id="rpDTpl" class="vsel" title="Template">${templateOptions(k.template)}</select>
-      ${finalizeSelect()}<button class="btn sm" data-r="refinal" ${S.busy ? 'disabled' : ''}>${S.busy === 'final' ? spin('Finalizing…') : ic('sparkle') + 'Finalize again'}</button><button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="btn sm" data-r="filefinal" title="After the editor has finished: upload the edited version so Canopus learns from it">${ic('archive')}File the edited final</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
+      ${finalizeSelect()}<button class="btn sm" data-r="refinal" ${S.busy ? 'disabled' : ''}>${S.busy === 'final' ? spin('Finalizing…') : ic('sparkle') + 'Finalize again'}</button><button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="btn sm" data-r="submitwork" title="Send this presentation to an editor for review">${ic('mail')}Submit to editor</button><button class="btn sm" data-r="filefinal" title="After the editor has finished: upload the edited version so Canopus learns from it">${ic('archive')}File the edited final</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
     ${k.notes ? `<div class="notice">${esc(k.notes)}</div>` : ''}
     <details class="rp-deckstyle"><summary>${ic('sparkle')}Style: <b>${esc(k.style?.name || 'Template as is')}</b> — change colours and fonts</summary>${styleCards([{ id: 'template', name: 'Template as is', description: "Keep the template's own colours", colors: { dk2: '3A4250', accent1: '8892A0', accent2: 'B8C0CC', accent3: '1FA971', accent4: 'E04A4A', lt2: 'EEF1F5' } }, ...stylesOf(k.clientId).styles], k.style?.id || 'template', 'deckstyle')}</details>
     ${k.outline.cover?.candidates?.length ? `<details class="rp-deckstyle"><summary>${ic('image')}Cover: <b>${k.outline.cover.mode === 'pick' ? 'your choice' : 'chosen by Canopus'} · ${({ full: 'full photo with overlay', split: 'photo on the right', none: 'no photo' })[k.outline.cover.layout] || ''}</b></summary>
@@ -466,6 +466,59 @@ function finalModal(f, preset = {}) {
     <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-r="savefinal" data-x="${f ? f.id : ''}" data-deck="${preset.deckId || ''}">${f ? 'Save' : ic('upload') + 'File it'}</button></div>`);
 }
 
+/* ---------- analyst work and the editor stage ---------- */
+async function loadWork() { const cid = S.client || ''; S.workFor = cid; try { const r = await C.api(`/api/reports/work?client=${cid}`); S.work = r.items; S.pending = r.pending; S.isEditor = r.editor; } catch (e) { S.work = []; C.toast(e.message, 5000); } if (S.tab === 'work' || S.pending) renderReports(); }
+const STATUS_BADGE = { review: 'gold', returned: 'red', final: 'green', superseded: '' };
+function workView() {
+  if (S.work == null || S.workFor !== (S.client || '')) { S.work = S.work || []; loadWork(); }
+  const st = S.workSt ?? (S.isEditor ? 'review' : 'mine'); const me = C.me()?.id;
+  const list = (S.work || []).filter(w => st === 'all' ? true : st === 'mine' ? w.mine : w.status === st);
+  const n = k => (S.work || []).filter(w => (k === 'mine' ? w.mine : w.status === k)).length;
+  const row = w => `<div class="rp-final"><div style="flex:1;min-width:240px"><a href="#" data-r="openwork" data-x="${w.id}"><b>${esc(w.title)}</b></a> <span class="badge">v${w.version}</span> <span class="badge">${esc(chanLabel(w.channel))} · ${esc(typeLabel(w.reportType))}${w.period ? ' · ' + esc(w.period) : ''}</span> <span class="badge ${STATUS_BADGE[w.status] || ''}">${esc(w.statusLabel)}</span>
+      <div class="muted">${S.client ? '' : esc(clientName(w.clientId) || 'No client') + ' · '}by ${esc(w.analyst)}${w.mine ? ' (you)' : ''} · ${C.ago(w.created)}${w.slides ? ` · ${w.slides} slides` : ''}${w.editor ? ` · editor ${esc(w.editor)}` : ''}</div>${w.editorNote && w.status === 'returned' ? `<div class="muted">Editor: ${esc(w.editorNote)}</div>` : ''}</div>
+    <div style="display:flex;gap:6px;align-items:center">${w.canReview && w.status === 'review' ? `<button class="btn sm primary" data-r="openwork" data-x="${w.id}">Review</button>` : `<button class="btn sm" data-r="openwork" data-x="${w.id}">Open</button>`}</div></div>`;
+  void me;
+  body(`<div class="set-sec"><h3>${ic('check')}Analyst work${curClient() ? ` — ${esc(curClient().name)}` : ''}</h3>
+      <p class="help" style="margin:0">Every version an analyst submits is kept here — the analysts' own knowledge, separate from URS and from final reports. Submitted work waits for an editor, who reviews it with the URS next to it, then returns it with notes or approves it into <a href="#" data-r="tab" data-x="finals">Final reports</a>. Analysts submit from a presentation: <b>Submit to editor</b>.</p></div>
+    <div class="set-sec"><div class="seg" style="margin-bottom:12px">${[['review', 'Waiting for editor'], ['returned', 'Returned'], ['final', 'Approved'], ['mine', 'My work'], ['all', 'All']].map(([k, l]) => `<button type="button" data-r="workst" data-x="${k}" class="${st === k ? 'on' : ''}">${l}${k !== 'all' && n(k) ? ` · ${n(k)}` : ''}</button>`).join('')}</div>
+      ${list.length ? list.map(row).join('') : `<p class="help">${st === 'review' ? 'Nothing is waiting for an editor.' : 'Nothing here yet.'}</p>`}</div>`);
+}
+function ursPanel(w) {
+  const urs = w.urs || []; if (!urs.length) return `<div class="set-sec"><h3>${ic('star')}URS knowledge</h3><p class="help">No URS with a style profile yet. Seniors add their best reports in Knowledge → URS.</p></div>`;
+  const sel = urs.find(u => u.id === (S.workUrs || w.ursId)) || urs[0]; const chk = w.ursCheck && w.ursCheck.ursId === sel.id ? w.ursCheck : null;
+  return `<div class="set-sec rp-urs"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><h3 style="flex:1;margin:0">${ic('star')}URS knowledge</h3><select id="rpWorkUrs" class="vsel">${urs.map(u => `<option value="${u.id}" ${u.id === sel.id ? 'selected' : ''}>★ ${esc(u.name)} · ${u.reports} report${u.reports === 1 ? '' : 's'}</option>`).join('')}</select></div>
+    <dl class="rp-urs-fields">${sel.fields.map(f => `<dt>${esc(f.label)}</dt><dd>${esc(f.text)}</dd>`).join('')}</dl>
+    ${sel.examples.length ? `<div class="muted" style="margin-top:6px">Typical sentences:</div><ul class="rp-urs-ex">${sel.examples.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    ${S.isEditor ? `<button class="btn sm" data-r="urscheck" data-x="${sel.id}" ${S.busy === 'urs' ? 'disabled' : ''}>${S.busy === 'urs' ? spin('Checking…') : ic('sparkle') + `Check this work against ★ ${esc(sel.name)}`}</button>` : ''}
+    ${chk ? `<div class="rp-check"><div><b>Follows ★ ${esc(chk.urs)}: ${chk.score ? '★'.repeat(chk.score) + '☆'.repeat(5 - chk.score) : '—'}</b> <span class="muted">· ${esc(chk.model)} · ${C.ago(chk.at)}</span></div><p>${esc(chk.summary)}</p>${chk.items.map(it => `<div class="rp-check-item"><b>${it.slide ? 'Slide ' + it.slide : 'Overall'}</b> — ${esc(it.issue)}<div class="muted">→ ${esc(it.suggestion)}</div></div>`).join('')}</div>` : ''}</div>`;
+}
+function workItemView() {
+  const w = S.workItem; const canAct = w.canReview && w.status === 'review';
+  const slides = (w.structure || []).filter(x => x.title);
+  body(`<div class="bar" style="align-items:center;flex-wrap:wrap;gap:8px"><button class="btn sm" data-r="backwork">← Analyst work</button><h2 style="flex:1;margin:0;font-size:20px">${esc(w.title)} <span class="badge">v${w.version}</span> <span class="badge ${STATUS_BADGE[w.status] || ''}">${esc(w.statusLabel)}</span></h2>
+      <a class="btn sm" href="/api/reports/work/${w.id}/file">${ic('download')}Analyst's file</a>${w.finalId ? `<button class="btn sm" data-r="tab" data-x="finals">${ic('archive')}In Final reports</button>` : ''}${w.mine && w.status === 'returned' ? `<button class="btn sm primary" data-r="opendeck" data-x="${w.deckId}">Open the presentation to revise</button>` : ''}</div>
+    <div class="rp-review">
+      <div><div class="set-sec"><h3>${ic('users')}Analyst's work</h3><div class="muted">${esc(clientName(w.clientId) || 'No client')} · ${esc(chanLabel(w.channel))} · ${esc(typeLabel(w.reportType))}${w.period ? ' · ' + esc(w.period) : ''} · by ${esc(w.analyst)} · ${C.ago(w.created)} · ${esc(w.filename)}</div>
+          ${w.note ? `<div class="notice" style="margin-top:8px">Analyst's note: ${esc(w.note)}</div>` : ''}${w.editorNote ? `<div class="notice" style="margin-top:8px">Editor${w.editor ? ` (${esc(w.editor)})` : ''}: ${esc(w.editorNote)}</div>` : ''}
+          ${slides.length ? `<ol class="rp-slidelist">${slides.map(x => `<li>${esc(x.title)}${x.has?.length ? ` <span class="muted">[${esc(x.has.join(', '))}]</span>` : ''}</li>`).join('')}</ol>` : ''}
+          <details style="margin-top:8px"><summary>Full text</summary><pre class="rp-worktext">${esc(w.text)}</pre></details>
+          ${w.history?.length ? `<div style="margin-top:10px"><b>Earlier versions</b>${w.history.map(h => `<div class="muted"><a href="#" data-r="openwork" data-x="${h.id}">v${h.version}</a> · ${esc(h.statusLabel)} · ${C.ago(h.created)}${h.editorNote ? ` — editor: ${esc(h.editorNote)}` : ''}</div>`).join('')}</div>` : ''}</div>
+        ${canAct ? `<div class="set-sec"><h3>${ic('edit')}Editor's decision</h3>
+          <label for="rpEdNote">Note to the analyst (also learned for the next reports when approved)</label><textarea id="rpEdNote" rows="3" placeholder="e.g. Judul slide berupa topik; insight di slide 4 perlu penyebab, bukan hanya angka"></textarea>
+          <label for="rpEdFile">Edited final (optional) — leave empty to approve the analyst's version as is</label><input type="file" id="rpEdFile" accept=".pptx,.pdf,.docx">
+          <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="rpEdLearn" checked> Canopus learns from this final (unchecked = Server only)</label>
+          <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn" data-r="returnwork" data-x="${w.id}">${ic('refresh')}Return to analyst</button><button class="btn primary" data-r="approvework" data-x="${w.id}">${ic('check')}Approve & file as final</button></div></div>` : ''}</div>
+      <div>${ursPanel(w)}</div></div>`);
+  const sel = $('#rpWorkUrs'); if (sel) sel.onchange = e => { S.workUrs = e.target.value; renderReports(); };
+}
+function submitModal(k) {
+  C.openModal(`<h3>Submit to an editor</h3><p class="s">“${esc(k.title)}” goes to the editors' queue. Every version you submit is kept in Analyst work.</p>
+    <label for="swNote">Note for the editor (optional)</label><textarea id="swNote" rows="3" placeholder="e.g. Data medsos baru sampai Kamis; slide 6 perlu dicek"></textarea>
+    <label for="swFile">Your edited file (optional)</label><input type="file" id="swFile" accept=".pptx,.pdf,.docx"><p class="help">Leave empty to submit the PowerPoint Canopus builds from this presentation. If you finished it in PowerPoint, upload that file.</p>
+    ${k.clientId ? '' : '<p class="help" style="color:var(--red)">This presentation has no client: the editor can review it, but it can only be filed as final once it has one.</p>'}
+    <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-r="dosubmitwork">${ic('mail')}Submit</button></div>`);
+}
+
 /* ================= events ================= */
 async function onClick(e) {
   const t = e.target.closest('[data-r]'); if (!t) return; e.preventDefault();
@@ -474,6 +527,16 @@ async function onClick(e) {
     switch (r) {
       case 'tab': S.tab = x; if (x === 'decks') S.deck = null; renderReports(); break;
       case 'uploadfinal': finalModal(null, { clientId: S.client }); break;
+      case 'submitwork': submitModal(S.deck); break;
+      case 'dosubmitwork': { const f = $('#swFile').files?.[0]; const hd = { 'content-type': 'application/octet-stream', 'x-note': encodeURIComponent($('#swNote').value.trim()) }; if (f) hd['x-filename'] = encodeURIComponent(f.name);
+        C.toast('Submitting…', 6000); const r = await C.api(`/api/reports/decks/${S.deck.id}/submit`, { method: 'POST', raw: f || new Blob([]), headers: hd }); C.closeModal(); S.work = null; C.toast(`Submitted as version ${r.version} — waiting for an editor`); break; }
+      case 'workst': S.workSt = x; renderReports(); break;
+      case 'openwork': S.tab = 'work'; S.workItem = await C.api('/api/reports/work/' + x); S.workUrs = null; renderReports(); break;
+      case 'backwork': S.workItem = null; S.work = null; renderReports(); break;
+      case 'urscheck': { S.busy = 'urs'; renderReports(); try { S.workItem.ursCheck = await C.api(`/api/reports/work/${S.workItem.id}/check`, { method: 'POST', body: { urs: x } }); S.workUrs = x; } finally { S.busy = null; renderReports(); } break; }
+      case 'returnwork': { const note = $('#rpEdNote').value.trim(); if (!note) { C.toast('Write what the analyst should change.'); break; } await C.api(`/api/reports/work/${x}/return`, { method: 'POST', body: { note } }); S.workItem = null; S.work = null; renderReports(); C.toast('Returned to the analyst'); break; }
+      case 'approvework': { const f = $('#rpEdFile').files?.[0]; const hd = { 'content-type': 'application/octet-stream', 'x-note': encodeURIComponent($('#rpEdNote').value.trim()), 'x-learn': $('#rpEdLearn').checked ? '1' : '0' }; if (f) hd['x-filename'] = encodeURIComponent(f.name);
+        C.toast('Filing the final…', 6000); await C.api(`/api/reports/work/${x}/approve`, { method: 'POST', raw: f || new Blob([]), headers: hd }); S.workItem = null; S.work = null; S.finals = null; S.structCache = {}; renderReports(); C.toast('Approved and filed in Final reports'); break; }
       case 'filefinal': { const k = S.deck; if (!S.clients.length) { C.toast('Create a client first.'); break; } finalModal(null, { clientId: k.clientId || S.client, title: k.title, period: k.period, channel: k.channel, reportType: k.reportType || 'adhoc', deckId: k.id }); break; }
       case 'editfinal': finalModal((S.finals || []).find(f => f.id === x) || (S.finHits || []).find(f => f.id === x)); break;
       case 'savefinal': {

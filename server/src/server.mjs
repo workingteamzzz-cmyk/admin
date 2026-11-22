@@ -10,6 +10,7 @@ import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels 
 import { emit as emitWebhook } from './webhooks.mjs';
 import { loadZip } from './zipguard.mjs';
 import * as F from './finals.mjs';
+import * as RV from './review.mjs';
 import * as R from './reports.mjs';
 import { ANALYST_FIELDS, CLIENT_FIELDS, parsePersona } from './persona.mjs';
 import { bootstrapAdmin } from './cli.mjs';
@@ -476,7 +477,7 @@ route('POST', '/api/v1/collections/:id/docs', async (req, res, _u, p) => {
 /* ---------- reports: curated spreadsheets and presentations ---------- */
 const sendFile = (res, buf, name, type) => { res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}` }); res.end(buf); };
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', PPTX_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-route('GET', '/api/reports', async (req, res, u) => json(res, 200, { references: R.referenceReports(u), clients: R.listClients(), templates: await R.listTemplates(u), datasets: R.listDatasets(u), decks: R.listDecks(u), meta: R.REPORT_META }));
+route('GET', '/api/reports', async (req, res, u) => json(res, 200, { references: R.referenceReports(u), clients: R.listClients(), templates: await R.listTemplates(u), datasets: R.listDatasets(u), decks: R.listDecks(u), meta: R.REPORT_META, pending: RV.pendingCount(u), editor: RV.isEditor(u) }));
 route('POST', '/api/reports/clients', async (req, res, u) => { const b = await readJson(req, 50e3); const cid = R.saveClient(u, null, b); audit(u.id, 'report.client_created', { client: cid, name: String(b.name).slice(0, 120) }, clientIp(req)); json(res, 200, { id: cid }); });
 route('PUT', '/api/reports/clients/:id', async (req, res, u, p) => { R.saveClient(u, p.id, await readJson(req, 50e3)); json(res, 200, { ok: true }); });
 route('DELETE', '/api/reports/clients/:id', (req, res, u, p) => { const c = R.deleteClient(u, p.id); audit(u.id, 'report.client_deleted', { client: c.id, name: c.name }, clientIp(req)); json(res, 200, { ok: true }); });
@@ -499,6 +500,22 @@ route('POST', '/api/reports/templates', async (req, res, u) => {
 });
 route('PATCH', '/api/reports/templates/:id', async (req, res, u, p) => { R.updateTemplate(u, p.id, await readJson(req, 10e3)); json(res, 200, { ok: true }); });
 route('DELETE', '/api/reports/templates/:id', (req, res, u, p) => { const t = R.deleteTemplate(u, p.id); audit(u.id, 'report.template_deleted', { template: t.id, name: t.name }, clientIp(req)); json(res, 200, { ok: true }); });
+// Analyst work and the editor stage (kept on this server).
+route('GET', '/api/reports/work', (req, res, u) => { const q = new URL(req.url, 'http://x').searchParams; json(res, 200, { items: RV.listSubmissions(u, { client: q.get('client') || null, status: q.get('status') || null }), pending: RV.pendingCount(u), editor: RV.isEditor(u) }); });
+route('POST', '/api/reports/decks/:id/submit', async (req, res, u, p) => {
+  const buf = await readBody(req, config.maxUploadMb * MB); const s = await RV.submitWork(u, { deckId: p.id, buf, filename: req.headers['x-filename'] ? fileName(req) : null, note: decodeURIComponent(String(req.headers['x-note'] || '')) });
+  audit(u.id, 'report.work_submitted', { submission: s.id, deck: p.id, version: s.version }, clientIp(req)); json(res, 200, s);
+});
+route('GET', '/api/reports/work/:id', (req, res, u, p) => json(res, 200, RV.getSubmission(u, p.id)));
+route('GET', '/api/reports/work/:id/file', (req, res, u, p) => { const f = RV.submissionFile(p.id); audit(u.id, 'report.work_download', { submission: p.id }, clientIp(req)); sendFile(res, f.buf, f.name, FINAL_MIME[f.name.split('.').pop().toLowerCase()] || 'application/octet-stream'); });
+route('POST', '/api/reports/work/:id/check', async (req, res, u, p) => { const { urs } = await readJson(req, 10e3); const c = await RV.checkAgainstUrs(u, p.id, String(urs || '')); audit(u.id, 'report.urs_check', { submission: p.id, urs }, clientIp(req)); json(res, 200, c); });
+route('POST', '/api/reports/work/:id/return', async (req, res, u, p) => { const r = RV.returnSubmission(u, p.id, await readJson(req, 20e3)); audit(u.id, 'report.work_returned', { submission: p.id }, clientIp(req)); json(res, 200, r); });
+route('POST', '/api/reports/work/:id/approve', async (req, res, u, p) => {
+  const buf = await readBody(req, config.maxUploadMb * MB); const h = k => decodeURIComponent(String(req.headers['x-' + k] || ''));
+  const r = await RV.approveSubmission(u, p.id, { buf, filename: req.headers['x-filename'] ? fileName(req) : null, title: h('title') || null, period: req.headers['x-period'] !== undefined ? h('period') : undefined, note: h('note'), learn: h('learn') !== '0' });
+  audit(u.id, 'report.work_approved', { submission: p.id, final: r.final.id }, clientIp(req)); json(res, 200, r);
+});
+route('DELETE', '/api/reports/work/:id', (req, res, u, p) => { const s = RV.deleteSubmission(u, p.id); audit(u.id, 'report.work_deleted', { submission: s.id }, clientIp(req)); json(res, 200, { ok: true }); });
 // Final reports (edited by the editor), filed per client, channel and report type. Kept on this server.
 const FINAL_MIME = { pptx: PPTX_TYPE, pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
 route('GET', '/api/reports/finals', (req, res, u) => { const q = new URL(req.url, 'http://x').searchParams; const c = q.get('client') || null;

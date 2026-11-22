@@ -66,6 +66,7 @@ function simulate(body) {
 // Simulated answers for Reports: curation plans, labels and slide outlines (JSON, like the real model is asked for).
 function reportMock(sys, q) {
   try { sys = JSON.parse(sys); } catch {}
+  if (/You are the editor of a media-monitoring/.test(sys)) return JSON.stringify({ summary: 'Analisa sudah lengkap, tetapi judul slide masih berupa kesimpulan panjang dan rekomendasi belum operasional seperti pola URS.', score: 3, items: [{ slide: 2, issue: 'Judul slide berupa kalimat kesimpulan panjang', suggestion: 'Gunakan judul topik singkat, misalnya “Tren Ekspos”, lalu taruh kesimpulan di subjudul.' }, { slide: null, issue: 'Rekomendasi belum menyebut pihak dan tenggat', suggestion: 'Tulis rekomendasi dengan format: siapa — melakukan apa — kapan.' }] });
   if (/You plan data-curation steps/.test(sys) && /Weekly media massa/.test(q)) return JSON.stringify({ title: 'Weekly Medmas', explanation: 'Gabung, dedupe berlapis, noise, sentimen POV klien, sektor, isu, program, entitas, rekap.', steps: [
     { op: 'clean', columns: ['CONTENT'], actions: ['strip_html'] }, { op: 'clean', columns: [], actions: ['trim'] }, { op: 'dedupe_news' },
     { op: 'ai_filter', from: ['TITLE', 'CONTENT'], instruction: 'Berita tentang Kemnaker dan turunannya' },
@@ -675,6 +676,33 @@ try {
     await A.click('[data-r=tab][data-x=decks]'); if (await A.isVisible('[data-r=backdeck]')) await A.click('[data-r=backdeck]'); await A.waitForSelector('#rpLearn', { timeout: 10000 }); await A.locator('#rpLearn').scrollIntoViewIfNeeded(); await A.waitForTimeout(200); await A.screenshot({ path: path.join(OUT, 'server-report-finals-learn.png') });
     const checks = { filed: f1.status === 200 && f1.body.slides > 0 && f1.body.learn, serverOnlyFiled: f2.status === 200 && !f2.body.learn, duplicate409: dup.status === 409, previewUses: preview.finals?.using?.length === 1, learned, serverOnlyNeverSent: serverOnly, notesSay: /Learned from final report/.test(deck.notes || ''),
       optOut: noLearn.status === 200 && !!req2 && !req2.raw.includes('Final reports for this client'), analystCannotDelete: bDel.status === 403, localSearch: hits.length === 1 && hits[0].id === f2.body.id, download: file.status === 200 };
+    return ok(Object.values(checks).every(Boolean) && !leaks().length, Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' '));
+  });
+  await step(A, 'review-flow', 'Analyst work → editor stage (with URS knowledge and a URS check) → returned → resubmitted → approved into Final reports', async () => {
+    const cA = JSON.parse((await apiCall(A, '/api/reports')).body).clients.find(c => c.name === 'Kementerian A');
+    const dB = JSON.parse((await putJson(B, '/api/reports/decks', { client: cA.id, reportType: 'weekly', channel: 'medmas', period: '15–21 November 2026', title: 'Weekly Medmas Minggu 3', brief: 'Weekly minggu 3' }, 'POST')).body);
+    const sub = (page, deckId, b64, name, note) => page.evaluate(async ([deckId, b64, name, note]) => { const h = { 'x-canopus': '1', 'content-type': 'application/octet-stream', 'x-note': encodeURIComponent(note) }; if (name) h['x-filename'] = encodeURIComponent(name);
+      const r = await fetch(`/api/reports/decks/${deckId}/submit`, { method: 'POST', headers: h, body: b64 ? Uint8Array.from(atob(b64), c => c.charCodeAt(0)) : new Uint8Array(0) }); return { status: r.status, body: await r.json() }; }, [deckId, b64, name, note]);
+    const v1 = await sub(B, dB.id, null, null, 'Mohon cek slide sentimen');
+    const selfApprove = await apiCall(B, `/api/reports/work/${v1.body.id}/approve`, { method: 'POST', headers: { 'x-canopus': '1' } });
+    const queue = JSON.parse((await apiCall(A, '/api/reports/work')).body);
+    const sirius = JSON.parse((await apiCall(A, '/api/knowledge')).body).find(c => c.kind === 'senior' && c.name === 'Sirius');
+    const before = recorded.length; const chk = await putJson(A, `/api/reports/work/${v1.body.id}/check`, { urs: sirius.id }, 'POST'); const check = JSON.parse(chk.body);
+    const ursReq = recorded.slice(before).find(x => /You are the editor of a media-monitoring/.test(x.raw)); const ursSent = !!ursReq && ursReq.raw.includes('pattern of senior analyst ★Sirius') && ursReq.raw.includes('Weekly Medmas Minggu 3');
+    await A.goto(canopus.url + '#reports'); await A.reload(); await A.waitForSelector('#rpClient'); await A.selectOption('#rpClient', cA.id); await A.click('[data-r=tab][data-x=work]'); await A.waitForSelector('.rp-final', { timeout: 10000 }); await A.waitForTimeout(200); await A.screenshot({ path: path.join(OUT, 'server-review-queue.png') });
+    await A.click(`[data-r=openwork][data-x="${v1.body.id}"]`); await A.waitForSelector('.rp-urs'); await A.waitForTimeout(200); await A.screenshot({ path: path.join(OUT, 'server-review-editor.png'), fullPage: true });
+    const ret = await putJson(A, `/api/reports/work/${v1.body.id}/return`, { note: 'Judul slide berupa topik, rekomendasi pakai format siapa–apa–kapan' }, 'POST');
+    await B.goto(canopus.url + '#reports'); await B.reload(); await B.waitForSelector('#rpClient'); await B.selectOption('#rpClient', cA.id); await B.click('[data-r=tab][data-x=work]'); await B.waitForSelector('.rp-final', { timeout: 10000 }); await B.waitForTimeout(200); await B.screenshot({ path: path.join(OUT, 'server-review-analyst.png') });
+    const v2 = await sub(B, dB.id, fs.readFileSync(deckFile).toString('base64'), 'Weekly Minggu 3 revisi.pptx', 'Sudah direvisi sesuai catatan');
+    const v1After = JSON.parse((await apiCall(A, '/api/reports/work/' + v1.body.id)).body).status;
+    const { default: JSZip } = await import(path.join(SERVER_DIR, 'node_modules', 'jszip', 'lib', 'index.js'));
+    const zz = await JSZip.loadAsync(fs.readFileSync(deckFile)); const sl = Object.keys(zz.files).filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n)).sort((a, b) => parseInt(a.match(/\d+/)) - parseInt(b.match(/\d+/)))[1];
+    zz.file(sl, (await zz.file(sl).async('string')).replace(/<a:t>[^<]{3,}<\/a:t>/, '<a:t>Judul Diedit Editor</a:t>')); const edited = (await zz.generateAsync({ type: 'nodebuffer' })).toString('base64');
+    const appr = await A.evaluate(async ([sid, b64]) => { const r = await fetch(`/api/reports/work/${sid}/approve`, { method: 'POST', headers: { 'x-canopus': '1', 'content-type': 'application/octet-stream', 'x-filename': 'Weekly Minggu 3 FINAL.pptx', 'x-note': encodeURIComponent('Sudah sesuai URS'), 'x-learn': '1' }, body: Uint8Array.from(atob(b64), c => c.charCodeAt(0)) }); return { status: r.status, body: await r.json() }; }, [v2.body.id, edited]);
+    const b2 = recorded.length; await putJson(A, '/api/reports/decks', { client: cA.id, reportType: 'weekly', channel: 'medmas', brief: 'Weekly minggu 4' }, 'POST');
+    const next = recorded.slice(b2).find(x => /senior media and communications analyst/.test(x.raw)); const learnedEdits = !!next && next.raw.includes("What the editor changed from the analyst's version") && next.raw.includes('Judul Diedit Editor');
+    const checks = { submitted: v1.status === 200 && v1.body.status === 'review' && v1.body.version === 1, analystCannotApprove: selfApprove.status === 403, inQueue: queue.pending >= 1 && queue.items.some(w => w.id === v1.body.id), ursCheck: chk.status === 200 && check.score === 3 && check.items.length === 2, ursSent,
+      returned: ret.status === 200, resubmitted: v2.status === 200 && v2.body.version === 2 && v1After === 'superseded', approved: appr.status === 200 && appr.body.submission.status === 'final' && !!appr.body.final?.id, learnedEdits };
     return ok(Object.values(checks).every(Boolean) && !leaks().length, Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' '));
   });
   await step(A, 'audit-fixes', 'Audit fixes: out-of-credit stops with a clear message, zip bombs refused, URS rebuild limited to its owner, URS file metadata hidden', async () => {

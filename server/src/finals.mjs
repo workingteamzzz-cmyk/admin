@@ -15,6 +15,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS report_finals(id TEXT PRIMARY KEY, client_id
   title TEXT NOT NULL, filename TEXT NOT NULL, size INTEGER, sha256 TEXT, text TEXT NOT NULL DEFAULT '', structure TEXT NOT NULL DEFAULT '[]', slides INTEGER NOT NULL DEFAULT 0,
   deck_id TEXT, learn INTEGER NOT NULL DEFAULT 1, note TEXT NOT NULL DEFAULT '', created_by TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS report_finals_client ON report_finals(client_id, report_type, channel, created);`);
+try { db.exec(`ALTER TABLE report_finals ADD COLUMN submission_id TEXT`); } catch {}
 
 const err = (status, message) => Object.assign(new Error(message), { status });
 const DIR = () => { const d = path.join(config.dataDir, 'finals'); fs.mkdirSync(d, { recursive: true, mode: 0o700 }); return d; };
@@ -32,22 +33,22 @@ export function listFinals(user, clientId) {
 }
 export function finalCounts() { return all(`SELECT client_id, COUNT(*) n FROM report_finals GROUP BY client_id`); }
 
-export async function addFinal(user, { clientId, buf, filename, reportType, channel, period, title, deckId, learn, note }) {
+export async function addFinal(user, { clientId, buf, filename, reportType, channel, period, title, deckId, learn, note, submissionId = null }) {
   if (!one(`SELECT 1 FROM clients WHERE id=?`, clientId)) throw err(404, 'Choose a client first.');
   if (!/\.(pptx|pdf|docx)$/i.test(filename || '')) throw err(415, 'Upload the final report as PowerPoint (.pptx), PDF or Word (.docx).');
   if (!buf?.length) throw err(400, 'The file is empty.');
   const hash = sha256(buf); const dup = one(`SELECT title FROM report_finals WHERE client_id=? AND sha256=?`, clientId, hash);
-  if (dup) throw err(409, `This file is already filed as “${dup.title}”.`);
+  if (dup && !submissionId) throw err(409, `This file is already filed as “${dup.title}”.`);
   let pages = [], structure = [];
   try { pages = await extractText(buf, filename); } catch (e) { throw err(422, 'Could not read this file: ' + e.message); }
   if (/\.pptx$/i.test(filename)) { try { structure = describeTemplate(await openTemplate(buf)).structure.map(s => ({ title: s.title || '', has: s.has || [] })); } catch {} }
   if (!structure.length && /\.pptx$/i.test(filename)) structure = pages.map(p => ({ title: String(p).split('\n')[1] || '', has: [] }));
   const deck = deckId ? one(`SELECT id FROM decks WHERE id=? AND (user_id=? OR client_id=?)`, String(deckId), user.id, clientId) : null;
   const fid = id(); fs.writeFileSync(path.join(DIR(), fid), buf, { mode: 0o600 });
-  run(`INSERT INTO report_finals(id,client_id,report_type,channel,period,title,filename,size,sha256,text,structure,slides,deck_id,learn,note,created_by,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  run(`INSERT INTO report_finals(id,client_id,report_type,channel,period,title,filename,size,sha256,text,structure,slides,deck_id,learn,note,created_by,created,updated,submission_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     fid, clientId, pickType(reportType), pickChan(channel), String(period || '').trim().slice(0, 80), String(title || filename.replace(/\.[^.]+$/, '')).trim().slice(0, 160) || 'Final report',
     String(filename).slice(0, 200), buf.length, hash, pages.join('\n\n').slice(0, 200000), JSON.stringify(structure.slice(0, 60)), /\.pptx$/i.test(filename) ? pages.length : 0,
-    deck?.id || null, learn === false || learn === '0' ? 0 : 1, String(note || '').slice(0, 1000), user.id, now(), now());
+    deck?.id || null, learn === false || learn === '0' ? 0 : 1, String(note || '').slice(0, 1000), user.id, now(), now(), submissionId);
   return out(one(`SELECT * FROM report_finals WHERE id=?`, fid), user);
 }
 function finalRow(fid) { const f = one(`SELECT * FROM report_finals WHERE id=?`, fid); if (!f) throw err(404, 'Final report not found'); return f; }
@@ -89,12 +90,14 @@ export function finalsPreview(clientId, typeId, channel) {
 const titlesOf = f => { try { return JSON.parse(f.structure || '[]').map(s => s.title).filter(Boolean); } catch { return []; } };
 // What the editor changed: Canopus' draft slide titles next to the final ones, when the final was filed from a deck.
 function editorChanges(f) {
-  if (!f.deck_id) return '';
-  const d = one(`SELECT outline FROM decks WHERE id=?`, f.deck_id); let draft = [];
-  try { draft = (JSON.parse(d?.outline || '{}').slides || []).map(s => s.title).filter(Boolean); } catch {}
+  let draft = [], who = "Canopus' draft", tag = 'Canopus';
+  const sub = f.submission_id ? one(`SELECT structure FROM report_submissions WHERE id=?`, f.submission_id) : null;
+  if (sub) { try { draft = JSON.parse(sub.structure || '[]').map(s => s.title).filter(Boolean); who = "the analyst's version"; tag = 'analyst'; } catch {} }
+  if (!draft.length && f.deck_id) { const d = one(`SELECT outline FROM decks WHERE id=?`, f.deck_id); try { draft = (JSON.parse(d?.outline || '{}').slides || []).map(s => s.title).filter(Boolean); } catch {} }
+  if (!draft.length) return '';
   const fin = titlesOf(f); if (!draft.length || !fin.length) return '';
-  const changed = []; for (let i = 0; i < Math.max(draft.length, fin.length) && changed.length < 20; i++) if ((draft[i] || '') !== (fin[i] || '')) changed.push(`- Canopus: ${draft[i] || '(none)'}  →  editor: ${fin[i] || '(removed)'}`);
-  return changed.length ? `\nWhat the editor changed from Canopus' draft (learn these corrections):\n${changed.join('\n')}` : '';
+  const changed = []; for (let i = 0; i < Math.max(draft.length, fin.length) && changed.length < 20; i++) if ((draft[i] || '') !== (fin[i] || '')) changed.push(`- ${tag}: ${draft[i] || '(none)'}  →  editor: ${fin[i] || '(removed)'}`);
+  return changed.length ? `\nWhat the editor changed from ${who} (learn these corrections):\n${changed.join('\n')}` : '';
 }
 // The note added to the drafting request. The caller masks it like the rest of the request.
 export function finalsNote(clientId, typeId, channel) {
