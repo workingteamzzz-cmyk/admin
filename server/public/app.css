@@ -700,3 +700,10 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 .rp-cover.on{border-color:var(--gold);box-shadow:0 0 0 2px rgba(244,199,106,.35)}
 .rp-cover input{display:none}
 .rp-covopts{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}
+
+.rp-types{flex-wrap:wrap}
+.rp-typeinfo{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:8px 0 4px;font-size:13.5px;background:var(--bg)}
+.rp-typeinfo>div{color:var(--muted);margin-top:3px;line-height:1.5}
+.rp-typeinfo details{margin-top:6px}
+.rp-typeinfo summary{cursor:pointer;color:var(--fg);font-size:13px}
+.rp-typeinfo pre{white-space:pre-wrap;font:12.5px/1.55 var(--mono);margin:6px 0 0;color:var(--muted)}

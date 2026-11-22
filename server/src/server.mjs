@@ -482,6 +482,7 @@ route('POST', '/api/reports/clients/:id/logos', async (req, res, u, p) => { cons
 route('DELETE', '/api/reports/clients/:id/logos/:lid', (req, res, u, p) => { R.removeClientLogo(u, p.id, p.lid); json(res, 200, { ok: true }); });
 route('GET', '/api/reports/clients/:id/logos/:lid', (req, res, u, p) => { const l = R.clientLogoFile(p.id, p.lid); res.writeHead(200, { 'content-type': l.mime, 'cache-control': 'private, max-age=3600', 'content-security-policy': 'sandbox' }); res.end(l.buf); });
 route('GET', '/api/reports/styles', (req, res, u) => json(res, 200, R.stylesFor(new URL(req.url, 'http://x').searchParams.get('client') || null)));
+route('PUT', '/api/reports/clients/:id/structures', async (req, res, u, p) => { R.setClientStructure(u, p.id, await readJson(req, 30e3)); json(res, 200, { ok: true }); });
 route('PUT', '/api/reports/clients/:id/style', async (req, res, u, p) => { R.setClientStyle(u, p.id, (await readJson(req, 20e3)).style); json(res, 200, { ok: true }); });
 route('POST', '/api/reports/decks/:id/finalize', async (req, res, u, p) => {
   const body = await readJson(req, 10e3); const k = await R.refinalizeDeck(u, p.id, body);

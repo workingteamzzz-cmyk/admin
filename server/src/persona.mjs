@@ -32,7 +32,7 @@ export function parsePersona(value, fields) {
   const out = {}; for (const [k] of fields) { const v = String(o?.[k] ?? '').trim().slice(0, k === 'issues' ? 12000 : 2000); if (v) out[k] = v; }
   return out;
 }
-const lines = (p, fields) => fields.filter(([k]) => p[k]).map(([k, label]) => `- ${label}: ${p[k]}`).join('\n');
+const lines = (p, fields) => fields.filter(([k]) => p[k] && k !== 'structure').map(([k, label]) => `- ${label}: ${p[k]}`).join('\n');
 
 export function analystBlock(user) {
   const p = parsePersona(user?.persona, ANALYST_FIELDS); if (!Object.keys(p).length) return '';

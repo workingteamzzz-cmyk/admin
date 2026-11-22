@@ -61,6 +61,10 @@ Canopus supports a full weekly-report flow — Excel first, then the deck — wh
 - **Style**: pick a style per client or per deck — presets (Editorial data, Government classic, Modern bold, Minimal monochrome, Warm professional) or a palette recommended from the client's logo colours; applied to any template's theme colours and fonts. With several logos, the darkest goes on light slides and the brightest on dark covers.
 - **House style**: the team's default writing rules live in Admin → Settings and can be changed; the client's persona and structure always win.
 
+## Report types
+
+Ad-hoc, Daily, Weekly, Bi-weekly, Monthly, Bi-monthly, Quarterly, Semesterly and Yearly. The type changes the content: the period, how trends are bucketed (hour/outlet → day → week → month → quarter), what is compared (yesterday, last week, last month…, only when the data covers it), the focus (early warning for daily; patterns and next-week actions for weekly; programs and strategy for monthly; KPIs and strategic issues for quarterly; milestones for semester; the year in review for yearly), and a default structure with a slide limit. Each client can set its own structure per type (client page → Report structures). Ad-hoc follows the request. The curation planner also uses the type to choose the trend summary.
+
 ## Knowledge spaces for many people
 
 - **Team knowledge — for everyone:** one shared space; every user can add files and everyone can search and open them.
