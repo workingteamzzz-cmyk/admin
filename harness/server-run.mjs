@@ -716,6 +716,7 @@ try {
     const kB = JSON.parse((await apiCall(B, '/api/knowledge')).body); const team = kB.find(c => c.kind === 'team');
     const upload = cid => apiCall(B, `/api/knowledge/collections/${cid}/docs`, { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': `catatan-${Date.now()}.txt`, 'content-type': 'text/plain' }, body: 'Catatan tim ' + Date.now() });
     const asAnalyst = await upload(team.id);
+    await B.goto(canopus.url + '#knowledge'); await B.waitForTimeout(500); await B.screenshot({ path: path.join(OUT, 'server-role-analyst.png') });
     const uidB = JSON.parse((await apiCall(A, '/api/admin/overview')).body).users.find(u => u.email === 'staf@kantor.go.id').id;
     const ursToAnalyst = await putJson(A, '/api/knowledge/seniors', { name: 'Vega', userId: uidB }, 'POST');
     await putJson(A, '/api/admin/users/' + uidB, { role: 'ultimate' }, 'PATCH');
@@ -723,6 +724,9 @@ try {
     const role = JSON.parse((await apiCall(A, '/api/admin/overview')).body).users.find(u => u.id === uidB).role;
     const vega = JSON.parse((await apiCall(B, '/api/knowledge')).body).find(c => c.name === 'Vega'); const ownUrs = await upload(vega.id);
     await A.goto(canopus.url + '#admin'); await A.click('[data-atab=users]'); await A.waitForTimeout(300); await A.screenshot({ path: path.join(OUT, 'server-roles.png') });
+    await B.goto(canopus.url + '#knowledge'); await B.reload(); await B.waitForTimeout(800); await B.evaluate(() => document.querySelector('#space-' + [...document.querySelectorAll('.col-card')].find(e => /Vega/.test(e.textContent))?.id.slice(6))?.scrollIntoView({ block: 'center' })); await B.waitForTimeout(200); await B.screenshot({ path: path.join(OUT, 'server-role-ultimate.png') });
+    await A.click(`[data-edituser="${uidB}"]`); await A.waitForTimeout(300); await A.evaluate(() => { const s = document.querySelector('#uRole'); s.value = 'ultimate'; s.size = 3; s.style.height = 'auto'; });
+    await A.screenshot({ path: path.join(OUT, 'server-role-picker.png') }); await A.keyboard.press('Escape');
     return ok(asAnalyst.status === 403 && ursToAnalyst.status === 400 && role === 'ultimate' && asUltimate.status === 200 && ursOk.status === 200 && ownUrs.status === 200,
       `analyst → team ${asAnalyst.status} · URS linked to an analyst ${ursToAnalyst.status} · role ${role} · ultimate → team ${asUltimate.status} · URS created ${ursOk.status} · ultimate → own URS ${ownUrs.status}`);
   });
