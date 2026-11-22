@@ -18,11 +18,17 @@ export const CLIENT_FIELDS = [
   ['use', 'Terms to use', 'e.g. "penerima manfaat", official program names'],
   ['avoid', 'Terms to avoid', 'e.g. "gratisan", jargon, names not to mention'],
   ['sensitive', 'Sensitive issues', 'Topics that need care or sign-off'],
+  ['people', 'Leaders and officials', 'e.g. Menteri: Yassierli; Wakil Menteri: Afriansyah Noor; Dirjen …'],
+  ['programs', 'Programs and platforms (with spelling variants)', 'e.g. SIAPkerja (Siap Kerja); MagangHub (Magang Hub, Magang Nasional); KarirHub …'],
+  ['sentiment', 'Sentiment rules (client point of view)', 'e.g. Negatif only if it harms the client; Netral = not tendentious; Positif = builds the client image'],
+  ['sectors', 'Sectors / priority programs', 'e.g. Peningkatan Kualitas SDM; Penciptaan Kesempatan Kerja yang Layak; Transformasi Dunia Kerja'],
+  ['issues', 'Reference issue list', 'One issue per line (or separated by ;). Used to keep issue names consistent week to week and between media and social media'],
+  ['spelling', 'Spelling and naming rules', 'e.g. Sumatera → Sumatra; Kemenaker → Kemnaker'],
 ];
 
 export function parsePersona(value, fields) {
   let o = value; if (typeof o === 'string') { try { o = JSON.parse(o); } catch { o = {}; } }
-  const out = {}; for (const [k] of fields) { const v = String(o?.[k] ?? '').trim().slice(0, 1500); if (v) out[k] = v; }
+  const out = {}; for (const [k] of fields) { const v = String(o?.[k] ?? '').trim().slice(0, k === 'issues' ? 12000 : 2000); if (v) out[k] = v; }
   return out;
 }
 const lines = (p, fields) => fields.filter(([k]) => p[k]).map(([k, label]) => `- ${label}: ${p[k]}`).join('\n');

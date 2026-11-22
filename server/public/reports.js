@@ -9,13 +9,17 @@ const DATA_CHIPS = ['Per sentimen: bersihkan data, buang duplikat, beri label se
   'Per topik: bersihkan data, buang duplikat, kelompokkan berita ke dalam topik/isu utama secara otomatis, lalu rekap per topik, topik per media, dan tren harian',
   'Sentimen dan topik: bersihkan, buang duplikat, beri label sentimen dan topik, lalu rekap topik × sentimen, per media, dan tren harian',
   'Hanya berita bersentimen negatif; rekap per topik, media dan narasumber'];
-const CHIP_LABELS = ['By sentiment', 'By topic', 'Sentiment + topic', 'Negative coverage only'];
+const CHIP_LABELS = ['By sentiment', 'By topic', 'Sentiment + topic', 'Negative coverage only', 'Weekly media massa (full)', 'Weekly media sosial (full)'];
+DATA_CHIPS.push(
+  'Weekly media massa: gunakan tabel gabungan (kolom MEDIA TYPE). Bersihkan tag HTML di konten. Cek duplikat berlapis: URL sama termasuk varian amp/mobile/utm, judul sama di media yang sama, isi identik atau nyaris identik di media yang sama; berita sama di media berbeda bukan duplikat. Hapus noise yang tidak berkaitan dengan klien dan turunannya (pejabat, unit, program), termasuk yang hanya disebut di "Baca juga" dan kementerian negara lain. Beri SENTIMENT dari sudut pandang klien sesuai aturan sentimen di persona, konsisten untuk berita sindikasi. Beri SEKTOR sesuai persona. Beri ISU yang representatif dari isi konten: pakai daftar isu acuan klien, isu serupa digabung, boleh isu baru bila tidak ada yang cocok. Beri PROGRAM dari daftar program klien (lebih dari satu dipisah koma, tidak ada "-"). Rapikan kolom entitas (person, organization, influencer) dan isi sel kosong dengan "-". Rekap: sentimen per media type, sektor × sentimen, program × sentimen, isu × sentimen, top 10 media per media type, tren harian per sentimen, top 10 spokesperson.',
+  'Weekly media sosial: gabungkan semua file (kolom PLATFORM). Bersihkan HTML dan spasi berlebih. Hapus duplikat: URL/ID post sama termasuk varian URL, akun sama dengan teks identik di hari yang sama; repost dari akun berbeda bukan duplikat. Hapus noise: tidak berkaitan dengan klien, hanya hashtag tempelan, spam loker/giveaway/jualan, kementerian negara lain. SENTIMENT dari sudut pandang klien sesuai persona (keluhan layanan = negatif; keluhan umum yang tidak menyalahkan klien = netral), konsisten untuk post yang sama. SEKTOR dan ISU memakai daftar isu acuan klien supaya sama dengan laporan media massa. PROGRAM dari daftar program klien. Rapikan kolom akun/entitas, isi sel kosong dengan "-". Rekap: sentimen per platform, sektor × sentimen, program × sentimen, isu × sentimen, top akun.');
 const DECK_CHIPS = ['Laporan monitoring media mingguan untuk pimpinan', 'Analisis isu negatif dan rekomendasi strategi komunikasi', 'Ringkasan eksekutif 5 slide', 'Bahan rapat koordinasi humas: temuan, risiko, dan rencana aksi'];
 
 export function initReports(ctx) {
   C = ctx;
   document.addEventListener('click', onClick);
-  document.addEventListener('change', async e => { if (e.target.id === 'rpDsFile') uploadDataset(e.target.files); if (e.target.id === 'rpTplFile') uploadTemplate(e.target.files); if (e.target.id === 'rpDocFile') uploadClientDocs(e.target.files);
+  document.addEventListener('change', async e => { if (e.target.id === 'rpDsFile') uploadDataset(e.target.files); if (e.target.id === 'rpDsMore') addDatasetFile(e.target.files);
+    if (e.target.classList?.contains('rp-flabel')) { try { S.ds = await C.api(`/api/reports/datasets/${S.ds.id}/files/${e.target.dataset.fi}`, { method: 'PATCH', body: { label: e.target.value } }); renderReports(); C.toast('Label saved'); } catch (err) { C.toast(err.message, 4000); } } if (e.target.id === 'rpTplFile') uploadTemplate(e.target.files); if (e.target.id === 'rpDocFile') uploadClientDocs(e.target.files);
     if (e.target.dataset?.tplmove) { try { await C.api('/api/reports/templates/' + e.target.dataset.tplmove, { method: 'PATCH', body: { clientId: e.target.value || null } }); await load(); renderReports(); C.toast('Template moved'); } catch (err) { C.toast(err.message, 4000); } } });
 }
 async function load() { const r = await C.api('/api/reports'); Object.assign(S, { clients: r.clients, templates: r.templates, datasets: r.datasets, decks: r.decks, meta: r.meta });
@@ -90,6 +94,11 @@ function dataHome() {
     ${S.datasets.filter(inClient).length ? `<div class="tblwrap"><table class="tbl"><thead><tr><th>Dataset</th><th class="r">Rows</th><th>Status</th><th>Updated</th><th></th></tr></thead><tbody>${S.datasets.filter(inClient).map(d => `<tr><td><a href="#" data-r="opends" data-x="${d.id}"><b>${esc(d.name)}</b></a><div class="muted">${d.clientId ? esc(clientName(d.clientId)) + ' · ' : ''}${esc(d.filename)} · ${C.fmtSize(d.size)}</div></td><td class="r">${(d.result_rows ?? d.rows ?? 0).toLocaleString('id-ID')}</td><td>${d.curated ? '<span class="cls biasa">Curated</span>' : d.planned ? '<span class="cls processing">Plan ready</span>' : '<span class="cls">New</span>'}</td><td class="muted">${C.ago(d.updated)}</td><td class="r"><button class="btn sm" data-r="opends" data-x="${d.id}">Open</button></td></tr>`).join('')}</tbody></table></div>`
       : `<div class="empty-box"><div class="e-ic">${ic('table')}</div><b>No datasets yet</b><p>Upload a monitoring spreadsheet to start.</p></div>`}`);
 }
+async function addDatasetFile(files) {
+  const f = files?.[0]; if (!f || !S.ds) return; C.toast('Adding ' + f.name + '…');
+  try { S.ds = await C.api(`/api/reports/datasets/${S.ds.id}/files`, { method: 'POST', raw: f, headers: { 'content-type': f.type || 'application/octet-stream', 'x-filename': encodeURIComponent(f.name) } }); S.plan = S.ds.plan; renderReports(); C.toast('File merged'); }
+  catch (e) { C.toast(e.message, 5000); }
+}
 async function uploadDataset(files) {
   const f = files?.[0]; if (!f) return; C.toast('Reading ' + f.name + '…');
   try { const d = await C.api('/api/reports/datasets', { method: 'POST', raw: f, headers: { 'content-type': f.type || 'application/octet-stream', 'x-filename': encodeURIComponent(f.name), 'x-client': S.client } }); S.ds = d; S.plan = null; S.explanation = ''; S.dsResultTab = 0; await load(); renderReports(); }
@@ -117,7 +126,8 @@ function dsView() {
   const steps = S.plan?.steps || [];
   body(`<div class="bar" style="align-items:center"><button class="btn sm" data-r="back">← All datasets</button><h2 style="flex:1;margin:0;font-size:20px">${esc(d.name)}</h2>
       <button class="btn sm" data-r="renameds">${ic('edit')}Rename</button>${d.result ? `<button class="btn sm" data-r="askds">${ic('chat')}Ask in chat</button><button class="btn sm primary" data-r="xlsx">${ic('download')}Download Excel</button>` : ''}<button class="icon-btn" data-r="delds" title="Delete">${ic('trash')}</button></div>
-    <div class="set-sec"><h3>${ic('table')}Source: ${esc(d.filename)}</h3>
+    <div class="set-sec"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><h3 style="flex:1;margin:0">${ic('table')}Source${d.files?.length > 1 ? `: ${d.files.length} files merged` : `: ${esc(d.filename)}`}</h3><button class="btn sm" data-r="addfile">${ic('plus')}Add another file</button><input type="file" id="rpDsMore" accept=".xlsx,.csv,.tsv" hidden></div>
+      ${d.files?.length > 1 ? `<div class="rp-files">${d.files.map((f, i) => `<div class="doc-row">${ic('file')}<span class="t">${esc(f.name)}</span><label class="help" style="margin:0">MEDIA TYPE</label><input type="text" class="rp-flabel" data-fi="${i}" value="${esc(f.label)}"></div>`).join('')}<p class="help">Files are merged into one table by column name; the label of each file goes into the MEDIA TYPE column.</p></div>` : '<p class="help" style="margin-top:6px">Monitoring exported in several files (e.g. ONLINE and PRINTED)? Add the other files: they are merged into one table with a MEDIA TYPE column.</p>'}
       ${d.sheets.length > 1 ? `<div class="seg" style="margin-bottom:10px">${d.sheets.map(s => `<button class="${s.name === sh.name ? 'on' : ''}" data-r="sheet" data-x="${esc(s.name)}">${esc(s.name)} (${s.rows})</button>`).join('')}</div>` : ''}
       <p class="help">${sh.rows.toLocaleString('id-ID')} rows · ${sh.columns.length} columns${sh.skipped ? ` · ${sh.skipped} title row${sh.skipped > 1 ? 's' : ''} above the header skipped` : ''}${sh.personal.length ? ` · ${ic('lock')} personal-data columns never sent to the AI: ${sh.personal.map(esc).join(', ')}` : ''}</p>
       ${tableHTML(sh.columns, sh.preview, sh.personal)}</div>
@@ -146,6 +156,8 @@ function resultHTML(d) {
   const tabs = [{ name: `Data (${d.result.table.rows.toLocaleString('id-ID')} rows)`, columns: d.result.table.columns, rows: d.result.table.preview }, ...d.result.summaries.map(s => ({ name: s.name, columns: s.columns, rows: s.rows }))];
   const cur = tabs[Math.min(S.dsResultTab, tabs.length - 1)]; const failed = (d.log || []).filter(l => !l.ok);
   return `<div class="set-sec"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="flex:1;margin:0">${ic('check')}Result</h3><button class="btn sm primary" data-r="todeck">${ic('layers')}Next: Claude builds the deck →</button><button class="btn sm" data-r="xlsx">${ic('download')}Download Excel</button></div>
+    ${d.result.removed ? `<p class="help" style="margin-top:10px">${ic('check')} Data awal ${(d.result.initial ?? 0).toLocaleString('id-ID')} = final ${d.result.table.rows.toLocaleString('id-ID')} + duplikat ${(d.result.removedBy?.Duplikat || 0).toLocaleString('id-ID')} + noise ${(d.result.removedBy?.Noise || 0).toLocaleString('id-ID')}${d.result.removedBy?.Lainnya ? ` + difilter ${d.result.removedBy.Lainnya.toLocaleString('id-ID')}` : ''}. Every removed row is listed in the “Log Pembersihan” sheet.</p>` : ''}
+    ${(d.log || []).filter(l => l.ok && l.op === 'ai_tag' && l.labels?.length > 6).map(l => `<div class="notice" style="margin-top:8px">${esc(l.text)} — ${l.labels.length} labels${l.consistency ? ` · ${l.consistency} made consistent across outlets` : ''}. <button class="btn sm" data-r="saveissues" data-labels="${esc(JSON.stringify(l.labels))}">${ic('archive')}Save as the client's issue list</button></div>`).join('')}
     ${failed.length ? `<div class="notice" style="margin-top:10px">${failed.length} step${failed.length > 1 ? 's were' : ' was'} skipped: ${failed.map(l => `${esc(l.text)} — ${esc(l.error)}`).join('; ')}</div>` : ''}
     <div class="seg" style="margin:12px 0;flex-wrap:wrap">${tabs.map((t, i) => `<button class="${t === cur ? 'on' : ''}" data-r="rtab" data-x="${i}">${esc(t.name)}</button>`).join('')}</div>
     ${tableHTML(cur.columns, cur.rows)}${cur === tabs[0] && d.result.table.rows > cur.rows.length ? `<p class="help">Showing the first ${cur.rows.length} rows. The Excel file has all of them, plus the summaries and a sheet listing each curation step.</p>` : ''}</div>`;
@@ -321,6 +333,11 @@ async function onClick(e) {
       case 'tab': S.tab = x; if (x === 'decks') S.deck = null; renderReports(); break;
       case 'pickds': $('#rpDsFile').click(); break;
       case 'pickdoc': $('#rpDocFile').click(); break;
+      case 'addfile': $('#rpDsMore').click(); break;
+      case 'saveissues': { const c = S.clients.find(k => k.id === (S.ds.clientId || S.client)); if (!c) { C.toast('Choose a client first'); break; }
+        const labels = JSON.parse(t.dataset.labels || '[]'); const cur = (c.persona?.issues || '').split(/[\n;]+/).map(x => x.trim()).filter(Boolean); const merged = [...new Set([...cur, ...labels])];
+        await C.api('/api/reports/clients/' + c.id, { method: 'PUT', body: { name: c.name, description: c.description, instructions: c.instructions, persona: { ...(c.persona || {}), issues: merged.join('\n') } } });
+        await load(); C.toast(`${merged.length - cur.length} new issue${merged.length - cur.length === 1 ? '' : 's'} saved to ${c.name}'s reference list`); break; }
       case 'newclient': clientModal(null); break;
       case 'editclient': clientModal(curClient()); break;
       case 'openclient': S.client = x; savePrefs({ client: x }); S.clientDocs = null; renderReports(); break;

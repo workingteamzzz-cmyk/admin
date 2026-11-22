@@ -66,6 +66,19 @@ function simulate(body) {
 // Simulated answers for Reports: curation plans, labels and slide outlines (JSON, like the real model is asked for).
 function reportMock(sys, q) {
   try { sys = JSON.parse(sys); } catch {}
+  if (/You plan data-curation steps/.test(sys) && /Weekly media massa/.test(q)) return JSON.stringify({ title: 'Weekly Medmas', explanation: 'Gabung, dedupe berlapis, noise, sentimen POV klien, sektor, isu, program, entitas, rekap.', steps: [
+    { op: 'clean', columns: ['CONTENT'], actions: ['strip_html'] }, { op: 'clean', columns: [], actions: ['trim'] }, { op: 'dedupe_news' },
+    { op: 'ai_filter', from: ['TITLE', 'CONTENT'], instruction: 'Berita tentang Kemnaker dan turunannya' },
+    { op: 'ai_tag', column: 'SENTIMENT', from: ['TITLE', 'CONTENT'], labels: ['Positif', 'Netral', 'Negatif'], instruction: 'Sudut pandang Kemnaker', consistent_by: 'TITLE' },
+    { op: 'ai_tag', column: 'SEKTOR', from: ['TITLE', 'CONTENT'], labels: ['Peningkatan Kualitas Sumber Daya Manusia', 'Penciptaan Kesempatan Kerja yang Layak', 'Transformasi Dunia Kerja'] },
+    { op: 'ai_tag', column: 'ISU', from: ['TITLE', 'CONTENT'], labels: [], seed: 'client', allow_new: true, consistent_by: 'TITLE' },
+    { op: 'keywords', column: 'PROGRAM KEMNAKER', from: ['TITLE', 'CONTENT'], terms: ['SIAPkerja=siapkerja|siap kerja', 'MagangHub=maganghub|magang hub|magang nasional', 'KarirHub=karirhub', 'SkillHub=skillhub', 'SertiHub=sertihub', 'BizHub=bizhub|bishub'] },
+    { op: 'ai_normalize', column: 'PERSON' }, { op: 'fill', columns: [], value: '-' },
+    { op: 'summary', name: 'Sentimen per Media Type', group_by: ['MEDIA TYPE', 'SENTIMENT'], measures: [{ fn: 'count', as: 'Jumlah' }] },
+    { op: 'summary', name: 'Program', group_by: ['PROGRAM KEMNAKER'], explode: true, measures: [{ fn: 'count', as: 'Jumlah' }] },
+    { op: 'summary', name: 'Top Media', group_by: ['MEDIA TYPE', 'MEDIA'], measures: [{ fn: 'count', as: 'Jumlah' }], top: 10, top_per_group: true },
+    { op: 'pivot', name: 'Isu x Sentimen', rows: 'ISU', columns: 'SENTIMENT' }] });
+  if (/You clean a column of names/.test(sys)) { const out = {}; for (const m of q.matchAll(/^(\d+)\. (.*)$/gm)) out[m[1]] = /^(saya|kami)$/i.test(m[2]) ? '-' : m[2].includes('+') ? m[2].split('+').map(w => w[0].toUpperCase() + w.slice(1)).join(' ') : m[2]; return JSON.stringify(out); }
   if (/You plan data-curation steps/.test(sys)) return JSON.stringify({ title: 'Monitoring kurasi', explanation: 'Membersihkan data, membuang duplikat, melabeli sentimen yang kosong, lalu merekap.', steps: [
     { op: 'clean', columns: [], actions: ['trim', 'empty_words'] }, { op: 'replace', column: 'Nama Media', pairs: [['kompas', 'Kompas'], ['KOMPAS', 'Kompas']] },
     { op: 'dedupe', columns: ['Link'] }, { op: 'clean', columns: ['Tanggal'], actions: ['date'] }, { op: 'clean', columns: ['Sentimen'], actions: ['title'] },
@@ -76,7 +89,10 @@ function reportMock(sys, q) {
     { op: 'pivot', name: 'Tren Sentimen', rows: 'Tanggal', columns: 'Sentimen', fn: 'count' }] });
   if (/You design a small set of categories/.test(sys)) return JSON.stringify({ labels: ['Distribusi', 'Anggaran', 'Layanan Digital'] });
   if (/You label texts/.test(sys)) { const allowed = [...sys.matchAll(/"([^"]+)"/g)].map(m => m[1]); const out = {};
-    for (const m of q.matchAll(/^(\d+)\. (.*)$/gm)) { const t = m[2]; const pick = /keluh|kritik|terlambat/i.test(t) ? ['Negatif', 'Distribusi', 'Anggaran'] : /resmi|diperluas|kolaborasi/i.test(t) ? ['Positif', 'Layanan Digital'] : ['Netral', 'Lainnya'];
+    for (const m of q.matchAll(/^(\d+)\. (.*)$/gm)) { const t = m[2]; if (allowed.includes('Relevan')) { out[m[1]] = /korea|taiwan/i.test(t) ? 'Noise: kementerian/lembaga negara lain' : /baca juga/i.test(t) && !/kemnaker.*kemnaker/i.test(t) ? 'Noise: hanya disebut di Baca juga' : 'Relevan'; continue; }
+      if (allowed.includes('Pendaftaran Peserta MagangHub Batch 3')) { out[m[1]] = /magang/i.test(t) ? 'Pendaftaran Peserta MagangHub Batch 3' : /phk/i.test(t) ? 'Data PHK dan Desakan DPR' : 'NEW: Sertifikasi Kompetensi Pekerja'; continue; }
+      if (allowed.includes('Transformasi Dunia Kerja')) { out[m[1]] = /magang|pelatihan|sertifikasi/i.test(t) ? 'Peningkatan Kualitas Sumber Daya Manusia' : /phk|lowongan/i.test(t) ? 'Penciptaan Kesempatan Kerja yang Layak' : 'Transformasi Dunia Kerja'; continue; }
+      const pick = /keluh|kritik|terlambat|desak/i.test(t) ? ['Negatif', 'Distribusi', 'Anggaran'] : /resmi|diperluas|kolaborasi|dibuka/i.test(t) ? ['Positif', 'Layanan Digital'] : ['Netral', 'Lainnya'];
       out[m[1]] = pick.find(x => allowed.includes(x)) || allowed[0]; }
     return JSON.stringify(out); }
   if (/senior communications analyst/.test(sys)) { const ds = q.match(/### (.+?) \/ Data/)?.[1] || 'Data'; const ref = /Reference structure/.test(q);
@@ -549,11 +565,47 @@ try {
     const id = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.datasets[0].id)); const d = JSON.parse((await apiCall(A, '/api/reports/datasets/' + id)).body);
     return ok(plans === 0 && tags === 0 && d.result.table.rows === 24 && d.result.summaries.length === 3, `AI planning requests ${plans} · labelling requests ${tags} (labels reused) · rows ${d.result.table.rows} · summaries ${d.result.summaries.length}`);
   });
+  await step(A, 'report-medmas', 'Weekly media massa: ONLINE + PRINTED merged, layered duplicates, noise, client-POV labels, programs, clean Excel with formulas and a cleaning log', async () => {
+    const H = 'Date;Media;Title;Content;URL;Person;Organization';
+    const body = 'Kementerian Ketenagakerjaan membuka pendaftaran MagangHub batch 3 bagi lulusan baru dengan pendampingan mentor industri di banyak daerah. Menaker Yassierli menyebut Magang Nasional sebagai jembatan ke dunia kerja melalui SIAPkerja.';
+    const online = [H,
+      `26/10/2026;detik;Pendaftaran MagangHub Batch 3 Dibuka;<p>${body}</p>;https://www.detik.com/read/1;yassierli;Kemnaker`,
+      `26/10/2026;detik;Pendaftaran MagangHub Batch 3 Dibuka;<p>${body}</p>;https://m.detik.com/read/1?utm_source=fb;Saya;Kemnaker`,
+      `26/10/2026;detik;MagangHub batch 3 resmi dibuka;<p>${body} Kuota ditambah.</p>;https://www.detik.com/read/2;-;`,
+      `26/10/2026;kompas;Pendaftaran MagangHub Batch 3 Dibuka;<p>${body}</p>;https://www.kompas.com/a/9;agus+harimurti+yudhoyono;`,
+      `27/10/2026;antara;DPR desak Kemnaker buka data PHK;DPR mendesak Kemnaker membuka data 63.789 PHK.;https://www.antaranews.com/b/1;;DPR`,
+      `27/10/2026;antara;Kementerian tenaga kerja Korea umumkan kuota;Labor ministry of Korea announces quota.;https://www.antaranews.com/k/1;;`,
+      `28/10/2026;tempo;Harga cabai naik;Pasar ramai. Baca juga: Kemnaker buka MagangHub.;https://www.tempo.co/c/1;;`].join('\n');
+    const printed = ['Tanggal;Media;Title;Content;Person', `27/10/2026;Kompas Cetak;Kemnaker dorong sertifikasi pekerja;SertiHub dan Siap Kerja diperkuat untuk sertifikasi kompetensi.;Afriansyah Noor`].join('\n');
+    fs.writeFileSync(path.join(FIX, 'ONLINE_isu_tenaga_kerja.csv'), online); fs.writeFileSync(path.join(FIX, 'PRINTED_isu_tenaga_kerja.csv'), printed);
+    const all0 = JSON.parse((await apiCall(A, '/api/reports')).body); const cA = all0.clients.find(c => c.name === 'Kementerian A');
+    await putJson(A, '/api/reports/clients/' + cA.id, { name: cA.name, description: cA.description, instructions: cA.instructions, persona: { ...cA.persona,
+      people: 'Menteri: Yassierli; Wakil Menteri: Afriansyah Noor', programs: 'SIAPkerja; MagangHub (Magang Nasional); KarirHub; SkillHub; SertiHub; BizHub',
+      sentiment: 'Negatif hanya jika negatif terhadap Kemnaker. Netral: tidak tendensius. Positif: positif terhadap citra Kemnaker.', sectors: 'Peningkatan Kualitas Sumber Daya Manusia; Penciptaan Kesempatan Kerja yang Layak; Transformasi Dunia Kerja',
+      issues: 'Peningkatan Kualitas Sumber Daya Manusia:\nPendaftaran Peserta MagangHub Batch 3\nPenciptaan Kesempatan Kerja yang Layak:\nData PHK dan Desakan DPR', spelling: 'Sumatera → Sumatra' } });
+    await A.goto(canopus.url + '#reports'); await A.reload(); await A.waitForSelector('#rpClient'); await A.selectOption('#rpClient', cA.id); await A.click('[data-r=tab][data-x=data]'); await A.waitForSelector('[data-r=pickds]');
+    await A.setInputFiles('#rpDsFile', path.join(FIX, 'ONLINE_isu_tenaga_kerja.csv')); await A.waitForSelector('[data-r=addfile]', { timeout: 10000 });
+    await A.setInputFiles('#rpDsMore', path.join(FIX, 'PRINTED_isu_tenaga_kerja.csv')); await A.waitForFunction(() => /2 files merged/.test(document.querySelector('#rpBody')?.textContent || ''), null, { timeout: 10000 });
+    await A.click('[data-r=dchip][data-x="4"]'); await A.click('[data-r=plan]'); await A.waitForSelector('.rp-step', { timeout: TIMEOUT }); await A.click('[data-r=run]'); await A.waitForSelector('[data-r=rtab]', { timeout: TIMEOUT });
+    const id = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.datasets[0].id)); const d = JSON.parse((await apiCall(A, '/api/reports/datasets/' + id)).body);
+    const T = d.result.table; const col = n => T.columns.findIndex(c => c.toLowerCase() === n.toLowerCase()); const rows = T.preview;
+    const kompasKept = rows.some(r => r[col('MEDIA')] === 'kompas'); const cetak = rows.find(r => r[col('MEDIA TYPE')] === 'Cetak');
+    const b64 = await A.evaluate(async id => { const r = await fetch(`/api/reports/datasets/${id}/xlsx`); const b = new Uint8Array(await r.arrayBuffer()); let x = ''; for (const c of b) x += String.fromCharCode(c); return btoa(x); }, id);
+    const JSZip = require('jszip'); const z = await JSZip.loadAsync(Buffer.from(b64, 'base64')); const wb = await z.file('xl/workbook.xml').async('string');
+    const sheets = [...wb.matchAll(/<sheet name="([^"]+)"/g)].map(m => m[1]); const xmls = await Promise.all(Object.keys(z.files).filter(f => /worksheets\/sheet\d+\.xml$/.test(f)).sort((a, b) => +a.match(/(\d+)\.xml/)[1] - +b.match(/(\d+)\.xml/)[1]).map(f => z.file(f).async('string')));
+    const formulas = xmls.filter(x => x.includes('<f>COUNTIFS(Data!')).length; const sentColors = /s="[567]"/.test(xmls[0]); const header = /MEDIA TYPE/.test(xmls[0]) && /PROGRAM KEMNAKER/.test(xmls[0]);
+    const noEmpty = rows.every(r => r.every(v => String(v).trim() !== ''));
+    const checks = { merged: d.files.length === 2 && col('MEDIA TYPE') === 0 && !!cetak, final: T.rows === 4, kompasKept, removed: d.result.removedBy?.Duplikat === 2 && d.result.removedBy?.Noise === 2, recon: d.result.initial === 8,
+      program: cetak?.[col('PROGRAM KEMNAKER')] === 'SIAPkerja, SertiHub', person: rows.some(r => r[col('PERSON')] === 'Agus Harimurti Yudhoyono') && !rows.some(r => r[col('PERSON')] === 'Saya'), noEmpty,
+      newIssue: rows.some(r => r[col('ISU')] === 'Sertifikasi Kompetensi Pekerja'), sheets: sheets.includes('Data') && sheets.includes('Log Pembersihan'), formulas: formulas >= 2, sentColors, header };
+    await A.locator('.rp-steps').scrollIntoViewIfNeeded(); await A.screenshot({ path: path.join(OUT, 'server-report-medmas.png') });
+    return ok(Object.values(checks).every(Boolean) && !leaks().length, Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' ') + ` · sheets ${sheets.join(', ')}`);
+  });
   await step(A, 'report-ask', 'Reports: “Ask in chat” attaches the curated data (without personal columns) for questions and brainstorming', async () => {
     const before = recorded.length; await A.click('[data-r=tab][data-x=data]'); await A.waitForTimeout(200); if (!(await A.isVisible('[data-r=askds]'))) await A.click('[data-r=opends]'); await A.waitForSelector('[data-r=askds]'); await A.click('[data-r=askds]');
     await A.waitForSelector('#v-home:not([hidden])'); await A.waitForTimeout(300); const chips = await A.locator('#chips .chip').count(); const pre = await A.inputValue('#input');
     await A.fill('#input', pre + 'media mana yang paling banyak memberitakan isu negatif? Beri 3 ide strategi.'); await A.keyboard.press('Enter'); await waitIdle(A); const r = await lastBot(A);
-    const req = recorded.slice(before).filter(x => x.kind !== 'local').find(x => x.raw.includes('Rekap per Media'));
+    const req = recorded.slice(before).filter(x => x.kind !== 'local').find(x => /Rekap per Media|Sentimen per Media Type/.test(x.raw));
     return ok(chips === 1 && !r.error && req && !req.raw.includes(SECRETS.mediaEmail) && !req.raw.includes(SECRETS.mediaPhone) && !leaks().length, `attachment chips ${chips} · answered: ${!r.error} · data reached AI: ${!!req} · personal columns left out: ${!!req && !req.raw.includes(SECRETS.mediaEmail)}`);
   });
   await step(B, 'report-isolation', 'Reports: another user cannot open someone else’s datasets or presentations', async () => {

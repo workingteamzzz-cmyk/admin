@@ -452,6 +452,11 @@ route('POST', '/api/reports/datasets', async (req, res, u) => {
   audit(u.id, 'report.dataset_added', { dataset: d.id, file: d.filename, rows: d.sheets.reduce((a, s) => a + s.rows, 0) }, clientIp(req)); json(res, 200, d);
 });
 route('GET', '/api/reports/datasets/:id', async (req, res, u, p) => json(res, 200, await R.getDataset(u, p.id)));
+route('POST', '/api/reports/datasets/:id/files', async (req, res, u, p) => {
+  const buf = await readBody(req, config.maxUploadMb * MB); const d = await R.addDatasetFile(u, p.id, { filename: fileName(req), buf, label: req.headers['x-label'] ? decodeURIComponent(req.headers['x-label']) : null });
+  audit(u.id, 'report.dataset_file_added', { dataset: p.id, file: fileName(req) }, clientIp(req)); json(res, 200, d);
+});
+route('PATCH', '/api/reports/datasets/:id/files/:i', async (req, res, u, p) => { R.relabelFile(u, p.id, { index: +p.i, label: (await readJson(req, 5e3)).label }); json(res, 200, await R.getDataset(u, p.id)); });
 route('PATCH', '/api/reports/datasets/:id', async (req, res, u, p) => { const { name } = await readJson(req, 10e3); R.renameDataset(u, p.id, name); json(res, 200, { ok: true }); });
 route('DELETE', '/api/reports/datasets/:id', (req, res, u, p) => { const d = R.deleteDataset(u, p.id); audit(u.id, 'report.dataset_deleted', { dataset: d.id, file: d.filename }, clientIp(req)); json(res, 200, { ok: true }); });
 route('POST', '/api/reports/datasets/:id/plan', async (req, res, u, p) => {
@@ -461,7 +466,7 @@ route('POST', '/api/reports/datasets/:id/plan', async (req, res, u, p) => {
 route('POST', '/api/reports/datasets/:id/run', async (req, res, u, p) => json(res, 202, R.startRun(u, p.id, await readJson(req, 2 * MB))));
 route('GET', '/api/reports/datasets/:id/job', (req, res, u, p) => json(res, 200, R.jobStatus(u, p.id)));
 route('POST', '/api/reports/datasets/:id/estimate', async (req, res, u, p) => json(res, 200, await R.estimateRun(u, p.id, await readJson(req, 2 * MB))));
-route('GET', '/api/reports/datasets/:id/xlsx', async (req, res, u, p) => { const f = await R.datasetXlsx(u, p.id); audit(u.id, 'report.download', { dataset: p.id, type: 'xlsx' }, clientIp(req)); sendFile(res, f.buf, f.name, XLSX_TYPE); });
+route('GET', '/api/reports/datasets/:id/xlsx', async (req, res, u, p) => { const f = await R.datasetXlsx(u, p.id, { upper: new URL(req.url, 'http://x').searchParams.get('upper') !== '0' }); audit(u.id, 'report.download', { dataset: p.id, type: 'xlsx' }, clientIp(req)); sendFile(res, f.buf, f.name, XLSX_TYPE); });
 route('POST', '/api/reports/datasets/:id/attach', (req, res, u, p) => json(res, 200, R.datasetDigest(u, p.id)));
 route('POST', '/api/reports/sources', async (req, res, u) => { const { datasets } = await readJson(req, 20e3); json(res, 200, R.deckSources(u, Array.isArray(datasets) ? datasets : [])); });
 route('POST', '/api/reports/decks', async (req, res, u) => {

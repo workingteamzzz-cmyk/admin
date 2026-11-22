@@ -9,7 +9,7 @@ import { db, one, all, run, id, now, sha256, getSettings, audit } from './db.mjs
 import { Redactor, SYSTEM_NOTE } from './redact.mjs';
 import { complete, reportModel, helperModel, limitProblem } from './ai.mjs';
 import { search } from './knowledge.mjs';
-import { loadWorkbook, profile, sanitizePlan, describe, runPlan, writeXlsx, reportSensitive, OPS, FILTERS, CLEANS, DERIVES, MEASURES } from './tables.mjs';
+import { loadWorkbook, profile, sanitizePlan, describe, runPlan, writeXlsx, reportSensitive, guessCol, OPS, FILTERS, CLEANS, DERIVES, MEASURES } from './tables.mjs';
 import { openTemplate, describeTemplate, buildDeck, sanitizeOutline, SLIDE_KINDS } from './slides.mjs';
 import { CLIENT_FIELDS, parsePersona, analystBlock, clientBlock } from './persona.mjs';
 
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS ai_tag_cache(key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', collection_id TEXT, created_by TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS client_recipes(id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL, plan TEXT NOT NULL, columns TEXT NOT NULL DEFAULT '[]', created_by TEXT, created INTEGER NOT NULL);
 `);
-for (const sql of ['ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT']) { try { db.exec(sql); } catch {} }
+for (const sql of ['ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT', "ALTER TABLE datasets ADD COLUMN files TEXT NOT NULL DEFAULT '[]'"]) { try { db.exec(sql); } catch {} }
 try { db.exec(`UPDATE collections SET kind='client' WHERE kind='admin' AND id IN (SELECT collection_id FROM clients)`); } catch {}
 const DIR = path.join(config.dataDir, 'reports');
 fs.mkdirSync(path.join(DIR, 'datasets'), { recursive: true, mode: 0o700 });
@@ -106,10 +106,40 @@ export function templateFile(user, tid) { const r = templateRow(user, tid); if (
 /* ================= datasets ================= */
 const sourceFile = d => path.join(dsDir(d.id), 'source' + path.extname(d.filename).toLowerCase());
 // Large files (50,000+ rows) are parsed once; the parsed tables are kept next to the upload.
+// A dataset can hold several files (e.g. ONLINE and PRINTED exports). They are merged into one table: columns are
+// matched by name (case-insensitive), and a column records each row's source label (e.g. MEDIA TYPE: Online / Cetak).
+export const sourceLabel = name => (/print|cetak|koran|newspaper/i.test(name) ? 'Cetak' : /online|portal|web/i.test(name) ? 'Online' : /\btv\b|televisi|broadcast/i.test(name) ? 'TV' : /radio/i.test(name) ? 'Radio' : /medsos|social|sosmed|twitter|instagram|tiktok|facebook|youtube/i.test(name) ? 'Media Sosial' : name.replace(/\.(xlsx|csv|tsv)$/i, '').slice(0, 40));
+const filesOf = d => { const f = JSON.parse(d.files || '[]'); return f.length ? f : [{ name: d.filename, label: sourceLabel(d.filename), path: path.basename(sourceFile(d)) }]; };
 async function loadSource(d) {
   const cache = path.join(dsDir(d.id), 'source.json');
   if (fs.existsSync(cache)) return JSON.parse(fs.readFileSync(cache, 'utf8'));
-  const sheets = await loadWorkbook(fs.readFileSync(sourceFile(d)), d.filename); fs.writeFileSync(cache, JSON.stringify(sheets), { mode: 0o600 }); return sheets;
+  const files = filesOf(d); const parsed = [];
+  for (const f of files) parsed.push({ f, sheets: await loadWorkbook(fs.readFileSync(path.join(dsDir(d.id), f.path)), f.name) });
+  let sheets = parsed[0].sheets;
+  if (parsed.length > 1) {
+    const labelCol = d.label_column || 'MEDIA TYPE'; const cols = [labelCol];
+    // Same meaning, different names across exports (Date/Tanggal, Title/Judul, Content/Isi, URL/Link, Media/Nama Media) → one column.
+    const kinds = ['date', 'title', 'content', 'url', 'media']; const kindOf = c => kinds.find(k => guessCol([c], k) === 0);
+    const key = c => { const k = kindOf(c); return k ? 'kind:' + k : String(c).trim().toLowerCase().replace(/\s+/g, ' '); };
+    const mains = parsed.map(p => ({ f: p.f, t: [...p.sheets].sort((a, b) => b.rows.length - a.rows.length)[0] }));
+    for (const m of mains) for (const c of m.t.columns) if (!cols.some(x => key(x) === key(c))) cols.push(c);
+    const rows = mains.flatMap(m => { const idx = cols.map(c => m.t.columns.findIndex(x => key(x) === key(c))); return m.t.rows.map(r => idx.map((i, k) => (k === 0 ? m.f.label : i >= 0 ? r[i] : ''))); });
+    sheets = [{ name: `Gabungan (${mains.length} file)`, columns: cols, rows, skipped: 0, merged: mains.map(m => ({ file: m.f.name, label: m.f.label, rows: m.t.rows.length })) }, ...mains.map(m => ({ ...m.t, name: `${m.f.label} · ${m.t.name}` }))];
+  }
+  fs.writeFileSync(cache, JSON.stringify(sheets), { mode: 0o600 }); return sheets;
+}
+export async function addDatasetFile(user, did, { filename, buf, label }) {
+  const d = ownDataset(user, did); if (!/\.(xlsx|csv|tsv)$/i.test(filename)) throw err(415, 'Upload an Excel (.xlsx) or CSV file.');
+  try { if (!(await loadWorkbook(buf, filename)).length) throw new Error('No table found'); } catch (e) { throw err(422, 'This file could not be read: ' + e.message); }
+  const files = filesOf(d); const fpath = `source-${files.length + 1}${path.extname(filename).toLowerCase()}`;
+  fs.writeFileSync(path.join(dsDir(did), fpath), buf, { mode: 0o600 }); files.push({ name: filename, label: String(label || sourceLabel(filename)).slice(0, 40), path: fpath });
+  run(`UPDATE datasets SET files=?, sheet=NULL, size=size+?, updated=? WHERE id=?`, JSON.stringify(files), buf.length, now(), did); fs.rmSync(path.join(dsDir(did), 'source.json'), { force: true });
+  const sheets = await loadSource({ ...d, files: JSON.stringify(files) }); run(`UPDATE datasets SET sheet=?, rows=? WHERE id=?`, sheets[0].name, sheets[0].rows.length, did);
+  return getDataset(user, did);
+}
+export function relabelFile(user, did, { index, label }) {
+  const d = ownDataset(user, did); const files = filesOf(d); if (!files[index]) throw err(404, 'File not found');
+  files[index].label = String(label || '').trim().slice(0, 40) || files[index].label; run(`UPDATE datasets SET files=?, updated=? WHERE id=?`, JSON.stringify(files), now(), did); fs.rmSync(path.join(dsDir(did), 'source.json'), { force: true });
 }
 function ownDataset(user, did) { const d = one(`SELECT * FROM datasets WHERE id=? AND user_id=?`, did, user.id); if (!d) throw err(404, 'Dataset not found'); return d; }
 const extraCols = () => getSettings().redaction.columns || [];
@@ -124,7 +154,7 @@ export async function addDataset(user, { filename, buf, clientId }) {
   const d = { id: did, filename };
   fs.writeFileSync(sourceFile(d), buf, { mode: 0o600 }); fs.writeFileSync(path.join(dsDir(did), 'source.json'), JSON.stringify(sheets), { mode: 0o600 });
   const main = [...sheets].sort((a, b) => b.rows.length - a.rows.length)[0];
-  run(`INSERT INTO datasets(id,user_id,name,filename,size,sheet,rows,created,updated,client_id) VALUES(?,?,?,?,?,?,?,?,?,?)`, did, user.id, filename.replace(/\.(xlsx|csv|tsv)$/i, '').slice(0, 120), filename, buf.length, main.name, main.rows.length, now(), now(), clientId || null);
+  run(`INSERT INTO datasets(id,user_id,name,filename,size,sheet,rows,created,updated,client_id,files) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, did, user.id, filename.replace(/\.(xlsx|csv|tsv)$/i, '').slice(0, 120), filename, buf.length, main.name, main.rows.length, now(), now(), clientId || null, JSON.stringify([{ name: filename, label: sourceLabel(filename), path: path.basename(sourceFile(d)) }]));
   return getDataset(user, did);
 }
 export function listDatasets(user) {
@@ -134,9 +164,9 @@ function readResult(did) { const f = path.join(dsDir(did), 'result.json'); retur
 export async function getDataset(user, did) {
   const d = ownDataset(user, did); const sheets = await loadSource(d); const res = readResult(did);
   const plan = d.plan ? JSON.parse(d.plan) : null;
-  return { id: d.id, clientId: d.client_id, name: d.name, filename: d.filename, size: d.size, sheet: d.sheet, instruction: d.instruction, created: d.created, updated: d.updated,
+  return { id: d.id, clientId: d.client_id, files: filesOf(d).map(({ path: _p, ...f }) => f), name: d.name, filename: d.filename, size: d.size, sheet: d.sheet, instruction: d.instruction, created: d.created, updated: d.updated,
     sheets: sheets.map(t => preview(t)), plan: plan && { ...plan, steps: plan.steps.map(s => ({ ...s, text: describe(s) })) }, log: d.log ? JSON.parse(d.log) : null,
-    result: res && { table: { name: 'Data', columns: res.table.columns, rows: res.table.rows.length, preview: res.table.rows.slice(0, 50) }, summaries: res.summaries.map(s => ({ ...s, rows: s.rows.slice(0, 200), total: s.rows.length })) } };
+    result: res && { removed: res.removed?.length || 0, initial: res.initial, removedBy: res.removedBy, table: { name: 'Data', columns: res.table.columns, rows: res.table.rows.length, preview: res.table.rows.slice(0, 50) }, summaries: res.summaries.map(s => ({ ...s, rows: s.rows.slice(0, 200), total: s.rows.length })) } };
 }
 export function renameDataset(user, did, name) { ownDataset(user, did); run(`UPDATE datasets SET name=?, updated=? WHERE id=?`, String(name || '').trim().slice(0, 120) || 'Dataset', now(), did); }
 export function deleteDataset(user, did) { const d = ownDataset(user, did); fs.rmSync(dsDir(d.id), { recursive: true, force: true }); run(`DELETE FROM datasets WHERE id=?`, d.id); return d; }
@@ -173,9 +203,17 @@ Steps run in order. Use column names EXACTLY as profiled (after a rename, use th
 - {"op":"derive","column":new name,"from":c,"fn":one of ${DERIVES.join('|')},"bins":[numbers for bucket]}  e.g. year_month or week from a date, domain from a link
 - {"op":"select","columns":[...]} / {"op":"drop","columns":[...]} / {"op":"rename","from":c,"to":new} / {"op":"sort","column":c,"dir":"asc"|"desc"}
 - {"op":"ai_tag","column":label column,"from":[text columns],"labels":[allowed labels] or [] to let AI propose 4–8 categories,"instruction":what the label means,"only_empty":true|false}  an AI reads each row's text and assigns one label (e.g. sentiment Positif/Netral/Negatif, issue/topic, tone). Costs AI tokens per row: use only when the user wants labels that are missing or incomplete; use only_empty:true to keep existing labels.
+- {"op":"dedupe_news","url":c,"title":c,"media":c,"content":c,"near":0.9}  layered news duplicates: same URL (amp/mobile/utm variants), same title in the same media, identical content in the same media, near-identical content (≥near) in the same media and date. The same story in DIFFERENT media is not a duplicate. Removed rows are logged. Prefer this over "dedupe" for news.
+- {"op":"ai_filter","from":[text columns],"instruction":what belongs (the client and its derivatives: officials, units, programs),"labels":["Relevan","Noise: <reason>",...],"keep":"Relevan"}  removes noise with AI and logs the reason (e.g. unrelated, mentioned only under "Baca juga", other countries' ministries, portal pages).
+- {"op":"keywords","column":new column,"from":[text columns],"terms":["Label=alias1|alias2",...],"none":"-"}  detects names/programs in the text (whole words, case-insensitive, spaces optional); several → comma-separated. No AI, exact.
+- {"op":"ai_normalize","column":c,"instruction":...,"split":","}  AI cleans names in an entity column (slugs, partial names, fragments, junk → "-").
+- {"op":"fill","columns":[] for all,"value":"-"}  fill empty cells everywhere.
+- ai_tag extra options: "consistent_by": title column → the same story across outlets gets one label (majority); "seed":"client" → use the client persona's issue list; "allow_new": true → AI may add a new specific issue when none fits; "max_labels": N (e.g. 40) with "labels": [] → AI builds an issue taxonomy from all texts. For long texts include both title and content columns in "from".
+- summary extra options: "top_per_group": true → "top" applies within each value of the first group_by column (e.g. top 10 media per media type); "explode": true → cells with several comma-separated values (e.g. programs) are counted per value.
 - {"op":"summary","name":sheet name,"group_by":[up to 3 columns],"measures":[{"fn":one of ${MEASURES.join('|')},"column":c,"as":label}],"sort_by":output column,"dir":"desc","top":N,"total":true|false}  percent = share of rows
 - {"op":"pivot","name":sheet name,"rows":c,"columns":c,"fn":"count"|"sum"|"avg","value":c,"total":true}  e.g. date × sentiment
 
+Media monitoring standard (follow it when the data is news coverage, adapting to the columns and the client persona): 1) clean: strip_html on content, trim, empty_words; 2) dedupe_news; 3) ai_filter noise using the client's names, officials, units and programs from the persona; 4) ai_tag SENTIMENT from the client's point of view using the persona's sentiment rules (title + content, consistent_by title, labels Positif/Netral/Negatif); 5) ai_tag SEKTOR with the persona's sectors as fixed labels; 6) ai_tag ISU with seed "client" and allow_new true when the persona has an issue list, otherwise labels [] with max_labels 40–60 (representative names, similar issues merged); 7) keywords for the persona's programs; 8) ai_normalize entity columns (person, organization, influencer); 9) fill all empty cells with "-"; 10) summaries: sentiment per media type, sector × sentiment, program × sentiment (explode), issue × sentiment, top media per media type (top_per_group), daily trend pivot date × sentiment, top spokespersons. Use UPPERCASE names for new columns (MEDIA TYPE, SENTIMENT, SEKTOR, ISU, PROGRAM). A merged multi-file dataset already has a source column such as MEDIA TYPE.
 Guidelines: start with cleaning (trim, empty_words; date/number where the profile shows mixed formats); standardize obvious variants seen in the common values; remove duplicates; then the user's filters; then summaries useful for the report (for media monitoring: coverage per outlet, sentiment share, issues, daily/weekly trend, top spokespeople, AVE per outlet). Name summaries in the user's language. Keep the plan focused: 4–14 steps. Columns marked "personal" contain personal data: you may filter, dedupe or count by them, but never output their values.`;
 
 export async function planDataset(user, did, { instruction, model: requested, sheet }) {
@@ -193,11 +231,30 @@ export async function planDataset(user, did, { instruction, model: requested, sh
 
 // Labels short texts in batches with the cheapest model. Results are cached by (labels, instruction, text).
 const TAG_BATCH = 80, TAG_PARALLEL = 6;
-function makeTagger(user, did, progress = () => {}) {
+// Labels from the client persona's issue list ("Daftar isu acuan"): one per line or separated by ';', sector headers ignored.
+export function clientIssues(client) {
+  const txt = parsePersona(client?.persona, CLIENT_FIELDS).issues || '';
+  return [...new Set(txt.split(/[\n;]+/).map(x => x.replace(/^\s*[-•*\d.)]+\s*/, '').trim()).filter(x => x && !/:\s*$/.test(x) && x.length <= 90))];
+}
+function makeTagger(user, did, progress = () => {}, client = null) {
   const red = redactorFor(user, 'report:' + did); let model;
-  return async (texts, labels, instruction) => {
+  return async (texts, labels, instruction, opts = {}) => {
     model ??= helperModel(user); checkLimits(user);
     let use = labels;
+    const seed = opts.seed === 'client' ? clientIssues(client) : [];
+    if (!use.length && seed.length && !opts.allowNew) use = seed;
+    if (!use.length && opts.maxLabels > 8) { // build an issue taxonomy from all texts: propose per chunk, then merge similar issues
+      const uniq = [...new Set(texts.filter(Boolean).map(x => x.slice(0, 220)))]; const step = Math.max(1, Math.floor(uniq.length / 1200)); const pool = uniq.filter((_, i) => i % step === 0).slice(0, 1200);
+      const proposals = [];
+      for (let i = 0; i < pool.length; i += 300) {
+        const r = await askJson(user, model, `You read news items and list the distinct issues they cover${instruction ? ` (${instruction})` : ''}. An issue name is short (2–8 words), specific and representative of the content, in the texts' language. Merge items about the same issue.${seed.length ? ` Use these existing issue names exactly when they fit: ${seed.join('; ')}.` : ''} Reply with JSON only: {"issues":[...]}.`, pool.slice(i, i + 300).map((x, k) => `${k + 1}. ${red.mask(x)}`).join('\n'), 'report.tag', 3000, 'low');
+        proposals.push(...(Array.isArray(r.issues) ? r.issues : []).map(x => String(x).trim()).filter(Boolean));
+      }
+      const merged = await askJson(user, model, `Consolidate these issue names into at most ${opts.maxLabels} distinct issues: merge duplicates and near-synonyms, keep names short, specific and representative.${seed.length ? ' Prefer the existing names from the reference list when they fit.' : ''} Always include a catch-all such as "Isu Lainnya". Reply with JSON only: {"issues":[...]}.`, `${seed.length ? `Reference list: ${seed.join('; ')}\n\n` : ''}Proposed: ${[...new Set(proposals)].join('; ')}`, 'report.tag', 4000, 'low');
+      use = (Array.isArray(merged.issues) ? merged.issues : []).map(x => String(x).trim().slice(0, 90)).filter(Boolean).slice(0, opts.maxLabels);
+      if (!use.length) throw new Error('The AI could not build an issue list');
+    }
+    if (!use.length && seed.length) use = seed;
     if (!use.length) {
       const sample = [...new Set(texts.filter(Boolean))].slice(0, 80).map((x, i) => `${i + 1}. ${red.mask(x.slice(0, 300))}`).join('\n');
       const r = await askJson(user, model, `You design a small set of categories for labelling texts${instruction ? ` (${instruction})` : ''}. Reply with JSON only: {"labels":[4–8 short category names, 1–4 words each, in the texts' language]}.`, sample, 'report.tag', 1000, 'low');
@@ -209,7 +266,8 @@ function makeTagger(user, did, progress = () => {}) {
     const values = texts.map(x => (x ? one(`SELECT value FROM ai_tag_cache WHERE key=?`, keyOf(x))?.value ?? null : ''));
     const todo = [...new Set(texts.filter((x, i) => x && values[i] == null))];
     const norm = new Map(use.map(l => [l.toLowerCase(), l]));
-    const system = `You label texts${instruction ? `: ${instruction}` : ''}. Allowed labels: ${use.map(l => `"${l}"`).join(', ')}. Choose exactly one allowed label per text. Reply with JSON only: {"1":"label","2":"label",...} using the texts' numbers.${red.enabled ? ' ' + SYSTEM_NOTE : ''}`;
+    const allowNew = !!opts.allowNew; const added = [];
+    const system = `You label texts${instruction ? `: ${instruction}` : ''}. Allowed labels: ${use.map(l => `"${l}"`).join(', ')}. Choose exactly one allowed label per text.${allowNew ? ' Only if none fits at all, answer "NEW: <short, specific name>" (2–8 words).' : ''} Reply with JSON only: {"1":"label","2":"label",...} using the texts' numbers.${red.enabled ? ' ' + SYSTEM_NOTE : ''}`;
     // Unique texts only, in batches, several batches at a time. Labels are cached as they arrive, so an interrupted
     // run (budget reached, network) continues where it stopped and never pays twice for the same text.
     const batches = []; for (let i = 0; i < todo.length; i += TAG_BATCH) batches.push(todo.slice(i, i + TAG_BATCH));
@@ -222,13 +280,29 @@ function makeTagger(user, did, progress = () => {}) {
           try { r = await askJson(user, model, system, batch.map((x, k) => `${k + 1}. ${red.mask(x).replace(/\s+/g, ' ')}`).join('\n'), 'report.tag', 3000, 'low'); break; }
           catch (e) { if (attempt >= 4 || ![429, 500, 502, 503, 529].includes(e.status)) throw e; await new Promise(res => setTimeout(res, 2000 * 2 ** attempt)); }
         }
-        batch.forEach((x, k) => { const v = norm.get(String(r[k + 1] ?? '').trim().toLowerCase()); if (v) run(`INSERT OR REPLACE INTO ai_tag_cache(key,value,created) VALUES(?,?,?)`, keyOf(x), v, now()); });
+        batch.forEach((x, k) => { const raw = String(r[k + 1] ?? '').trim(); let v = norm.get(raw.toLowerCase());
+          if (!v && allowNew && /^new\s*:/i.test(raw) && added.length < 20) { v = raw.replace(/^new\s*:\s*/i, '').slice(0, 90); if (v && !norm.has(v.toLowerCase())) { norm.set(v.toLowerCase(), v); added.push(v); } }
+          if (v) run(`INSERT OR REPLACE INTO ai_tag_cache(key,value,created) VALUES(?,?,?)`, keyOf(x), v, now()); });
       } catch (e) { if (e.status === 402) throw e; failed += batch.length; }
       done += batch.length; progress({ phase: 'label', done, total: todo.length });
     };
     let next = 0; await Promise.all(Array.from({ length: Math.min(TAG_PARALLEL, batches.length) }, async () => { while (next < batches.length) await work(batches[next++]); }));
     if (failed && failed === todo.length) throw new Error('AI labelling failed. Try again in a moment.');
-    return { labels: use, values: texts.map(x => (x ? one(`SELECT value FROM ai_tag_cache WHERE key=?`, keyOf(x))?.value || '' : '')) };
+    const lookup = x => one(`SELECT value FROM ai_tag_cache WHERE key=?`, keyOf(x))?.value || ''; // new labels are cached under the same key
+    return { labels: [...use, ...added], added, values: texts.map(x => (x ? lookup(x) : '')) };
+  };
+}
+// Cleans entity names (people, organizations, influencers): junk tokens, slugs, partial or broken names.
+function makeNormalizer(user, did) {
+  const red = redactorFor(user, 'report:' + did);
+  return async (values, instruction) => {
+    const model = helperModel(user); const map = new Map();
+    for (let i = 0; i < values.length; i += 120) {
+      checkLimits(user); const batch = values.slice(i, i + 120);
+      const r = await askJson(user, model, `You clean a column of names (people, organizations, accounts) from media monitoring data${instruction ? `: ${instruction}` : ''}. For each numbered value return the clean name: full proper names in Title Case, slugs like "agus+harimurti+yudhoyono" → "Agus Harimurti Yudhoyono", a partial name → the full name only when another value in the list shows it, fragments of an organization split by a comma → the full organization name. Junk (pronouns like Saya/Kami, generic words, job-title fragments, an organization in a person column) → "-". Never invent names. Reply with JSON only: {"1":"clean name","2":"-",...}.`, batch.map((x, k) => `${k + 1}. ${red.mask(x)}`).join('\n'), 'report.normalize', 6000, 'low');
+      batch.forEach((x, k) => { const v = r[k + 1]; if (typeof v === 'string' && v.trim()) map.set(x, red.unmask(v.trim()).slice(0, 160)); });
+    }
+    return map;
   };
 }
 
@@ -241,10 +315,11 @@ export function startRun(user, did, { plan: rawPlan, sheet }) {
   const job = { status: 'running', step: 0, steps: plan.steps.length, text: 'Reading the file…', done: 0, total: 0, started: now() }; jobs.set(did, job);
   (async () => {
     try {
-      const sheets = await loadSource(d); const t = pickSheet(sheets, sheet || d.sheet); const s = getSettings();
-      const r = await runPlan(t, plan, { tagger: makeTagger(user, did, p => Object.assign(job, { done: p.done, total: p.total, cached: p.cached ?? job.cached })), maxAiRows: s.reports?.maxAiRows || 100000,
+      const sheets = await loadSource(d); const t = pickSheet(sheets, sheet || d.sheet); const s = getSettings(); const client = d.client_id ? one(`SELECT * FROM clients WHERE id=?`, d.client_id) : null;
+      const r = await runPlan(t, plan, { tagger: makeTagger(user, did, p => Object.assign(job, { done: p.done, total: p.total, cached: p.cached ?? job.cached }), client), normalizer: makeNormalizer(user, did), maxAiRows: s.reports?.maxAiRows || 100000,
         onStep: (i, st) => Object.assign(job, { step: i + 1, text: describe(st), done: 0, total: 0, cached: 0 }) });
-      fs.writeFileSync(path.join(dsDir(did), 'result.json'), JSON.stringify({ sheet: t.name, table: r.table, summaries: r.summaries, log: r.log, plan, at: now() }), { mode: 0o600 });
+      const removedBy = {}; for (const x of r.removed) { const k = /^duplikat/i.test(x.reason) ? 'Duplikat' : /^noise/i.test(x.reason) ? 'Noise' : 'Lainnya'; removedBy[k] = (removedBy[k] || 0) + 1; }
+      fs.writeFileSync(path.join(dsDir(did), 'result.json'), JSON.stringify({ sheet: t.name, initial: t.rows.length, table: r.table, summaries: r.summaries, log: r.log, removed: r.removed, removedBy, plan, at: now() }), { mode: 0o600 });
       run(`UPDATE datasets SET plan=?, log=?, sheet=?, result_rows=?, updated=? WHERE id=?`, JSON.stringify(plan), JSON.stringify(r.log), t.name, r.table.rows.length, now(), did);
       const aiRows = r.log.reduce((a, l) => a + (l.aiRows || 0), 0);
       audit(user.id, 'report.curate', { dataset: did, steps: r.log.length, failed: r.log.filter(l => !l.ok).length, aiRows, rows: r.table.rows.length, seconds: Math.round((now() - job.started) / 1000) });
@@ -264,10 +339,41 @@ export async function estimateRun(user, did, { plan: rawPlan, sheet }) {
   const m = helperModel(user); const price = m.price || { in: 0, out: 0 }; const inTok = chars / 3.5 + texts * 6 + Math.ceil(texts / TAG_BATCH) * 250, outTok = texts * 8;
   return { aiRows: texts, model: m.label, usd: +((inTok * price.in + outTok * price.out) / 1e6).toFixed(3), minutes: Math.max(1, Math.round(Math.ceil(texts / TAG_BATCH) / TAG_PARALLEL * 6 / 60)), rows: t.rows.length };
 }
-export async function datasetXlsx(user, did) {
+// Summary sheets use COUNTIFS formulas on the Data sheet when no later step changed the rows, so the numbers stay
+// right when someone edits the data in Excel.
+const SAFE_AFTER = new Set(['summary', 'pivot', 'sort']);
+function withFormulas(res, sum, dataCols) {
+  const later = res.plan.steps.slice((sum.step ?? res.plan.steps.length) + 1); if (sum.step == null || later.some(x => !SAFE_AFTER.has(x.op))) return sum;
+  const L = i => { let x = ''; i++; while (i) { const m = (i - 1) % 26; x = String.fromCharCode(65 + m) + x; i = Math.floor((i - 1) / 26); } return x; };
+  const st = res.plan.steps[sum.step]; const colOf = name => dataCols.findIndex(c => c.toLowerCase() === String(name).toLowerCase()); const n = sum.rows.length;
+  if (st.op === 'summary' && st.group_by.length && st.group_by.length <= 2) {
+    const gi = st.group_by.map(colOf); if (gi.some(i => i < 0)) return sum;
+    const ci = st.measures.findIndex(m => m.fn === 'count'); if (ci < 0) return sum; const col = st.group_by.length + ci;
+    const rows = sum.rows.map((r, k) => { const isTotal = /^total$/i.test(String(r[0])); const out = [...r];
+      out[col] = isTotal ? { f: `SUM(${L(col)}2:${L(col)}${n})`, v: r[col] } : { f: `COUNTIFS(${gi.map((g, j) => `Data!$${L(g)}:$${L(g)},${st.explode ? `"*"&$${L(j)}${k + 2}&"*"` : `$${L(j)}${k + 2}`}`).join(',')})`, v: r[col] }; return out; });
+    return { ...sum, rows };
+  }
+  if (st.op === 'pivot' && st.fn === 'count') {
+    const ri = colOf(st.rows), ci = colOf(st.columns); if (ri < 0 || ci < 0) return sum; const last = sum.columns.length - 1; const hasTotal = /^total$/i.test(sum.columns[last]);
+    const rows = sum.rows.map((r, k) => { const isTotal = /^total$/i.test(String(r[0])); return r.map((v, j) => {
+      if (j === 0 || sum.columns[j] === 'Lainnya') return v;
+      if (isTotal) return { f: `SUM(${L(j)}2:${L(j)}${n})`, v };
+      if (hasTotal && j === last) return { f: `SUM(B${k + 2}:${L(last - 1)}${k + 2})`, v };
+      return { f: `COUNTIFS(Data!$${L(ri)}:$${L(ri)},$A${k + 2},Data!$${L(ci)}:$${L(ci)},${L(j)}$1)`, v }; }); });
+    return { ...sum, rows };
+  }
+  return sum;
+}
+export async function datasetXlsx(user, did, { upper = true } = {}) {
   const d = ownDataset(user, did); const res = readResult(did); if (!res) throw err(409, 'Run the plan first.');
-  const notes = { name: 'Catatan kurasi', columns: ['Langkah', 'Keterangan', 'Baris sebelum', 'Baris sesudah', 'Status'], rows: res.log.map((l, i) => [i + 1, l.text, l.before, l.after, l.ok ? (l.changed != null ? `OK (${l.changed} sel diubah)` : l.aiRows ? `OK (AI: ${l.aiRows} baris)` : 'OK') : 'Dilewati: ' + l.error]), noFilter: true };
-  const buf = await writeXlsx([{ name: 'Data', ...res.table }, ...res.summaries, notes]);
+  const cols = upper ? res.table.columns.map(c => String(c).toUpperCase()) : res.table.columns;
+  const removed = res.removed || [];
+  const counts = res.removedBy || {}; const initial = res.initial ?? (res.table.rows.length + removed.length);
+  const recon = `Data awal ${initial} = data final ${res.table.rows.length} + duplikat ${counts.Duplikat || 0} + noise ${counts.Noise || 0}${counts.Lainnya ? ` + difilter ${counts.Lainnya}` : ''}`;
+  const notes = { name: 'Catatan kurasi', columns: ['Langkah', 'Keterangan', 'Baris sebelum', 'Baris sesudah', 'Status'], rows: [...res.log.map((l, i) => [i + 1, l.text, l.before, l.after, l.ok ? (l.changed != null ? `OK (${l.changed} sel diubah)` : l.aiRows ? `OK (AI: ${l.aiRows} baris)` : l.detail ? `OK (${Object.entries(l.detail).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(', ') || 'tidak ada'})` : 'OK') : 'Dilewati: ' + l.error]), ['', recon, '', '', '']], noFilter: true };
+  const logSheet = { name: 'Log Pembersihan', columns: ['NO', 'ALASAN', 'MEDIA', 'JUDUL', 'URL', 'TANGGAL', 'URL YANG DIPERTAHANKAN'], rows: removed.map((x, i) => [i + 1, x.reason, x.media, x.title, x.url, x.date, x.ref || '']) };
+  const sums = res.summaries.map(sm => withFormulas(res, sm, res.table.columns));
+  const buf = await writeXlsx([{ name: 'Data', columns: cols, rows: res.table.rows }, ...sums, ...(removed.length ? [logSheet] : []), notes]);
   return { buf, name: `${d.name.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'data'} (kurasi).xlsx` };
 }
 // A Markdown digest of a curated dataset, attached to a chat so people can ask questions and brainstorm about it.
