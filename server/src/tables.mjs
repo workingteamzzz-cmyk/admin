@@ -196,7 +196,8 @@ export function termMatcher(term) {
 export function guessCol(columns, kind) {
   const P = { title: [/^(judul|judul berita|title|headline)$/i, /judul|title|headline/i], media: [/^(media|nama media|media name|outlet|source|sumber|publisher|portal)$/i, /media|outlet|publisher|portal/i],
     url: [/^(url|link|tautan|permalink)$/i, /url|link/i], date: [/^(tanggal|date|published|published date|waktu)$/i, /tanggal|date|publish/i],
-    content: [/^(content|konten|isi|isi berita|body|text|teks|full text|snippet)$/i, /content|konten|isi berita|body/i], sentiment: [/^sentim/i, /sentim/i] }[kind];
+    content: [/^(content|konten|isi|isi berita|body|text|teks|full text|snippet|caption|post|tweet)$/i, /content|konten|isi berita|body|caption/i], sentiment: [/^sentim/i, /sentim/i],
+    account: [/^(account|akun|nama akun|author|username|user|handle|screen name)$/i, /akun|account|author|username|handle/i], platform: [/^(platform|channel|kanal|sosmed|social media)$/i, /platform/i] }[kind];
   const not = /type|tipe|jenis|kategori|category/i; // "MEDIA TYPE" is not the outlet name
   for (const re of P) { const i = columns.findIndex(c => re.test(String(c).trim()) && !(kind !== 'sentiment' && not.test(c))); if (i >= 0) return i; }
   return -1;

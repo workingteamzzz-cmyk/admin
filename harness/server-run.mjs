@@ -620,6 +620,24 @@ try {
     await A.locator('.rp-steps').scrollIntoViewIfNeeded(); await A.screenshot({ path: path.join(OUT, 'server-report-medmas.png') });
     return ok(Object.values(checks).every(Boolean) && !leaks().length, Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' ') + ` · sheets ${sheets.join(', ')}`);
   });
+  await step(A, 'report-medsos-ref', 'Social-media reports and following a senior’s best report (design, structure and writing style)', async () => {
+    const before = recorded.length; const all0 = JSON.parse((await apiCall(A, '/api/reports')).body); const cA = all0.clients.find(c => c.name === 'Kementerian A');
+    const mine = JSON.parse((await apiCall(A, '/api/knowledge')).body).find(c => c.kind === 'person' && c.mine);
+    const pptxB64 = fs.readFileSync(deckFile).toString('base64');
+    const up = await A.evaluate(async ([cid, b64]) => { const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); const r = await fetch(`/api/knowledge/collections/${cid}/docs`, { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': 'Report Terbaik Weekly Oktober.pptx', 'content-type': 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }, body: bin }); return r.json(); }, [mine.id, pptxB64]);
+    const refs = JSON.parse((await apiCall(A, '/api/reports')).body).references; const ref = refs.find(r => r.id === up.id);
+    const medsosStruct = JSON.parse((await apiCall(A, '/api/reports/structure?type=weekly&channel=medsos')).body).text;
+    const dsA = JSON.parse((await apiCall(A, '/api/reports')).body).datasets.find(d => d.curated && d.clientId === cA.id)?.id;
+    const r = await putJson(A, '/api/reports/decks', { client: cA.id, channel: 'medsos', reportType: 'weekly', period: '23–29 Oktober 2026', reference: up.id, useReferenceDesign: true, datasets: dsA ? [dsA] : [], brief: 'Weekly media sosial' }, 'POST');
+    const deck = JSON.parse(r.body); const req = recorded.slice(before).find(x => /senior media and communications analyst/.test(x.raw));
+    const usedRef = !!req && req.raw.includes('Channel: social media') && req.raw.includes('Reference report chosen by the analyst') && req.raw.includes('from the chosen reference report') && req.raw.includes('Sebaran Sentimen');
+    const built = await A.evaluate(async kid => (await fetch(`/api/reports/decks/${kid}/pptx`)).status, deck.id);
+    await A.goto(canopus.url + '#reports'); await A.reload(); await A.waitForSelector('#rpClient'); await A.click('[data-r=tab][data-x=decks]'); await A.click('[data-r=backdeck]').catch(() => {});
+    await A.waitForSelector('#rpRef', { timeout: 10000 }); const opts = await A.locator('#rpRef option').count(); await A.click('[data-r=rchan][data-x=medsos]'); await A.selectOption('#rpRef', up.id); await A.waitForTimeout(400);
+    await A.locator('#rpRef').scrollIntoViewIfNeeded(); await A.screenshot({ path: path.join(OUT, 'server-report-medsos-ref.png') });
+    const checks = { pptxIndexed: up.status === 'ready' && up.chunks > 0, listed: !!ref && ref.design, medsosStruct: /Platform Distribution/.test(medsosStruct) && /Sampel Post Positif/.test(medsosStruct) && /Konten Viral/.test(medsosStruct), usedRef, designFromRef: deck.template === 'doc:' + up.id && deck.channel === 'medsos', built: built === 200, uiOptions: opts >= 2 };
+    return ok(Object.values(checks).every(Boolean) && !leaks().length, Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' '));
+  });
   await step(A, 'report-ask', 'Reports: “Ask in chat” attaches the curated data (without personal columns) for questions and brainstorming', async () => {
     const before = recorded.length; await A.click('[data-r=tab][data-x=data]'); await A.waitForTimeout(200); if (!(await A.isVisible('[data-r=askds]'))) await A.click('[data-r=opends]'); await A.waitForSelector('[data-r=askds]'); await A.click('[data-r=askds]');
     await A.waitForSelector('#v-home:not([hidden])'); await A.waitForTimeout(300); const chips = await A.locator('#chips .chip').count(); const pre = await A.inputValue('#input');

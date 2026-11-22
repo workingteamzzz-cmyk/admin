@@ -36,3 +36,20 @@ export function typeNote(t, period) {
   if (!t) return '';
   return `Report type: ${t.label}${period ? ` — period ${period}` : ` (${t.period})`}. Focus: ${t.focus} Trends: bucket by ${t.trend}. Comparison: ${t.compare}${t.id !== 'adhoc' ? ' — only when the data covers that earlier period; otherwise say plainly that no comparison is possible' : ''}.`;
 }
+
+// Channels: media massa (news), media sosial (posts), or both. The channel changes the vocabulary and the slides.
+export const CHANNELS = [
+  { id: 'medmas', label: 'Media massa', note: 'Channel: mass media (online news, print, TV). Sources are articles by outlets; speak of "berita", "media", "spokesperson".' },
+  { id: 'medsos', label: 'Media sosial', note: 'Channel: social media (X, Instagram, TikTok, Facebook, YouTube…). Sources are posts by accounts; speak of "post", "akun", "platform", "engagement", "KOL", "warganet". News-sample slides become post samples (account, platform, date, link). Look at engagement, top accounts and account categories, viral content, hashtags and complaints about services.' },
+  { id: 'both', label: 'Medmas + medsos', note: 'Channel: both mass media and social media. Compare how an issue plays in the news versus on social media; keep the two sources apart in charts and tables.' },
+];
+const MEDSOS_SWAP = [[/Media Distribution[^\n]*/g, 'Platform Distribution — sebaran post per platform dan sentimennya'], [/Top (?:10 )?Spokesperson[^\n]*/g, 'Top Akun & KOL — akun paling berpengaruh dan kategorinya (resmi, media, tokoh/KOL, publik)'],
+  [/Sampel Berita Positif[^\n]*/g, 'Sampel Post Positif — 4 post dengan tautan'], [/Sampel Berita Negatif[^\n]*/g, 'Sampel Post Negatif — 4 post dengan tautan'], [/Sampel Berita[^\n]*/g, 'Sampel Post — post positif dan negatif dengan tautan'],
+  [/Berita Kunci[^\n]*/g, 'Post Kunci — post positif dan negatif dengan tautan'], [/Tren Ekspos[^\n]*/g, 'Tren Percakapan — volume post per hari per sentimen, puncak diberi anotasi pemicunya'], [/Wordcloud[^\n]*/g, 'Wordcloud & Hashtag — kata dan hashtag teratas dengan analisa']];
+// A structure written for news, rewritten for social media (and extended for "both").
+export function adaptStructure(text, channel) {
+  if (!text || channel === 'medmas' || !channel) return text;
+  if (channel === 'medsos') { let t = text; for (const [re, to] of MEDSOS_SWAP) t = t.replace(re, to); if (!/Engagement|Konten Viral/i.test(t)) t = t.replace(/(\n[^\n]*(?:Sentimen)[^\n]*)/, `$1\nKonten Viral & Engagement — post dengan engagement tertinggi dan pemicunya`); if (!/Keluhan/i.test(t)) t = t.replace(/(\nRisk Mapping[^\n]*)/, `\nKeluhan Warganet — keluhan layanan yang perlu direspons$1`); return t; }
+  return text.replace(/(\nMedia Distribution[^\n]*)/, `$1\nMedmas vs Medsos — bagaimana isu yang sama dibahas di berita dan di media sosial`);
+}
+export const channelOf = id => CHANNELS.find(c => c.id === id) || CHANNELS[0];

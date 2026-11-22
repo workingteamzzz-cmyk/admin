@@ -345,8 +345,9 @@ export async function buildDeck(templateBuf, outline, resolve, opts = {}) {
     }
     if (s.kind === 'news') { // sample coverage: real headlines, outlet, date and link taken from the data
       const data = resolve(s.source); if (!data) { warnings.push(`Slide “${title}”: data “${s.source}” not found`); continue; }
-      const ti = guessCol(data.columns, 'title'), mi = guessCol(data.columns, 'media'), di = guessCol(data.columns, 'date'), ui = guessCol(data.columns, 'url');
-      if (ti < 0) { warnings.push(`Slide “${title}”: the data has no title column`); continue; }
+      let ti = guessCol(data.columns, 'title'); const ci2 = guessCol(data.columns, 'content'); if (ti < 0) ti = ci2; // social posts have no headline: match the post text
+      let mi = guessCol(data.columns, 'media'); const ai = guessCol(data.columns, 'account'), pi = guessCol(data.columns, 'platform'); if (ai >= 0) mi = ai; const di = guessCol(data.columns, 'date'), ui = guessCol(data.columns, 'url');
+      if (ti < 0) { warnings.push(`Slide “${title}”: the data has no title or text column`); continue; }
       const found = s.items.map(it => { const h = normT(it.headline); const row = data.rows.find(r => normT(r[ti]) === h) || data.rows.find(r => h.length > 12 && (normT(r[ti]).includes(h) || h.includes(normT(r[ti])))); return row ? { it, row } : null; }).filter(Boolean).slice(0, 4);
       if (found.length < s.items.length) warnings.push(`Slide “${title}”: ${s.items.length - found.length} headline(s) not found in the data were left out`);
       if (!found.length) continue;
@@ -356,7 +357,7 @@ export async function buildDeck(templateBuf, outline, resolve, opts = {}) {
         shapes.push(lineRect(20 + k * 3, { x, y, w: cw, h: ch })); shapes.push(rectShape(21 + k * 3, { x, y, w: 54864, h: ch }, clr));
         const url = ui >= 0 ? String(row[ui] || '').trim() : ''; let link = '';
         if (/^https?:\/\//i.test(url)) { const rid = `rIdN${k}`; rels.push(`<Relationship Id="${rid}" Type="${REL}/hyperlink" Target="${esc(url)}" TargetMode="External"/>`); link = linkPara('Buka berita ↗', rid); }
-        shapes.push(textBox(22 + k * 3, { x: x + 120000, y, w: cw - 160000, h: ch }, styled(String(row[ti]).slice(0, 160), { sz: 1350, b: true, clr: 'tx2' }) + styled([mi >= 0 ? row[mi] : '', di >= 0 ? row[di] : ''].filter(Boolean).join(' · '), { sz: 1000, clr: 'tx1' }) + (it.why ? styled(it.why, { sz: 1150 }) : '') + link, { inset: 91440 })); });
+        shapes.push(textBox(22 + k * 3, { x: x + 120000, y, w: cw - 160000, h: ch }, styled(String(row[ti]).slice(0, 160), { sz: 1350, b: true, clr: 'tx2' }) + styled([mi >= 0 ? row[mi] : '', pi >= 0 && pi !== mi ? row[pi] : '', di >= 0 ? row[di] : ''].filter(Boolean).join(' · '), { sz: 1000, clr: 'tx1' }) + (it.why ? styled(it.why, { sz: 1150 }) : '') + link, { inset: 91440 })); });
       addSlide(L, shapes, rels); continue;
     }
     if (s.kind === 'image') { // a screenshot kept as is (e.g. a dashboard word cloud or map), with the analysis beside it

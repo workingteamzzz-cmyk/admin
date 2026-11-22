@@ -105,7 +105,21 @@ export async function extractDoc(buf, filename, mime = '') {
   return { pages: await extractText(buf, filename, mime), sensitive: [], table: false };
 }
 
+async function pptxSlides(buf) {
+  const JSZip = (await import('jszip')).default; const zip = await JSZip.loadAsync(buf);
+  const pres = await zip.file('ppt/presentation.xml')?.async('string') || ''; const rels = await zip.file('ppt/_rels/presentation.xml.rels')?.async('string') || '';
+  const target = Object.fromEntries([...rels.matchAll(/<Relationship\b[^>]*\/>/g)].map(m => [attr(m[0], 'Id'), attr(m[0], 'Target')]));
+  const out = [];
+  for (const m of pres.matchAll(/<p:sldId\b[^>]*>/g)) {
+    const t = target[attr(m[0], 'r:id')]; const x = t ? await zip.file('ppt/' + t.replace(/^\/?ppt\//, ''))?.async('string') : ''; if (!x) continue;
+    const paras = [...x.matchAll(/<a:p>([\s\S]*?)<\/a:p>/g)].map(p => [...p[1].matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map(r => unxml(r[1])).join('')).filter(Boolean);
+    const tables = [...x.matchAll(/<a:tr\b[\s\S]*?<\/a:tr>/g)].length; const charts = (x.match(/drawingml\/2006\/chart/g) || []).length;
+    out.push(`Slide ${out.length + 1}${charts ? ' [chart]' : ''}${tables ? ' [table]' : ''}\n${paras.join('\n')}`);
+  }
+  return out;
+}
 export async function extractText(buf, filename, mime = '') {
+  if (/\.pptx$/i.test(filename)) return pptxSlides(buf);
   if (/\.pdf$/i.test(filename) || mime === 'application/pdf') return pdfPages(buf);
   if (/\.docx$/i.test(filename)) { const mammoth = (await import('mammoth')).default; const r = await mammoth.extractRawText({ buffer: buf }); return [r.value]; }
   if (HTML_EXT.test(filename)) return [buf.toString('utf8').replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+\n/g, '\n')];

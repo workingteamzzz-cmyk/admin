@@ -425,7 +425,7 @@ route('POST', '/api/v1/collections/:id/docs', async (req, res, _u, p) => {
 /* ---------- reports: curated spreadsheets and presentations ---------- */
 const sendFile = (res, buf, name, type) => { res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}` }); res.end(buf); };
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', PPTX_TYPE = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-route('GET', '/api/reports', async (req, res, u) => json(res, 200, { clients: R.listClients(), templates: await R.listTemplates(u), datasets: R.listDatasets(u), decks: R.listDecks(u), meta: R.REPORT_META }));
+route('GET', '/api/reports', async (req, res, u) => json(res, 200, { references: R.referenceReports(u), clients: R.listClients(), templates: await R.listTemplates(u), datasets: R.listDatasets(u), decks: R.listDecks(u), meta: R.REPORT_META }));
 route('POST', '/api/reports/clients', async (req, res, u) => { const b = await readJson(req, 50e3); const cid = R.saveClient(u, null, b); audit(u.id, 'report.client_created', { client: cid, name: String(b.name).slice(0, 120) }, clientIp(req)); json(res, 200, { id: cid }); });
 route('PUT', '/api/reports/clients/:id', async (req, res, u, p) => { R.saveClient(u, p.id, await readJson(req, 50e3)); json(res, 200, { ok: true }); });
 route('DELETE', '/api/reports/clients/:id', (req, res, u, p) => { const c = R.deleteClient(u, p.id); audit(u.id, 'report.client_deleted', { client: c.id, name: c.name }, clientIp(req)); json(res, 200, { ok: true }); });
@@ -482,6 +482,7 @@ route('POST', '/api/reports/clients/:id/logos', async (req, res, u, p) => { cons
 route('DELETE', '/api/reports/clients/:id/logos/:lid', (req, res, u, p) => { R.removeClientLogo(u, p.id, p.lid); json(res, 200, { ok: true }); });
 route('GET', '/api/reports/clients/:id/logos/:lid', (req, res, u, p) => { const l = R.clientLogoFile(p.id, p.lid); res.writeHead(200, { 'content-type': l.mime, 'cache-control': 'private, max-age=3600', 'content-security-policy': 'sandbox' }); res.end(l.buf); });
 route('GET', '/api/reports/styles', (req, res, u) => json(res, 200, R.stylesFor(new URL(req.url, 'http://x').searchParams.get('client') || null)));
+route('GET', '/api/reports/structure', (req, res, u) => { const q = new URL(req.url, 'http://x').searchParams; json(res, 200, R.structurePreview(q.get('client') || null, q.get('type') || 'weekly', q.get('channel') || 'medmas')); });
 route('PUT', '/api/reports/clients/:id/structures', async (req, res, u, p) => { R.setClientStructure(u, p.id, await readJson(req, 30e3)); json(res, 200, { ok: true }); });
 route('PUT', '/api/reports/clients/:id/style', async (req, res, u, p) => { R.setClientStyle(u, p.id, (await readJson(req, 20e3)).style); json(res, 200, { ok: true }); });
 route('POST', '/api/reports/decks/:id/finalize', async (req, res, u, p) => {

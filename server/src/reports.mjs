@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config, ROOT } from './config.mjs';
-import { db, one, all, run, id, now, sha256, getSettings, audit } from './db.mjs';
+import { db, one, all, run, id, now, sha256, getSettings, audit, allowedCollections } from './db.mjs';
 import { Redactor, SYSTEM_NOTE } from './redact.mjs';
 import { complete, reportModel, helperModel, limitProblem } from './ai.mjs';
 import { search } from './knowledge.mjs';
@@ -13,7 +13,7 @@ import { loadWorkbook, profile, sanitizePlan, describe, runPlan, writeXlsx, repo
 import { openTemplate, describeTemplate, buildDeck, sanitizeOutline, SLIDE_KINDS, imgSize } from './slides.mjs';
 import { CLIENT_FIELDS, parsePersona, analystBlock, clientBlock } from './persona.mjs';
 import { logoInfo, recommendStyles, sanitizeStyle, STYLE_PRESETS } from './brand.mjs';
-import { REPORT_TYPES, reportType, typeNote } from './report-types.mjs';
+import { REPORT_TYPES, reportType, typeNote, CHANNELS, channelOf, adaptStructure } from './report-types.mjs';
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS report_templates(id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT, filename TEXT NOT NULL, size INTEGER, info TEXT NOT NULL, created INTEGER NOT NULL, created_by TEXT);
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS ai_tag_cache(key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', collection_id TEXT, created_by TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS client_recipes(id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL, plan TEXT NOT NULL, columns TEXT NOT NULL DEFAULT '[]', created_by TEXT, created INTEGER NOT NULL);
 `);
-for (const sql of ['ALTER TABLE decks ADD COLUMN report_type TEXT', 'ALTER TABLE decks ADD COLUMN period TEXT', 'ALTER TABLE decks ADD COLUMN structure TEXT', "ALTER TABLE clients ADD COLUMN structures TEXT NOT NULL DEFAULT '{}'", "ALTER TABLE clients ADD COLUMN logos TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE clients ADD COLUMN style TEXT', 'ALTER TABLE decks ADD COLUMN style TEXT', "ALTER TABLE decks ADD COLUMN images TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT', "ALTER TABLE datasets ADD COLUMN files TEXT NOT NULL DEFAULT '[]'"]) { try { db.exec(sql); } catch {} }
+for (const sql of ['ALTER TABLE decks ADD COLUMN channel TEXT', 'ALTER TABLE decks ADD COLUMN reference TEXT', 'ALTER TABLE decks ADD COLUMN report_type TEXT', 'ALTER TABLE decks ADD COLUMN period TEXT', 'ALTER TABLE decks ADD COLUMN structure TEXT', "ALTER TABLE clients ADD COLUMN structures TEXT NOT NULL DEFAULT '{}'", "ALTER TABLE clients ADD COLUMN logos TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE clients ADD COLUMN style TEXT', 'ALTER TABLE decks ADD COLUMN style TEXT', "ALTER TABLE decks ADD COLUMN images TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT', "ALTER TABLE datasets ADD COLUMN files TEXT NOT NULL DEFAULT '[]'"]) { try { db.exec(sql); } catch {} }
 try { db.exec(`UPDATE collections SET kind='client' WHERE kind='admin' AND id IN (SELECT collection_id FROM clients)`); } catch {}
 const DIR = path.join(config.dataDir, 'reports');
 fs.mkdirSync(path.join(DIR, 'datasets'), { recursive: true, mode: 0o700 });
@@ -78,13 +78,13 @@ export async function listTemplates(user) {
   return rows.map(r => ({ id: r.id, name: r.name, filename: r.filename, size: r.size, created: r.created, clientId: r.client_id, client: r.client, scope: r.owner_id ? 'personal' : 'team', mine: r.owner_id === user.id, info: JSON.parse(r.info) }));
 }
 function templateRow(user, tid) {
-  if (!tid || tid === 'plain' || tid === 'default') return null;
+  if (!tid || tid === 'plain' || tid === 'default' || String(tid).startsWith('doc:')) return null;
   const r = one(`SELECT * FROM report_templates WHERE id=? AND (owner_id IS NULL OR owner_id=?)`, tid, user.id);
   if (!r) throw err(404, 'Template not found'); return r;
 }
-function templateBuf(user, tid) { const r = templateRow(user, tid); return fs.readFileSync(r ? path.join(DIR, 'templates', r.id + '.pptx') : PLAIN); }
+function templateBuf(user, tid) { if (String(tid || '').startsWith('doc:')) return referenceDoc(user, tid.slice(4)).buf; const r = templateRow(user, tid); return fs.readFileSync(r ? path.join(DIR, 'templates', r.id + '.pptx') : PLAIN); }
 let plainInfo;
-async function templateDesc(user, tid) { const r = templateRow(user, tid); if (!r) { plainInfo ??= await templateInfo(fs.readFileSync(PLAIN)); return { name: 'Plain layout', info: plainInfo }; } return { name: r.name, info: JSON.parse(r.info) }; }
+async function templateDesc(user, tid) { if (String(tid || '').startsWith('doc:')) { const d = referenceDoc(user, tid.slice(4)); return { name: d.title, info: describeTemplate(await openTemplate(d.buf)) }; } const r = templateRow(user, tid); if (!r) { plainInfo ??= await templateInfo(fs.readFileSync(PLAIN)); return { name: 'Plain layout', info: plainInfo }; } return { name: r.name, info: JSON.parse(r.info) }; }
 export async function addTemplate(user, { filename, buf, name, clientId, personal }) {
   if (!/\.(pptx|potx)$/i.test(filename)) throw err(415, 'Upload a PowerPoint file (.pptx or .potx).');
   if (clientId) clientRow(clientId);
@@ -220,13 +220,13 @@ Steps run in order. Use column names EXACTLY as profiled (after a rename, use th
 Media monitoring standard (follow it when the data is news coverage, adapting to the columns and the client persona): 1) clean: strip_html on content, trim, empty_words; 2) dedupe_news; 3) ai_filter noise using the client's names, officials, units and programs from the persona; 4) ai_tag SENTIMENT from the client's point of view using the persona's sentiment rules (title + content, consistent_by title, labels Positif/Netral/Negatif); 5) ai_tag SEKTOR with the persona's sectors as fixed labels; 6) ai_tag ISU with seed "client" and allow_new true when the persona has an issue list, otherwise labels [] with max_labels 40–60 (representative names, similar issues merged); 7) keywords for the persona's programs; 8) ai_normalize entity columns (person, organization, influencer); 9) fill all empty cells with "-"; 10) summaries: sentiment per media type, sector × sentiment, program × sentiment (explode), issue × sentiment, top media per media type (top_per_group), daily trend pivot date × sentiment, top spokespersons. Use UPPERCASE names for new columns (MEDIA TYPE, SENTIMENT, SEKTOR, ISU, PROGRAM). A merged multi-file dataset already has a source column such as MEDIA TYPE.
 Guidelines: start with cleaning (trim, empty_words; date/number where the profile shows mixed formats); standardize obvious variants seen in the common values; remove duplicates; then the user's filters; then summaries useful for the report (for media monitoring: coverage per outlet, sentiment share, issues, daily/weekly trend, top spokespeople, AVE per outlet). Name summaries in the user's language. Keep the plan focused: 4–14 steps. Columns marked "personal" contain personal data: you may filter, dedupe or count by them, but never output their values.`;
 
-export async function planDataset(user, did, { instruction, model: requested, sheet, reportType: rt }) {
+export async function planDataset(user, did, { instruction, model: requested, sheet, reportType: rt, channel }) {
   checkLimits(user);
   const d = ownDataset(user, did); const sheets = await loadSource(d); const t = pickSheet(sheets, sheet || d.sheet);
   const red = redactorFor(user, 'report:' + did); const model = reportModel(user, requested, 'writing');
   const prof = profile(t, extraCols());
   const ctx = [clientBlock(d.client_id ? one(`SELECT * FROM clients WHERE id=?`, d.client_id) : null), analystBlock(user)].filter(Boolean).join('\n\n');
-  const tp = reportType(rt); const tnote = tp ? `${typeNote(tp)}${tp.derive ? ` For the trend summary, derive a period column from the date with fn "${tp.derive}" and pivot it by sentiment.` : ''}\n\n` : '';
+  const chn = channelOf(channel); const tp = reportType(rt); const tnote = `${chn.note}${chn.id === 'medsos' ? ' Use a PLATFORM column (from the file, the URL domain or a source column); reposts by different accounts are separate exposures, not duplicates; detect account categories when useful.' : ''}\n` + (tp ? `${typeNote(tp)}${tp.derive ? ` For the trend summary, derive a period column from the date with fn "${tp.derive}" and pivot it by sentiment.` : ''}\n\n` : '');
   const prompt = red.mask(`${ctx ? ctx + '\n\n' : ''}${tnote}Sheets in the file: ${sheets.map(s => `"${s.name}" (${s.rows.length} rows)`).join(', ')}. Planning for sheet "${t.name}".\n\nColumn profile:\n${JSON.stringify(prof, null, 1)}\n\nUser's instruction:\n${String(instruction || 'Clean this data and prepare the usual summaries for a report.').slice(0, 4000)}`);
   const raw = await askJson(user, model, PLAN_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt, 'report.plan', 6000, 'medium');
   const plan = sanitizePlan(unmaskDeep(red, raw));
@@ -440,18 +440,38 @@ export function spellingPairs(client) {
   return txt.split(/[\n;]+/).map(l => l.split(/\s*(?:→|->|=>|=)\s*/)).filter(p => p.length === 2 && p[0].trim() && p[1].trim()).map(([a, b]) => [a.trim(), b.trim()]);
 }
 // Structure for a report type: the client's own for that type, else the client's general structure, else the type's default.
-export function structureFor(client, typeId) {
-  const own = client ? JSON.parse(client.structures || '{}')[typeId] : ''; if (own?.trim()) return { text: own, source: 'client' };
-  const general = parsePersona(client?.persona, CLIENT_FIELDS).structure; if (general?.trim() && (!typeId || typeId === 'weekly')) return { text: general, source: 'client' };
-  const t = reportType(typeId); return { text: t?.structure || general || '', source: t?.structure ? 'default' : general ? 'client' : 'none' };
+const structKey = (typeId, channel) => (channel && channel !== 'medmas' ? `${typeId}:${channel}` : typeId);
+export function structureFor(client, typeId, channel = 'medmas') {
+  const own = client ? JSON.parse(client.structures || '{}')[structKey(typeId, channel)] : ''; if (own?.trim()) return { text: own, source: 'client' };
+  const general = parsePersona(client?.persona, CLIENT_FIELDS).structure; if (general?.trim() && (!typeId || typeId === 'weekly') && channel === 'medmas') return { text: general, source: 'client' };
+  const t = reportType(typeId); const base = t?.structure || ''; return { text: adaptStructure(base, channel) || general || '', source: base ? 'default' : general ? 'client' : 'none' };
 }
-export function setClientStructure(user, cid, { type, text }) { const c = clientRow(cid); if (!reportType(type)) throw err(400, 'Unknown report type'); const m = JSON.parse(c.structures || '{}'); if (String(text || '').trim()) m[type] = String(text).slice(0, 6000); else delete m[type]; run(`UPDATE clients SET structures=?, updated=? WHERE id=?`, JSON.stringify(m), now(), cid); }
+export function structurePreview(cid, typeId, channel) { const c = cid ? one(`SELECT * FROM clients WHERE id=?`, cid) : null; return structureFor(c, typeId, channel || 'medmas'); }
+export function setClientStructure(user, cid, { type, channel, text }) { const c = clientRow(cid); if (!reportType(type)) throw err(400, 'Unknown report type'); const m = JSON.parse(c.structures || '{}'); const key = structKey(type, channel); if (String(text || '').trim()) m[key] = String(text).slice(0, 6000); else delete m[key]; run(`UPDATE clients SET structures=?, updated=? WHERE id=?`, JSON.stringify(m), now(), cid); }
+
+/* ---------- reference reports from seniors (knowledge by person) ---------- */
+// Reports that analysts can follow: PowerPoint (design + structure + writing style) or PDF/Word (structure + writing style).
+export function referenceReports(user) {
+  const cols = allowedCollections(user).filter(c => ['person', 'team', 'client'].includes(c.kind)); if (!cols.length) return [];
+  return all(`SELECT d.id, d.title, d.filename, d.created, d.collection_id, c.kind, c.name collection, COALESCE(NULLIF(u.name,''),u.email) owner FROM docs d JOIN collections c ON c.id=d.collection_id LEFT JOIN users u ON u.id=c.owner_id
+    WHERE d.status='ready' AND d.collection_id IN (${cols.map(() => '?').join(',')}) AND (lower(d.filename) LIKE '%.pptx' OR lower(d.filename) LIKE '%.pdf' OR lower(d.filename) LIKE '%.docx') ORDER BY c.kind='person' DESC, d.created DESC`, ...cols.map(c => c.id))
+    .map(d => ({ id: d.id, title: d.title, filename: d.filename, created: d.created, kind: d.kind, by: d.kind === 'person' ? d.owner : d.collection, design: /\.pptx$/i.test(d.filename) }));
+}
+function referenceDoc(user, did) {
+  const d = one(`SELECT * FROM docs WHERE id=?`, did); if (!d || !allowedCollections(user).some(c => c.id === d.collection_id)) throw err(404, 'Reference report not found');
+  return { ...d, buf: fs.readFileSync(path.join(config.dataDir, 'docs', d.id)), owner: one(`SELECT COALESCE(NULLIF(u.name,''),u.email) n FROM collections c LEFT JOIN users u ON u.id=c.owner_id WHERE c.id=?`, d.collection_id)?.n || '' };
+}
+async function referenceNote(user, did) {
+  const d = referenceDoc(user, did); const pages = all(`SELECT text FROM kchunks WHERE doc_id=? ORDER BY idx`, d.id).map(r => r.text).join('\n').slice(0, 9000);
+  let structure = ''; if (/\.pptx$/i.test(d.filename)) { try { const info = describeTemplate(await openTemplate(d.buf)); structure = info.structure.map((x, i) => `${i + 1}. ${x.title || '(no title)'}${x.has?.length ? ` [${x.has.join(', ')}]` : ''}`).join('\n'); } catch {} }
+  return { doc: d, structure, text: `\n\nReference report chosen by the analyst: "${d.title}"${d.owner ? ` by ${d.owner}` : ''}. Follow its structure, depth, tone and writing style — the way it titles slides, phrases findings, explains causes and makes recommendations — but with this period's data and content; never copy its numbers or facts.${structure ? `\nIts slides:\n${structure}` : ''}\nExcerpts of its text (style examples):\n${pages}` };
+}
 const maxOf = text => { const m = String(text || '').match(/maks(?:imal|imum)?\.?\s*(\d+)\s*slide|max(?:imum)?\.?\s*(\d+)\s*slides?/i); return m ? +(m[1] || m[2]) : 0; };
 const maxSlidesOf = client => { const m = (parsePersona(client?.persona, CLIENT_FIELDS).structure || '').match(/maks(?:imal|imum)?\.?\s*(\d+)\s*slide|max(?:imum)?\.?\s*(\d+)\s*slides?/i); return m ? +(m[1] || m[2]) : 0; };
 
 /* ================= decks ================= */
 function ownDeck(user, kid) { const k = one(`SELECT * FROM decks WHERE id=? AND user_id=?`, kid, user.id); if (!k) throw err(404, 'Presentation not found'); return k; }
-const deckOut = k => ({ id: k.id, clientId: k.client_id, reportType: k.report_type || null, period: k.period || '', structure: k.structure || '', style: k.style ? JSON.parse(k.style) : null, images: JSON.parse(k.images || '[]'), title: k.title, template: k.template_id || 'plain', datasets: JSON.parse(k.datasets), brief: k.brief, outline: k.outline ? JSON.parse(k.outline) : null, notes: k.notes || '', created: k.created, updated: k.updated });
+const deckOut = k => ({ id: k.id, clientId: k.client_id, channel: k.channel || 'medmas', reference: k.reference || null, reportType: k.report_type || null, period: k.period || '', structure: k.structure || '', style: k.style ? JSON.parse(k.style) : null, images: JSON.parse(k.images || '[]'), title: k.title, template: k.template_id || 'plain', datasets: JSON.parse(k.datasets), brief: k.brief, outline: k.outline ? JSON.parse(k.outline) : null, notes: k.notes || '', created: k.created, updated: k.updated });
 export function listDecks(user) { return all(`SELECT * FROM decks WHERE user_id=? ORDER BY updated DESC`, user.id).map(k => { const o = deckOut(k); return { ...o, slides: o.outline?.slides.length || 0, outline: undefined, brief: o.brief.slice(0, 200) }; }); }
 export function getDeck(user, kid) { return deckOut(ownDeck(user, kid)); }
 export function deleteDeck(user, kid) { const k = ownDeck(user, kid); run(`DELETE FROM decks WHERE id=?`, k.id); return k; }
@@ -550,7 +570,7 @@ function chooseCover(user, cover) {
   const z = size(pick); const layout = ['full', 'split'].includes(cover?.layout) ? cover.layout : (z.w / z.h >= 1.2 ? 'full' : 'split');
   return { image: pick, layout, mode: cover?.mode === 'pick' ? 'pick' : 'auto', candidates: cands };
 }
-export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId, images = [], style, cover, reportType: rt, period }) {
+export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId, images = [], style, cover, reportType: rt, period, channel, reference, useReferenceDesign }) {
   checkLimits(user); const client = clientRow(clientId);
   const ids = [...new Set(datasets)].slice(0, 6); const tables = deckTables(user, ids);
   const tdesc = await templateDesc(user, template);
@@ -558,15 +578,16 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   const red = redactorFor(user, 'deck:' + kid); const catalog = catalogText(tables);
   let excerpts = '';
   if (knowledge && brief) { const hits = search(user, String(brief).slice(0, 300), { limit: 6, collections: client?.collection_id ? [client.collection_id] : null }).filter(h => !h.localOnly); if (hits.length) excerpts = `\n\nRelevant internal documents:\n${hits.map((h, i) => `[${i + 1}] ${h.title}${h.page ? ' p.' + h.page : ''}: ${h.text.slice(0, 900)}`).join('\n')}`; }
-  const struct = tdesc.info.structure?.length ? `\n\nReference structure from the template "${tdesc.name}" (slides in an earlier report; follow its order and style, with new content):\n${tdesc.info.structure.map((s, i) => `${i + 1}. ${s.title || '(no title)'}${s.has?.length ? ` [${s.has.join(', ')}]` : ''}${s.text ? ' — ' + s.text.slice(0, 160) : ''}`).join('\n')}` : '';
+  const struct = !reference && tdesc.info.structure?.length ? `\n\nReference structure from the template "${tdesc.name}" (slides in an earlier report; follow its order and style, with new content):\n${tdesc.info.structure.map((s, i) => `${i + 1}. ${s.title || '(no title)'}${s.has?.length ? ` [${s.has.join(', ')}]` : ''}${s.text ? ' — ' + s.text.slice(0, 160) : ''}`).join('\n')}` : '';
   const clientNote = [clientBlock(client), analystBlock(user)].filter(Boolean).join('\n\n') + '\n\n';
   const prompt = red.mask(`${clientNote}Brief from the user:\n${String(brief || 'Create a report presentation from this data.').slice(0, 6000)}${title ? `\n\nWorking title: ${title}` : ''}\n\nToday: ${new Date().toISOString().slice(0, 10)}${struct}\n\nData catalog:${catalog || '\n(no datasets attached — write from the brief only, without charts or tables)'}${excerpts}`);
   // Screenshots (e.g. dashboard word cloud, map) go into the deck; the analysis model also reads them when image uploads are allowed.
   const imgs = (Array.isArray(images) ? images : []).slice(0, 8).map(x => ({ id: String(x.id || ''), label: String(x.label || x.name || '').slice(0, 120) })).filter(x => loadImage(user, x.id));
   const allowImages = getSettings().imageUploads; const vision = allowImages ? imgs.map(x => { const im = loadImage(user, x.id); return { mime: im.mime, data: im.buf.toString('base64') }; }) : [];
   const imgNote = imgs.length ? `\n\nScreenshots provided (use their ids in "image" slides${allowImages ? '; they are attached in this order' : '; you cannot see them, so describe only what the brief says about them'}):\n${imgs.map(x => `- ${x.id}: ${x.label || 'screenshot'}`).join('\n')}` : '';
-  const tp = reportType(rt); const per = String(period || '').trim().slice(0, 80); const rstruct = structureFor(client, tp?.id);
-  const cap = maxOf(rstruct.text) || (tp?.maxSlides || 0); const capNote = `${tp ? `\n\n${typeNote(tp, per)}` : ''}${rstruct.text ? `\n\nReport structure for this deck (${rstruct.source === 'client' ? "the client's own" : `default for ${tp?.label || 'this report'}`}) — follow it exactly, one slide per line, in this order:\n${rstruct.text}` : ''}${cap ? `\n\nSlide limit: at most ${cap} slides.` : ''}`;
+  const tp = reportType(rt); const per = String(period || '').trim().slice(0, 80); const chn = channelOf(channel); const ref = reference ? await referenceNote(user, String(reference)) : null; const rstruct = ref?.structure ? { text: ref.structure, source: 'reference' } : structureFor(client, tp?.id, chn.id);
+  if (ref && useReferenceDesign !== false && /\.pptx$/i.test(ref.doc.filename)) template = 'doc:' + ref.doc.id;
+  const cap = maxOf(rstruct.text) || (tp?.maxSlides || 0); const capNote = `\n\n${chn.note}${tp ? `\n${typeNote(tp, per)}` : ''}${ref ? ref.text : ''}${rstruct.text ? `\n\nReport structure for this deck (${rstruct.source === 'reference' ? 'from the chosen reference report' : rstruct.source === 'client' ? "the client's own" : `default for ${tp?.label || 'this report'}`}) — follow it exactly, one slide per line, in this order:\n${rstruct.text}` : ''}${cap ? `\n\nSlide limit: at most ${cap} slides.` : ''}`;
   const raw = await askJson(user, model, outlineSystem() + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt + red.mask(imgNote + capNote), 'report.outline', 16000, 'medium', vision);
   let outline = sanitizeOutline(unmaskDeep(red, raw)); let notes = red.unmask(String(raw.notes || ''));
   if (!outline.slides.length) throw err(502, 'The AI did not return any slides. Try again with a more specific brief.');
@@ -577,7 +598,7 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, notes].filter(Boolean).join(' ');
   if (!outline.footer && tp && tp.id !== 'adhoc') outline.footer = `${tp.label.replace(/ report$/, ' Report')}${per ? ` · ${per}` : ''}`;
   const t = String(title || outline.title || 'Presentation').slice(0, 160);
-  const st = sanitizeStyle(style); run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id,images,style,report_type,period,structure) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null, JSON.stringify(imgs), st ? JSON.stringify(st) : null, tp?.id || null, per, rstruct.text || null);
+  const st = sanitizeStyle(style); run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id,images,style,report_type,period,structure,channel,reference) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null, JSON.stringify(imgs), st ? JSON.stringify(st) : null, tp?.id || null, per, rstruct.text || null, chn.id, ref?.doc.id || null);
   return { ...getDeck(user, kid), model: { id: model.id, label: model.label }, finalizer: finalizer && { id: finalizer.id, label: finalizer.label } };
 }
 // Finalize (again) after the user edited the slides.
@@ -593,7 +614,7 @@ export function saveDeck(user, kid, { title, outline, template, datasets, images
   if (outline && cover !== undefined) outline.cover = cover ? chooseCover(user, cover) : null;
   if (style !== undefined) { const st = sanitizeStyle(style); run(`UPDATE decks SET style=? WHERE id=? AND user_id=?`, st ? JSON.stringify(st) : null, kid, user.id); }
   if (Array.isArray(images)) run(`UPDATE decks SET images=? WHERE id=? AND user_id=?`, JSON.stringify(images.slice(0, 12).map(x => ({ id: String(x.id), label: String(x.label || '').slice(0, 120) })).filter(x => loadImage(user, x.id))), kid, user.id);
-  const k = ownDeck(user, kid); if (template) templateRow(user, template);
+  const k = ownDeck(user, kid); if (template && String(template).startsWith('doc:')) referenceDoc(user, template.slice(4)); else if (template) templateRow(user, template);
   run(`UPDATE decks SET title=?, outline=?, template_id=?, datasets=?, updated=? WHERE id=?`, String(title ?? k.title).slice(0, 160) || 'Presentation', outline ? JSON.stringify(sanitizeOutline(outline)) : k.outline,
     template ? (['default', 'plain'].includes(template) ? null : template) : k.template_id, datasets ? JSON.stringify([...new Set(datasets)].slice(0, 6)) : k.datasets, now(), kid);
   return getDeck(user, kid);
@@ -631,4 +652,4 @@ export function checkDeck(user, kid) {
 }
 // The catalog the outline editor needs to offer valid sources and columns.
 export function deckSources(user, datasetIds) { return deckTables(user, datasetIds).map(t => ({ ref: t.ref, columns: t.columns, rows: t.rows.length, main: !!t.main })); }
-export const REPORT_META = { ops: OPS, kinds: SLIDE_KINDS, presets: STYLE_PRESETS, types: REPORT_TYPES.map(({ id, label, short, period, maxSlides, structure, focus }) => ({ id, label, short, period, maxSlides, structure, focus })) };
+export const REPORT_META = { channels: CHANNELS.map(({ id, label }) => ({ id, label })), ops: OPS, kinds: SLIDE_KINDS, presets: STYLE_PRESETS, types: REPORT_TYPES.map(({ id, label, short, period, maxSlides, structure, focus }) => ({ id, label, short, period, maxSlides, structure, focus })) };
