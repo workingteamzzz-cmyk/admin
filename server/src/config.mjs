@@ -91,4 +91,6 @@ export const DEFAULT_SETTINGS = {
   orgSkills: [],
   orgPrompts: [],
   security: { require2fa: 'all', maskingRetentionDays: 90, logRetentionDays: 0 }, // 2FA: all | admins | off
+  // Default writing rules for report decks. Editable in Admin → Settings; a client's persona and report structure always come first.
+  reportStyle: "- Slide titles are short topic names in the report's language, e.g. \"Executive Summary\", \"Tren Ekspos\", \"Media Distribution\", \"Sentimen\", \"Isu Sektor\", \"Risk Mapping\". No numbering, no teaser subtitle, no conclusion-as-title; the insight goes in the content.\n- The executive summary is a synthesis across all slides: it does not repeat the numbers of other slides one by one; one conclusion, a few cross-cutting findings, one focus for next period.\n- Every sentence is complete. No dangling labels or fragments; every number is followed by what it means (\"17 berita negatif\"). No \"Catatan:\" or \"Pembacaan:\" boxes.\n- Explain movements with the client's own activities found in the data (e.g. a province rose because of a client event there); never state a pattern without its cause.\n- Copy headlines exactly; mention ties in rankings; never mention tool or vendor names.",
 };

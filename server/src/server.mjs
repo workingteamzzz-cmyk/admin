@@ -318,6 +318,7 @@ route('PUT', '/api/admin/settings', async (req, res, u) => {
   if (b.webhook) { const url = String(b.webhook.url || '').trim(); if (url && !/^https?:\/\//.test(url)) throw new HttpError(400, 'Webhook URL must start with http(s)://');
     s.webhook.url = url; if (Array.isArray(b.webhook.events)) s.webhook.events = b.webhook.events.map(String).slice(0, 20); if (url && !s.webhook.secret) s.webhook.secret = crypto.randomBytes(24).toString('base64url'); }
   for (const k of ['webSearch', 'imageUploads', 'canvas']) if (typeof b[k] === 'boolean') s[k] = b[k];
+  if (typeof b.reportStyle === 'string') s.reportStyle = b.reportStyle.slice(0, 8000);
   if (b.redaction) s.redaction = { enabled: !!b.redaction.enabled, terms: (b.redaction.terms || []).map(t => String(t).trim()).filter(Boolean).slice(0, 500), columns: (b.redaction.columns || s.redaction.columns || []).map(t => String(t).trim()).filter(Boolean).slice(0, 100) };
   if (b.monthlyBudgetUsd !== undefined) s.monthlyBudgetUsd = clampBudget(b.monthlyBudgetUsd) ?? 0;
   if (Array.isArray(b.orgSkills)) s.orgSkills = b.orgSkills.slice(0, 50).map(k => ({ id: String(k.id || id()), name: String(k.name || '').slice(0, 80), description: String(k.description || '').slice(0, 200), content: String(k.content || '').slice(0, 20000), enabled: k.enabled !== false })).filter(k => k.name && k.content);
@@ -474,6 +475,14 @@ route('POST', '/api/reports/decks', async (req, res, u) => {
   audit(u.id, 'report.deck_drafted', { deck: k.id, model: k.model.id, finalizer: k.finalizer?.id || null, slides: k.outline.slides.length, datasets: k.datasets.length }, clientIp(req)); json(res, 200, k);
 });
 route('GET', '/api/reports/decks/:id', (req, res, u, p) => json(res, 200, R.getDeck(u, p.id)));
+route('GET', '/api/reports/decks/:id/checks', (req, res, u, p) => json(res, 200, R.checkDeck(u, p.id)));
+route('POST', '/api/reports/images', async (req, res, u) => { const buf = await readBody(req, 15 * MB); json(res, 200, R.saveImage(u, { buf, mime: String(req.headers['content-type'] || '').split(';')[0], filename: fileName(req) })); });
+route('GET', '/api/reports/images/:id', (req, res, u, p) => { const im = R.imageFile(u, p.id); res.writeHead(200, { 'content-type': im.mime, 'cache-control': 'private, max-age=3600', 'content-security-policy': 'sandbox' }); res.end(im.buf); });
+route('POST', '/api/reports/clients/:id/logos', async (req, res, u, p) => { const buf = await readBody(req, 5 * MB); const lid = R.addClientLogo(u, p.id, { buf, mime: String(req.headers['content-type'] || '').split(';')[0], filename: fileName(req) }); json(res, 200, { id: lid }); });
+route('DELETE', '/api/reports/clients/:id/logos/:lid', (req, res, u, p) => { R.removeClientLogo(u, p.id, p.lid); json(res, 200, { ok: true }); });
+route('GET', '/api/reports/clients/:id/logos/:lid', (req, res, u, p) => { const l = R.clientLogoFile(p.id, p.lid); res.writeHead(200, { 'content-type': l.mime, 'cache-control': 'private, max-age=3600', 'content-security-policy': 'sandbox' }); res.end(l.buf); });
+route('GET', '/api/reports/styles', (req, res, u) => json(res, 200, R.stylesFor(new URL(req.url, 'http://x').searchParams.get('client') || null)));
+route('PUT', '/api/reports/clients/:id/style', async (req, res, u, p) => { R.setClientStyle(u, p.id, (await readJson(req, 20e3)).style); json(res, 200, { ok: true }); });
 route('POST', '/api/reports/decks/:id/finalize', async (req, res, u, p) => {
   const body = await readJson(req, 10e3); const k = await R.refinalizeDeck(u, p.id, body);
   audit(u.id, 'report.deck_finalized', { deck: p.id, model: k.finalizer.id }, clientIp(req)); json(res, 200, k);

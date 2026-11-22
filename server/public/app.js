@@ -835,7 +835,8 @@ function oaModal(m, prov='openai'){
 }
 function adminSettings(){
   const s=admin.settings;
-  $('#adminBody').innerHTML=`<div class="set-sec"><h3>Privacy & safety</h3><p>How data is handled before anything is sent to an AI provider.</p>
+  $('#adminBody').innerHTML=`<div class="set-sec"><h3>Report house style</h3><p>The team's default writing rules for report decks (titles, executive summary, sentence style…). A client's persona and report structure always come first, then each analyst's persona; these rules fill in the rest.</p><textarea id="setReportStyle" style="min-height:170px;width:100%">${esc(s.reportStyle||'')}</textarea><div style="margin-top:10px"><button class="btn sm primary" data-act="savereportstyle">Save house style</button></div></div>
+    <div class="set-sec"><h3>Privacy & safety</h3><p>How data is handled before anything is sent to an AI provider.</p>
       <div class="set-row"><div><b>Mask sensitive data</b><small>Replace NIK, NIP, NPWP, emails, phone numbers, values from personal-data columns in spreadsheets, and the terms below with placeholders before sending; restored only on screen. PDFs are converted to text so they can be masked.</small></div><button class="switch ${s.redaction.enabled?'on':''}" data-settoggle="redaction" role="switch" aria-checked="${s.redaction.enabled}"></button></div>
       <div style="padding:6px 0 4px"><b style="font-size:14px">Extra terms to mask</b><div class="help" style="margin:2px 0 8px">One per line — names of people, project codenames, locations… (at least 3 characters).</div><textarea id="setTerms">${esc(s.redaction.terms.join('\n'))}</textarea></div>
       <div style="padding:6px 0 4px"><b style="font-size:14px">Extra spreadsheet columns to mask</b><div class="help" style="margin:2px 0 8px">Names, NIK, No RM, address, phone, email and date of birth are detected automatically. Add other column names whose values must never reach cloud AI, one per line (e.g. Diagnosa, Riwayat Penyakit). Applies to files uploaded after saving.</div><textarea id="setCols" placeholder="Diagnosa">${esc((s.redaction.columns||[]).join('\n'))}</textarea></div>
@@ -1080,6 +1081,7 @@ document.addEventListener('click',async e=>{
     // ---- admin ----
     case 'adduser': userModal(null); break;
     case 'reset2fa': if(await confirmBox('Reset two-step verification?','The user is signed out and must set up their authenticator again at the next sign-in. Use this only after verifying who is asking.','Reset')){ await api(`/api/admin/users/${t.dataset.uid}/reset2fa`,{method:'POST'}); renderAdmin(); toast('Two-step verification reset'); } break;
+    case 'savereportstyle': await api('/api/admin/settings',{method:'PUT', body:{reportStyle:$('#setReportStyle').value}}); await loadAdmin(); toast('House style saved'); break;
     case 'savesecurity': await api('/api/admin/settings',{method:'PUT', body:{security:{require2fa:$('#sec2fa').value, maskingRetentionDays:+$('#secMask').value||0, logRetentionDays:+$('#secLogs').value||0}}}); await loadAdmin(); adminSecurity(); toast('Policies saved'); break;
     case 'saveuser': { const uid_=t.dataset.uid; const body={name:$('#uName').value.trim(), role:$('#uRole').value, budget_usd:$('#uBudget').value.trim()===''?null:+$('#uBudget').value, groups:checked('#uGroups')};
       if(uid_){ body.persona=readPersona('up', me.personaFields.analyst); await api('/api/admin/users/'+uid_,{method:'PATCH', body}); if(uid_===me.user.id) await refreshMe(); closeModal(); renderAdmin(); toast('User updated'); }

@@ -52,6 +52,15 @@ Canopus works like a senior communications consultant for the team: it leads wit
 - **Client persona** (one per client): voice and character, audiences, key messages, terms to use, terms to avoid, sensitive issues, plus other guidelines. Applied to every deck for that client and to chats where Knowledge is aimed at that client's space.
 - Both apply together: the client persona decides what may be said and in whose voice; the analyst persona decides how the analysis is done and presented.
 
+## Smart report assistant: one analyst's flow, generalized
+
+Canopus supports a full weekly-report flow — Excel first, then the deck — while every client can work differently:
+- **Upload**: one or more spreadsheets (e.g. ONLINE + PRINTED exports, merged with a MEDIA TYPE column), screenshots (dashboard word clouds, maps, cover photos), client documents, several client logos, and templates.
+- **Excel**: layered duplicate check with a cleaning log, AI noise filter, client-POV sentiment, sectors, an issue taxonomy kept consistent with the client's reference list, program detection, entity clean-up, summaries with COUNTIFS formulas. "Weekly media massa/sosial" are presets, not rules.
+- **Deck**: the client's report structure (persona → Report structure, with an optional slide limit), executive-summary synthesis slides, news samples with links taken from the data, screenshot slides with analysis (the AI reads screenshots when Admin → Settings allows images), chart annotations, platform filters, logo and footer on every slide, spelling rules applied, file properties cleaned, and quality checks before download.
+- **Style**: pick a style per client or per deck — presets (Editorial data, Government classic, Modern bold, Minimal monochrome, Warm professional) or a palette recommended from the client's logo colours; applied to any template's theme colours and fonts. With several logos, the darkest goes on light slides and the brightest on dark covers.
+- **House style**: the team's default writing rules live in Admin → Settings and can be changed; the client's persona and structure always win.
+
 ## Knowledge spaces for many people
 
 - **Team knowledge — for everyone:** one shared space; every user can add files and everyone can search and open them.

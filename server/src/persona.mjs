@@ -24,6 +24,7 @@ export const CLIENT_FIELDS = [
   ['sectors', 'Sectors / priority programs', 'e.g. Peningkatan Kualitas SDM; Penciptaan Kesempatan Kerja yang Layak; Transformasi Dunia Kerja'],
   ['issues', 'Reference issue list', 'One issue per line (or separated by ;). Used to keep issue names consistent week to week and between media and social media'],
   ['spelling', 'Spelling and naming rules', 'e.g. Sumatera → Sumatra; Kemenaker → Kemnaker'],
+  ['structure', 'Report structure', 'One slide per line: Title — what it must show. Add “Maks 15 slide” to cap the length'],
 ];
 
 export function parsePersona(value, fields) {

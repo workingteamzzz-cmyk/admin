@@ -12,6 +12,7 @@ import { search } from './knowledge.mjs';
 import { loadWorkbook, profile, sanitizePlan, describe, runPlan, writeXlsx, reportSensitive, guessCol, OPS, FILTERS, CLEANS, DERIVES, MEASURES } from './tables.mjs';
 import { openTemplate, describeTemplate, buildDeck, sanitizeOutline, SLIDE_KINDS } from './slides.mjs';
 import { CLIENT_FIELDS, parsePersona, analystBlock, clientBlock } from './persona.mjs';
+import { logoInfo, recommendStyles, sanitizeStyle, STYLE_PRESETS } from './brand.mjs';
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS report_templates(id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT, filename TEXT NOT NULL, size INTEGER, info TEXT NOT NULL, created INTEGER NOT NULL, created_by TEXT);
@@ -23,11 +24,13 @@ CREATE TABLE IF NOT EXISTS ai_tag_cache(key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', collection_id TEXT, created_by TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS client_recipes(id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL, plan TEXT NOT NULL, columns TEXT NOT NULL DEFAULT '[]', created_by TEXT, created INTEGER NOT NULL);
 `);
-for (const sql of ['ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT', "ALTER TABLE datasets ADD COLUMN files TEXT NOT NULL DEFAULT '[]'"]) { try { db.exec(sql); } catch {} }
+for (const sql of ["ALTER TABLE clients ADD COLUMN logos TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE clients ADD COLUMN style TEXT', 'ALTER TABLE decks ADD COLUMN style TEXT', "ALTER TABLE decks ADD COLUMN images TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT', "ALTER TABLE datasets ADD COLUMN files TEXT NOT NULL DEFAULT '[]'"]) { try { db.exec(sql); } catch {} }
 try { db.exec(`UPDATE collections SET kind='client' WHERE kind='admin' AND id IN (SELECT collection_id FROM clients)`); } catch {}
 const DIR = path.join(config.dataDir, 'reports');
 fs.mkdirSync(path.join(DIR, 'datasets'), { recursive: true, mode: 0o700 });
 fs.mkdirSync(path.join(DIR, 'templates'), { recursive: true, mode: 0o700 });
+fs.mkdirSync(path.join(DIR, 'images'), { recursive: true, mode: 0o700 });
+fs.mkdirSync(path.join(DIR, 'clients'), { recursive: true, mode: 0o700 });
 const DEFAULT_TEMPLATE = path.join(ROOT, 'assets', 'default-template.pptx');
 const err = (status, message) => Object.assign(new Error(message), { status });
 const dsDir = d => path.join(DIR, 'datasets', d);
@@ -38,7 +41,7 @@ const dsDir = d => path.join(DIR, 'datasets', d);
 const clientRow = cid => { if (!cid) return null; const c = one(`SELECT * FROM clients WHERE id=?`, cid); if (!c) throw err(404, 'Client not found'); return c; };
 export function listClients() {
   return all(`SELECT c.*, (SELECT COUNT(*) FROM report_templates t WHERE t.client_id=c.id) templates, (SELECT COUNT(*) FROM client_recipes r WHERE r.client_id=c.id) recipes,
-    (SELECT COUNT(*) FROM docs d WHERE d.collection_id=c.collection_id) docs FROM clients c ORDER BY c.name COLLATE NOCASE`).map(c => ({ ...c, persona: parsePersona(c.persona, CLIENT_FIELDS),
+    (SELECT COUNT(*) FROM docs d WHERE d.collection_id=c.collection_id) docs FROM clients c ORDER BY c.name COLLATE NOCASE`).map(c => ({ ...c, persona: parsePersona(c.persona, CLIENT_FIELDS), logos: JSON.parse(c.logos || '[]'), style: c.style ? JSON.parse(c.style) : null,
     recipeList: all(`SELECT id,name,columns,created FROM client_recipes WHERE client_id=? ORDER BY created DESC`, c.id).map(r => ({ ...r, columns: JSON.parse(r.columns) })) }));
 }
 export function saveClient(user, cid, { name, description, instructions, persona }) {
@@ -180,10 +183,10 @@ function parseJson(text) {
   const a = t.indexOf('{'), b = t.lastIndexOf('}'); if (a < 0 || b < a) throw new Error('no JSON object');
   return JSON.parse(t.slice(a, b + 1));
 }
-async function askJson(user, model, system, prompt, purpose, maxTokens, effort = 'medium') {
-  let out = await complete(user, model, system, prompt, purpose, maxTokens, effort);
+async function askJson(user, model, system, prompt, purpose, maxTokens, effort = 'medium', images = []) {
+  let out = await complete(user, model, system, prompt, purpose, maxTokens, effort, images);
   try { return parseJson(out); } catch {
-    out = await complete(user, model, system, prompt + '\n\nIMPORTANT: your previous answer was not valid JSON. Reply with one valid JSON object only, no other text.', purpose, maxTokens, effort);
+    out = await complete(user, model, system, prompt + '\n\nIMPORTANT: your previous answer was not valid JSON. Reply with one valid JSON object only, no other text.', purpose, maxTokens, effort, images);
     try { return parseJson(out); } catch { throw err(502, 'The AI did not return a usable plan. Try again or rephrase the instruction.'); }
   }
 }
@@ -393,9 +396,52 @@ export function datasetDigest(user, did) {
   return { id: bid, name, mime: 'text/markdown', size: buf.length, kind: 'text' };
 }
 
+/* ================= images: screenshots for decks, client logos ================= */
+const IMG_RE = /^image\/(png|jpeg)$/;
+export function saveImage(user, { buf, mime, filename }) {
+  const m = IMG_RE.exec(mime || '') || (/\.png$/i.test(filename) ? [, 'png'] : /\.jpe?g$/i.test(filename) ? [, 'jpeg'] : null);
+  if (!m) throw err(415, 'Upload a PNG or JPG image (export SVG logos as PNG).');
+  const iid = id(); const dir = path.join(DIR, 'images', user.id); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, `${iid}.${m[1]}`), buf, { mode: 0o600 }); return { id: iid, name: String(filename || 'image').slice(0, 120), ext: m[1] };
+}
+function loadImage(user, iid) { const dir = path.join(DIR, 'images', user.id); for (const ext of ['png', 'jpeg']) { const f = path.join(dir, `${iid}.${ext}`); if (/^[\w-]+$/.test(iid) && fs.existsSync(f)) return { buf: fs.readFileSync(f), ext, mime: 'image/' + ext }; } return null; }
+export function imageFile(user, iid) { const im = loadImage(user, iid); if (!im) throw err(404, 'Image not found'); return im; }
+// A client can have several logos (colour, white, partner…). Each is analysed once: brightness and brand colours.
+const logosDir = cid => path.join(DIR, 'clients', cid, 'logos');
+export function clientLogos(cid) {
+  if (!cid) return []; const c = one(`SELECT logos FROM clients WHERE id=?`, cid); const list = JSON.parse(c?.logos || '[]');
+  return list.map(l => { const f = path.join(logosDir(cid), `${l.id}.${l.ext}`); return fs.existsSync(f) ? { ...l, buf: fs.readFileSync(f), mime: 'image/' + l.ext } : null; }).filter(Boolean);
+}
+export function addClientLogo(user, cid, { buf, mime, filename }) {
+  clientRow(cid); const m = IMG_RE.exec(mime || '') || (/\.png$/i.test(filename) ? [, 'png'] : /\.jpe?g$/i.test(filename) ? [, 'jpeg'] : null);
+  if (!m) throw err(415, 'Upload logos as PNG or JPG (export SVG logos as PNG).');
+  const lid = id(); fs.mkdirSync(logosDir(cid), { recursive: true, mode: 0o700 }); fs.writeFileSync(path.join(logosDir(cid), `${lid}.${m[1]}`), buf, { mode: 0o600 });
+  const info = m[1] === 'png' ? logoInfo(buf) : { lum: 0.5, colors: [] };
+  const list = JSON.parse(one(`SELECT logos FROM clients WHERE id=?`, cid).logos || '[]'); list.push({ id: lid, ext: m[1], label: String(filename || 'logo').replace(/\.(png|jpe?g)$/i, '').slice(0, 80), lum: +info.lum.toFixed(3), colors: info.colors });
+  run(`UPDATE clients SET logos=?, updated=? WHERE id=?`, JSON.stringify(list.slice(-8)), now(), cid); return lid;
+}
+export function removeClientLogo(user, cid, lid) { clientRow(cid); const list = JSON.parse(one(`SELECT logos FROM clients WHERE id=?`, cid).logos || '[]').filter(l => l.id !== lid); run(`UPDATE clients SET logos=? WHERE id=?`, JSON.stringify(list), cid); fs.rmSync(path.join(logosDir(cid), `${lid}.png`), { force: true }); fs.rmSync(path.join(logosDir(cid), `${lid}.jpeg`), { force: true }); }
+export function clientLogoFile(cid, lid) { const l = clientLogos(cid).find(x => x.id === lid); if (!l) throw err(404, 'Logo not found'); return l; }
+// Footer on light slides gets the darkest logo; a dark cover gets the brightest.
+function pickLogos(cid) { const ls = clientLogos(cid); if (!ls.length) return {}; const byLum = [...ls].sort((a, b) => a.lum - b.lum); return { logoOnLight: byLum[0], logoOnDark: byLum.at(-1) }; }
+// Style choices for a client: a palette from its logos first (recommended), then presets that suit its voice.
+export function stylesFor(cid) {
+  const c = cid ? one(`SELECT * FROM clients WHERE id=?`, cid) : null; const colors = clientLogos(cid).flatMap(l => l.colors || []);
+  const p = parsePersona(c?.persona, CLIENT_FIELDS); const list = recommendStyles([...new Set(colors)], `${c?.name || ''} ${c?.description || ''} ${p.voice || ''} ${p.audiences || ''}`);
+  return { styles: list, current: c?.style ? JSON.parse(c.style) : null };
+}
+export function setClientStyle(user, cid, style) { clientRow(cid); const st = sanitizeStyle(style); run(`UPDATE clients SET style=?, updated=? WHERE id=?`, st ? JSON.stringify(st) : null, now(), cid); }
+
+// "Sumatera → Sumatra" / "Sumatera -> Sumatra" / "Sumatera = Sumatra", one per line or separated by ';'
+export function spellingPairs(client) {
+  const txt = parsePersona(client?.persona, CLIENT_FIELDS).spelling || '';
+  return txt.split(/[\n;]+/).map(l => l.split(/\s*(?:→|->|=>|=)\s*/)).filter(p => p.length === 2 && p[0].trim() && p[1].trim()).map(([a, b]) => [a.trim(), b.trim()]);
+}
+const maxSlidesOf = client => { const m = (parsePersona(client?.persona, CLIENT_FIELDS).structure || '').match(/maks(?:imal|imum)?\.?\s*(\d+)\s*slide|max(?:imum)?\.?\s*(\d+)\s*slides?/i); return m ? +(m[1] || m[2]) : 0; };
+
 /* ================= decks ================= */
 function ownDeck(user, kid) { const k = one(`SELECT * FROM decks WHERE id=? AND user_id=?`, kid, user.id); if (!k) throw err(404, 'Presentation not found'); return k; }
-const deckOut = k => ({ id: k.id, clientId: k.client_id, title: k.title, template: k.template_id || 'plain', datasets: JSON.parse(k.datasets), brief: k.brief, outline: k.outline ? JSON.parse(k.outline) : null, notes: k.notes || '', created: k.created, updated: k.updated });
+const deckOut = k => ({ id: k.id, clientId: k.client_id, style: k.style ? JSON.parse(k.style) : null, images: JSON.parse(k.images || '[]'), title: k.title, template: k.template_id || 'plain', datasets: JSON.parse(k.datasets), brief: k.brief, outline: k.outline ? JSON.parse(k.outline) : null, notes: k.notes || '', created: k.created, updated: k.updated });
 export function listDecks(user) { return all(`SELECT * FROM decks WHERE user_id=? ORDER BY updated DESC`, user.id).map(k => { const o = deckOut(k); return { ...o, slides: o.outline?.slides.length || 0, outline: undefined, brief: o.brief.slice(0, 200) }; }); }
 export function getDeck(user, kid) { return deckOut(ownDeck(user, kid)); }
 export function deleteDeck(user, kid) { const k = ownDeck(user, kid); run(`DELETE FROM decks WHERE id=?`, k.id); return k; }
@@ -412,23 +458,29 @@ function deckTables(user, datasetIds) {
 }
 const resolver = tables => ref => { const r = String(ref || '').toLowerCase().trim(); return tables.find(t => t.ref.toLowerCase() === r) || tables.find(t => t.name.toLowerCase() === r) || tables.find(t => r.endsWith('/ ' + t.name.toLowerCase())) || null; };
 
-const OUTLINE_SYSTEM = `You are a senior communications analyst. You write report presentations (media monitoring, issue analysis, communication strategy) for a government/organization communications team, based on the data and brief you are given. Canopus turns your outline into slides on the organization's PowerPoint template and fills tables and charts from the real data.
+const OUTLINE_BASE = `You are a senior media and communications analyst. You write report decks (weekly media monitoring, issue analysis, communication strategy) for a communications team and its clients, from the curated data and the brief you are given. Canopus builds the slides on the client's PowerPoint template and fills charts, tables and news samples from the real data.
 
-Reply with ONE JSON object only: {"title": deck title, "notes": 1–3 sentences for the user on what you built or what data was missing, "slides": [ ... ]}
+Reply with ONE JSON object only: {"title": deck title, "footer": short footer text (report name and period, e.g. "Weekly Report Media Massa · 23–29 Oktober 2026"), "notes": 1–3 sentences for the user (what you built, data that was missing, ties or borderline cases to check), "slides": [ ... ]}
 Slide kinds:
-- {"kind":"title","title":...,"subtitle":"period, unit"}
+- {"kind":"title","title":...,"subtitle":"period · unit","image":optional screenshot/photo id}
 - {"kind":"section","title":...}
-- {"kind":"bullets","title":...,"bullets":["point", "- sub-point", ...]}  max 6 points; use **bold** for key words
-- {"kind":"two","title":...,"left_title":...,"left":[...],"right_title":...,"right":[...]}  comparisons, positive vs negative, before/after
-- {"kind":"kpi","title":...,"items":[{"value":"1.240","label":"Total pemberitaan","note":"+12% vs minggu lalu"}],"caption":takeaway}  2–4 headline numbers, taken from the data
-- {"kind":"chart","title":...,"source":"<Dataset> / <Table>","chart":"column"|"bar"|"line"|"pie"|"doughnut","category":column,"series":[numeric columns],"stacked":bool,"caption":one-sentence insight}
-- {"kind":"table","title":...,"source":"<Dataset> / <Table>","columns":[up to 6 columns],"top":N,"caption":insight}
+- {"kind":"summary","title":"Executive Summary","headline":one synthesis sentence with the key phrase in **bold**,"findings":[{"label":"DORONGAN"|"RISIKO"|"SOROTAN"|…,"text":one full sentence with its key number in **bold**}] (3),"focus":one full sentence on what to do or watch next period}
+- {"kind":"bullets","title":...,"bullets":["full sentence", "- sub-point", ...]}  max 6
+- {"kind":"two","title":...,"left_title":...,"left":[...],"right_title":...,"right":[...]}
+- {"kind":"kpi","title":...,"items":[{"value":"2.663","label":"total pemberitaan","note":optional}],"caption":...}
+- {"kind":"chart","title":...,"source":"<Dataset> / <Table>","chart":"column"|"bar"|"line"|"pie"|"doughnut","category":column,"series":[numeric columns],"stacked":bool,"highlight":category to emphasize (e.g. the peak day),"note":short on-chart annotation (e.g. "26 Okt: 555 berita, MagangHub Batch 3"),"filter":{"column":c,"value":v} optional,"caption":one full sentence}
+- {"kind":"table","title":...,"source":"<Dataset> / <Table>","columns":[≤6],"top":N,"filter":{"column":"MEDIA TYPE","value":"TV"} optional (an empty result is shown as "Tidak ada pemberitaan …", e.g. TV with 0),"caption":...}
+- {"kind":"news","title":"Sampel Berita Positif"|…,"source":"<Dataset> / Data","sentiment":"positif"|"negatif","items":[{"headline":exact headline copied from the data,"why":one sentence on why it matters}] (4)}  outlet, date and link are taken from the data
+- {"kind":"image","title":...,"image":screenshot id,"points":[2–4 full sentences of analysis],"caption":source note}  keeps a provided screenshot (e.g. dashboard word cloud or map) as is
 - {"kind":"quote","title":...,"quote":exact quote from the data,"source":"who, outlet, date"}
-- {"kind":"matrix","title":...,"quadrants":[{"title":...,"points":[...]}, x4 in reading order: top-left, top-right, bottom-left, bottom-right],"caption":takeaway}  2×2 frameworks: SWOT (Strengths, Weaknesses, Opportunities, Threats), stakeholder map (high influence/supportive ...), risk map, options
-- {"kind":"actions","title":...,"rows":[{"action":...,"owner":unit or role,"when":timing,"kpi":how success is measured}],"caption":...}  action plan, 3–8 rows
+- {"kind":"matrix","title":...,"quadrants":[{"title":...,"points":[...]}, x4],"caption":...}  risk mapping, SWOT, stakeholders
+- {"kind":"actions","title":...,"rows":[{"action":...,"owner":...,"when":...,"kpi":...}],"caption":...}
 - {"kind":"closing","title":...,"subtitle":...}
-Think and write like a strategy consultant: lead with an executive summary (the 3–4 most important findings and what to do), make every slide title the slide's conclusion ("so what"), separate evidence from interpretation, and end with clear recommendations plus an action plan (owner, timing, success indicator) and the main risks to watch.
-Rules: use only numbers and facts present in the data or brief; never invent figures, quotes or outlets. Chart/table sources and column names must match the data catalog exactly. Prefer charts for trends and shares (line for time, doughnut/pie for shares with ≤6 parts, bar for rankings), tables for top lists. Every chart/table slide gets a caption stating the insight. Write in the user's language (usually Indonesian), concise slide titles that state the point. A typical media-monitoring report: title, executive summary, key numbers, sentiment, trend, top outlets, issues, notable coverage/quotes, issue/stakeholder or SWOT matrix, recommendations for communication strategy (key messages, spokespeople, channels), action plan, closing. Follow the template's reference structure when one is given. 8–16 slides unless the brief says otherwise.`;
+
+Order of authority: the client's persona and report structure first, then the analyst's persona, then the house style below. Always: use only facts and numbers from the data catalog, screenshots or brief, and never invent outlets, quotes or figures.
+- When a report structure is given, follow it exactly: one slide per listed section, in that order, with those titles, and respect any slide limit. Otherwise follow the template's reference structure, or a standard media-monitoring order: cover, executive summary, trend, media distribution, spokespersons, sentiment, issues, programs, leaders, word cloud, locations, positive and negative news samples, risk mapping, opportunities and recommendations.`;
+const houseStyle = () => String(getSettings().reportStyle || '').trim();
+const outlineSystem = () => OUTLINE_BASE + (houseStyle() ? `\n\nHouse style (the team's default; the client's persona and structure override it):\n${houseStyle()}` : '');
 
 const FINALIZE_SYSTEM = `You are the second, senior analyst on a report presentation. Another analyst drafted it from the same data. Your job: analyze the data yourself, then finalize both the analysis and the language.
 
@@ -438,11 +490,11 @@ Work in this order:
 3. Finalize the language for senior readers.
 
 Reply with ONE JSON object only: {"title": ..., "notes": 1–2 sentences on what you found and changed, "slides": [ ... ]}
-- Keep every draft slide, with its "n" number, kind and order. You may rewrite their text: titles as short statements of the point (e.g. "Sentimen negatif naik karena isu distribusi"), concise parallel bullets (max ~15 words), captions as one clear insight, specific recommendations (who, what, when, how success is measured), a strong executive summary (3–4 key findings and actions).
+- Keep every draft slide, with its "n" number, kind and order. Rewrite the content following the house style and the client's persona given in the brief: complete sentences, every number followed by what it means, causes tied to the client's own activities, specific recommendations (who, what, when, how success is measured), and an executive summary that synthesizes instead of repeating numbers. Keep slide titles in the style the house style asks for.
 - You may add up to 3 NEW slides (without "n") where the data shows something important the draft missed. Place them where they fit. A new chart or table must use a "source" and column names exactly as in the data catalog.
 - Never change "source", "columns", "chart", "category", "series", "stacked" or "top" of draft slides. Never invent facts, quotes, figures or outlets; every number must match the data. Keep placeholders like ⟦NAME_1⟧ exactly.
 - Language: the brief's language (usually Indonesian, formal, EYD), consistent terms and number formats.
-Slide formats are the same as in the draft (kinds: title, section, bullets, two, kpi, quote, matrix, actions, chart, table, closing).`;
+Slide formats are the same as in the draft (kinds: title, section, summary, bullets, two, kpi, quote, matrix, actions, chart, table, news, image, closing). For news slides keep headlines exactly as in the data.`;
 
 // The data the AI may read about a deck's datasets: summaries in full, the curated table as a sample without personal columns.
 function catalogText(tables, sampleRows = 40) {
@@ -459,9 +511,9 @@ function catalogText(tables, sampleRows = 40) {
 async function finalizeOutline(user, outline, { brief, catalog, finalizeModel, red }) {
   const finalizer = reportModel(user, finalizeModel, 'writing'); checkLimits(user);
   const draft = red.mask(JSON.stringify({ title: outline.title, slides: outline.slides.map((x, i) => ({ n: i + 1, ...x })) }));
-  const fin = await askJson(user, finalizer, FINALIZE_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), `Brief from the user:\n${red.mask(String(brief || '').slice(0, 4000))}\n\nData catalog (the curated spreadsheet — analyze it yourself):${red.mask(catalog).slice(0, 90000)}\n\nDraft outline from the first analyst:\n${draft}`, 'report.finalize', 16000, 'medium');
+  const fin = await askJson(user, finalizer, FINALIZE_SYSTEM + (houseStyle() ? `\n\nHouse style (the team's default; the client's persona overrides it):\n${houseStyle()}` : '') + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), `Brief from the user:\n${red.mask(String(brief || '').slice(0, 4000))}\n\nData catalog (the curated spreadsheet — analyze it yourself):${red.mask(catalog).slice(0, 90000)}\n\nDraft outline from the first analyst:\n${draft}`, 'report.finalize', 16000, 'medium');
   const one_ = r => sanitizeOutline({ slides: [r] }).slides[0];
-  const LOCK = ['kind', 'source', 'columns', 'top', 'chart', 'category', 'series', 'stacked'];
+  const LOCK = ['kind', 'source', 'columns', 'top', 'chart', 'category', 'series', 'stacked', 'filter', 'image'];
   const out = []; const used = new Set(); let added = 0, kept = 0;
   for (const r of Array.isArray(fin.slides) ? fin.slides : []) {
     const n = Number.isInteger(r?.n) ? r.n - 1 : -1; const orig = outline.slides[n];
@@ -473,12 +525,12 @@ async function finalizeOutline(user, outline, { brief, catalog, finalizeModel, r
   }
   // Draft slides the reviewer left out are put back where they were.
   outline.slides.forEach((s0, i) => { if (!used.has(i)) { kept++; const at = out.findIndex(x => x._n > i); out.splice(at < 0 ? out.length : at, 0, { ...s0, _n: i }); } });
-  const result = { title: (typeof fin.title === 'string' && fin.title.trim() ? red.unmask(fin.title).slice(0, 160) : outline.title), slides: out.map(({ added: _a, _n: _b, ...x }) => x).slice(0, 40) };
+  const result = { footer: outline.footer, title: (typeof fin.title === 'string' && fin.title.trim() ? red.unmask(fin.title).slice(0, 160) : outline.title), slides: out.map(({ added: _a, _n: _b, ...x }) => x).slice(0, 40) };
   const note = [red.unmask(String(fin.notes || '')), added ? `${finalizer.label} added ${added} slide${added > 1 ? 's' : ''} from its own reading of the data.` : '', kept ? `${kept} draft slide${kept > 1 ? 's were' : ' was'} kept unchanged.` : ''].filter(Boolean).join(' ');
   return { outline: result, finalizer, note };
 }
 
-export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId }) {
+export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId, images = [], style }) {
   checkLimits(user); const client = clientRow(clientId);
   const ids = [...new Set(datasets)].slice(0, 6); const tables = deckTables(user, ids);
   const tdesc = await templateDesc(user, template);
@@ -489,14 +541,20 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   const struct = tdesc.info.structure?.length ? `\n\nReference structure from the template "${tdesc.name}" (slides in an earlier report; follow its order and style, with new content):\n${tdesc.info.structure.map((s, i) => `${i + 1}. ${s.title || '(no title)'}${s.has?.length ? ` [${s.has.join(', ')}]` : ''}${s.text ? ' — ' + s.text.slice(0, 160) : ''}`).join('\n')}` : '';
   const clientNote = [clientBlock(client), analystBlock(user)].filter(Boolean).join('\n\n') + '\n\n';
   const prompt = red.mask(`${clientNote}Brief from the user:\n${String(brief || 'Create a report presentation from this data.').slice(0, 6000)}${title ? `\n\nWorking title: ${title}` : ''}\n\nToday: ${new Date().toISOString().slice(0, 10)}${struct}\n\nData catalog:${catalog || '\n(no datasets attached — write from the brief only, without charts or tables)'}${excerpts}`);
-  const raw = await askJson(user, model, OUTLINE_SYSTEM + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt, 'report.outline', 12000, 'medium');
+  // Screenshots (e.g. dashboard word cloud, map) go into the deck; the analysis model also reads them when image uploads are allowed.
+  const imgs = (Array.isArray(images) ? images : []).slice(0, 8).map(x => ({ id: String(x.id || ''), label: String(x.label || x.name || '').slice(0, 120) })).filter(x => loadImage(user, x.id));
+  const allowImages = getSettings().imageUploads; const vision = allowImages ? imgs.map(x => { const im = loadImage(user, x.id); return { mime: im.mime, data: im.buf.toString('base64') }; }) : [];
+  const imgNote = imgs.length ? `\n\nScreenshots provided (use their ids in "image" slides${allowImages ? '; they are attached in this order' : '; you cannot see them, so describe only what the brief says about them'}):\n${imgs.map(x => `- ${x.id}: ${x.label || 'screenshot'}`).join('\n')}` : '';
+  const cap = maxSlidesOf(client); const capNote = cap ? `\n\nSlide limit: at most ${cap} slides.` : '';
+  const raw = await askJson(user, model, outlineSystem() + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt + red.mask(imgNote + capNote), 'report.outline', 16000, 'medium', vision);
   let outline = sanitizeOutline(unmaskDeep(red, raw)); let notes = red.unmask(String(raw.notes || ''));
   if (!outline.slides.length) throw err(502, 'The AI did not return any slides. Try again with a more specific brief.');
+  if (cap && outline.slides.length > cap) { notes = [notes, `Trimmed to the ${cap}-slide limit.`].filter(Boolean).join(' '); outline.slides = outline.slides.slice(0, cap); }
   let finalizer = null;
   if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: [clientBlock(client), analystBlock(user), brief || ''].filter(Boolean).join('\n\n'), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
   notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, notes].filter(Boolean).join(' ');
   const t = String(title || outline.title || 'Presentation').slice(0, 160);
-  run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null);
+  const st = sanitizeStyle(style); run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id,images,style) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null, JSON.stringify(imgs), st ? JSON.stringify(st) : null);
   return { ...getDeck(user, kid), model: { id: model.id, label: model.label }, finalizer: finalizer && { id: finalizer.id, label: finalizer.label } };
 }
 // Finalize (again) after the user edited the slides.
@@ -508,7 +566,9 @@ export async function refinalizeDeck(user, kid, { finalizeModel }) {
   run(`UPDATE decks SET outline=?, notes=?, updated=? WHERE id=?`, JSON.stringify(f.outline), `Finalized by ${f.finalizer.label}. ${f.note}`.trim().slice(0, 1000), now(), kid);
   return { ...getDeck(user, kid), finalizer: { id: f.finalizer.id, label: f.finalizer.label } };
 }
-export function saveDeck(user, kid, { title, outline, template, datasets }) {
+export function saveDeck(user, kid, { title, outline, template, datasets, images, style }) {
+  if (style !== undefined) { const st = sanitizeStyle(style); run(`UPDATE decks SET style=? WHERE id=? AND user_id=?`, st ? JSON.stringify(st) : null, kid, user.id); }
+  if (Array.isArray(images)) run(`UPDATE decks SET images=? WHERE id=? AND user_id=?`, JSON.stringify(images.slice(0, 12).map(x => ({ id: String(x.id), label: String(x.label || '').slice(0, 120) })).filter(x => loadImage(user, x.id))), kid, user.id);
   const k = ownDeck(user, kid); if (template) templateRow(user, template);
   run(`UPDATE decks SET title=?, outline=?, template_id=?, datasets=?, updated=? WHERE id=?`, String(title ?? k.title).slice(0, 160) || 'Presentation', outline ? JSON.stringify(sanitizeOutline(outline)) : k.outline,
     template ? (['default', 'plain'].includes(template) ? null : template) : k.template_id, datasets ? JSON.stringify([...new Set(datasets)].slice(0, 6)) : k.datasets, now(), kid);
@@ -516,10 +576,34 @@ export function saveDeck(user, kid, { title, outline, template, datasets }) {
 }
 export async function deckPptx(user, kid) {
   const k = getDeck(user, kid); if (!k.outline) throw err(409, 'This presentation has no outline yet.');
-  const tables = deckTables(user, k.datasets);
-  const r = await buildDeck(templateBuf(user, k.template), k.outline, resolver(tables));
-  return { ...r, name: `${k.title.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'presentation'}.pptx` };
+  const tables = deckTables(user, k.datasets); const client = k.clientId ? one(`SELECT * FROM clients WHERE id=?`, k.clientId) : null;
+  const images = new Map(k.images.map(x => [x.id, loadImage(user, x.id)]).filter(([, v]) => v));
+  const style = k.style || (client?.style ? JSON.parse(client.style) : null); // none chosen → the template's own colours
+  const r = await buildDeck(templateBuf(user, k.template), k.outline, resolver(tables), { ...pickLogos(k.clientId), style, images, replace: spellingPairs(client), footer: k.outline.footer || k.title });
+  return { ...r, warnings: [...r.warnings, ...checkDeck(user, kid).map(c => c.text)], name: `${k.title.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'presentation'}.pptx` };
+}
+// Quality checks before delivery, from the team's review rules: slide limit, structure, banned labels and terms,
+// fragments, numbering, spelling, and numbers that do not appear in the data.
+export function checkDeck(user, kid) {
+  const k = getDeck(user, kid); if (!k.outline) return []; const out = []; const add = (level, slide, text) => out.push({ level, slide, text: slide ? `Slide ${slide}: ${text}` : text });
+  const client = k.clientId ? one(`SELECT * FROM clients WHERE id=?`, k.clientId) : null; const persona = parsePersona(client?.persona, CLIENT_FIELDS);
+  const cap = maxSlidesOf(client); if (cap && k.outline.slides.length > cap) add('error', 0, `${k.outline.slides.length} slides — the client's limit is ${cap}.`);
+  const wanted = (persona.structure || '').split('\n').map(l => l.replace(/^\s*[\d.)-]+\s*/, '').split(/\s+[—–-]\s+|:/)[0].trim()).filter(l => l && !/^maks|^max/i.test(l) && l.length < 60);
+  const titles = k.outline.slides.map(x => (x.title || '').toLowerCase());
+  for (const w of wanted) if (!titles.some(t => t.includes(w.toLowerCase().slice(0, 18)))) add('warn', 0, `The report structure asks for “${w}”, but no slide has that title.`);
+  const avoid = [...(persona.avoid || '').split(/[,;\n]+/), ...spellingPairs(client).map(([a]) => a)].map(x => x.replace(/^["'“]|["'”]$/g, '').trim()).filter(x => x.length >= 3);
+  const numbers = new Set(deckTables(user, k.datasets).flatMap(t => t.rows.slice(0, 20000).flatMap(r => r.map(v => String(v))))); const text = v => String(v || '');
+  k.outline.slides.forEach((sl, i) => {
+    const n = i + 1; const all = JSON.stringify(sl);
+    if (/^\s*\d+[.)]?\s+\S/.test(sl.title || '')) add('warn', n, `title starts with a number (“${sl.title}”).`);
+    if (/\b(catatan|pembacaan)\s*:/i.test(all)) add('warn', n, 'contains a “Catatan:” or “Pembacaan:” label — work it into the text.');
+    for (const a of avoid) if (new RegExp(`(?<![\\p{L}])${a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}])`, 'iu').test(all)) add('warn', n, `uses “${a}”, which the client avoids (spelling rules are applied automatically in the file).`);
+    const lines = [...(sl.bullets || []), ...(sl.left || []), ...(sl.right || []), ...(sl.points || []), ...(sl.findings || []).map(f => f.text), sl.caption, sl.focus].filter(Boolean).map(text);
+    for (const l of lines) { const words = l.replace(/\*\*/g, '').trim().split(/\s+/); if (words.length <= 3 && !/[.!?]$/.test(l)) add('warn', n, `“${l}” reads like a label, not a sentence.`); }
+    for (const m of all.matchAll(/(?<![\w.,])(\d{1,3}(?:\.\d{3})+|\d{3,})(?![\w.,]?\d)/g)) { const raw = m[1]; const plain = raw.replace(/\./g, ''); if (+plain >= 1900 && +plain <= 2100) continue; if (!numbers.has(plain) && !numbers.has(raw)) { add('info', n, `the number ${raw} was not found in the data tables — check it.`); break; } }
+  });
+  return out;
 }
 // The catalog the outline editor needs to offer valid sources and columns.
 export function deckSources(user, datasetIds) { return deckTables(user, datasetIds).map(t => ({ ref: t.ref, columns: t.columns, rows: t.rows.length, main: !!t.main })); }
-export const REPORT_META = { ops: OPS, kinds: SLIDE_KINDS };
+export const REPORT_META = { ops: OPS, kinds: SLIDE_KINDS, presets: STYLE_PRESETS };

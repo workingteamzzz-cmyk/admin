@@ -95,7 +95,7 @@ function reportMock(sys, q) {
       const pick = /keluh|kritik|terlambat|desak/i.test(t) ? ['Negatif', 'Distribusi', 'Anggaran'] : /resmi|diperluas|kolaborasi|dibuka/i.test(t) ? ['Positif', 'Layanan Digital'] : ['Netral', 'Lainnya'];
       out[m[1]] = pick.find(x => allowed.includes(x)) || allowed[0]; }
     return JSON.stringify(out); }
-  if (/senior communications analyst/.test(sys)) { const ds = q.match(/### (.+?) \/ Data/)?.[1] || 'Data'; const ref = /Reference structure/.test(q);
+  if (/senior media and communications analyst/.test(sys)) { const ds = q.match(/### (.+?) \/ Data/)?.[1] || 'Data'; const ref = /Reference structure/.test(q); const shot = q.split('Screenshots provided')[1]?.match(/\n- (\S+): /)?.[1] || '';
     return JSON.stringify({ title: 'Laporan Monitoring Media', notes: ref ? 'Mengikuti struktur referensi template.' : 'Disusun dari data monitoring.', slides: [
       { kind: 'title', title: 'Laporan Monitoring Media', subtitle: 'Periode November 2026' },
       { kind: 'kpi', title: 'Angka Kunci', items: [{ value: '24', label: 'Pemberitaan' }, { value: '3', label: 'Media' }], caption: 'Isu ⟦NAME_1⟧ ikut diberitakan.' },
@@ -106,7 +106,10 @@ function reportMock(sys, q) {
       { kind: 'bullets', title: 'Rekomendasi Strategi Komunikasi', bullets: ['Klarifikasi isu **distribusi**', '- Siapkan data per provinsi', 'Perkuat cerita penerima manfaat'] },
       { kind: 'matrix', title: 'SWOT Komunikasi', quadrants: [{ title: 'Kekuatan', points: ['Program populer'] }, { title: 'Kelemahan', points: ['Distribusi terlambat'] }, { title: 'Peluang', points: ['Cerita UMKM'] }, { title: 'Ancaman', points: ['Kritik DPR'] }], caption: 'Fokus menutup kelemahan distribusi.' },
       { kind: 'actions', title: 'Rencana Aksi', rows: [{ action: 'Rilis data distribusi per provinsi', owner: 'Biro Humas', when: 'Minggu ini', kpi: 'Sentimen negatif turun 20%' }, { action: 'Briefing media mingguan', owner: 'Jubir', when: 'Setiap Senin', kpi: '3 media nasional hadir' }] },
-      { kind: 'closing', title: 'Terima kasih', subtitle: 'Biro Komunikasi' }] }); }
+      { kind: 'summary', title: 'Executive Summary', headline: 'Kemnaker unggul di agenda **layanan**, belum di agenda hasil.', findings: [{ label: 'DORONGAN', text: 'MagangHub menyumbang **56%** pemberitaan positif.' }, { label: 'RISIKO', text: 'Kritik datang dari isu pengawasan dan PHK di Sumatera Utara.' }], focus: 'Siapkan data penyaluran per provinsi sebelum rapat DPR.' },
+      { kind: 'news', title: 'Sampel Berita Negatif', source: `${ds} / Data`, sentiment: 'negatif', items: [{ headline: 'Keterlambatan distribusi bantuan dikeluhkan warga', why: 'Keluhan warga soal penyaluran.' }, { headline: 'Judul yang tidak ada di data', why: 'x' }] },
+      { kind: 'image', title: 'Wordcloud', image: shot, points: ['Kata MagangHub paling sering muncul karena pendaftaran batch 3.', 'Catatan: cek ulang angka'] },
+      { kind: 'closing', title: 'Terima kasih', subtitle: 'Biro Komunikasi' }], footer: 'Weekly Report Media Massa · November 2026' }); }
   return null;
 }
 function classifyMock(q) {
@@ -482,6 +485,7 @@ try {
     return ok(await B.locator('[data-go=studio]').isHidden(), 'Studio hidden for users with no canvases');
   });
   const TPL = path.join(SERVER_DIR, 'assets', 'default-template.pptx');
+  const PNG = path.join(FIX, 'logo-klien.png'); fs.writeFileSync(PNG, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAADwAAAAYCAYAAACmwZ5SAAAAtUlEQVR4nO3YwQmAMAwF0K84gDiAUziQYziCYziQUziAuIGeehGUJi3JR/vPTdpHA2KrbphOGGdf58p6z5Daa2OvNN4HeMux9I/T146bakoowW/Q+xopnG6kY7Ap66nA0sNr6mjAWqy0ngKcipX0oQBbxh2c63Zj+7mDrVPAX08Bfz0FbB3tX4+2nzvYOhTgXLcc04cCDKSjY+tpwIAeLamjAgNytHQ95RNPQPzmTSsk9ycLAC5TET2LyGIR8wAAAABJRU5ErkJggg==', 'base64'));
   await step(A, 'persona', 'Personas: each analyst has one (set by themselves or the admin) and it shapes every chat', async () => {
     await A.goto(canopus.url + '#home'); await A.click('[data-act=settings]'); await A.waitForSelector('#ap_title'); await A.waitForTimeout(150);
     await A.fill('#ap_title', 'Analis Isu Senior'); await A.fill('#ap_format', 'Selalu mulai dengan ringkasan eksekutif tiga poin'); await A.fill('#ap_focus', 'Isu sosial dan program pemerintah'); await A.screenshot({ path: path.join(OUT, 'server-persona-settings.png') }); await A.click('[data-act=savesettings]'); await A.waitForTimeout(500);
@@ -496,12 +500,17 @@ try {
   });
   await step(A, 'report-client', 'Reports: a client folder holds its guidelines, templates and documents (no built-in template)', async () => {
     await A.goto(canopus.url + '#reports'); await A.waitForSelector('[data-r=newclient]'); const before = JSON.parse((await apiCall(A, '/api/reports')).body);
-    await A.click('[data-r=newclient] >> nth=0'); await A.waitForTimeout(150); await A.fill('#clName', 'Kementerian A'); await A.fill('#clDesc', 'Monitoring bulanan'); await A.fill('#cp_voice', 'Tegas namun empatik'); await A.fill('#cp_avoid', 'gratisan'); await A.fill('#clInstr', 'Gunakan istilah penerima manfaat. Hindari kata gratisan.');
-    await A.click('[data-r=saveclient]'); await A.waitForSelector('[data-r=picktpl]'); await A.setInputFiles('#rpTplFile', TPL); await A.waitForSelector('.rp-tpls .card', { timeout: 10000 });
+    await A.click('[data-r=newclient] >> nth=0'); await A.waitForTimeout(150); await A.fill('#clName', 'Kementerian A'); await A.fill('#clDesc', 'Monitoring bulanan'); await A.fill('#cp_voice', 'Tegas namun empatik'); await A.fill('#cp_avoid', 'gratisan'); await A.fill('#cp_spelling', 'Sumatera → Sumatra'); await A.fill('#clInstr', 'Gunakan istilah penerima manfaat. Hindari kata gratisan.');
+    await A.click('[data-r=saveclient]'); await A.waitForSelector('[data-r=picktpl]');
+    await A.setInputFiles('#rpLogoFile', PNG); await A.waitForSelector('.rp-logo-card', { timeout: 10000 }); await A.waitForSelector('.rp-style', { timeout: 10000 });
+    const cid0 = JSON.parse((await apiCall(A, '/api/reports')).body).clients.find(c => c.name === 'Kementerian A').id; const sty = JSON.parse((await apiCall(A, '/api/reports/styles?client=' + cid0)).body);
+    var styleRec = sty.styles[0]?.id === 'logo' && sty.styles[0].recommended && /^1[0-9A-F]{5}$/.test(sty.styles[0].colors.dk2);
+    await A.click('.rp-style[data-x="editorial"]'); await A.waitForTimeout(500);
+    await A.setInputFiles('#rpTplFile', TPL); await A.waitForSelector('.rp-tpls .card', { timeout: 10000 });
     fs.writeFileSync(path.join(FIX, 'brief-klien-a.txt'), 'Brief Kementerian A: fokus pada isu distribusi dan cerita penerima manfaat. Marker brief ALFA-12.');
     await A.setInputFiles('#rpDocFile', path.join(FIX, 'brief-klien-a.txt')); await A.waitForFunction(() => /brief-klien-a/i.test(document.querySelector('#rpBody')?.textContent || ''), null, { timeout: 10000 });
     const r = JSON.parse((await apiCall(A, '/api/reports')).body); const c = r.clients.find(x => x.name === 'Kementerian A');
-    return ok(before.templates.length === 0 && c && c.templates === 1 && c.docs === 1 && c.instructions.includes('penerima manfaat') && r.templates[0].clientId === c.id, `templates before: ${before.templates.length} (no built-in) · client templates ${c?.templates} · documents ${c?.docs} · guidelines saved: ${!!c?.instructions}`);
+    return ok(styleRec && c?.style?.id === 'editorial' && c?.logos?.length === 1 && before.templates.length === 0 && c && c.templates === 1 && c.docs === 1 && c.instructions.includes('penerima manfaat') && r.templates[0].clientId === c.id, `logo palette recommended: ${styleRec} · default style ${c?.style?.id} · templates before: ${before.templates.length} (no built-in) · client templates ${c?.templates} · documents ${c?.docs} · guidelines saved: ${!!c?.instructions}`);
   });
   await step(A, 'report-curate', 'Reports: AI plans the curation, the server runs it (duplicates, labels, summaries) and exports Excel', async () => {
     const before = recorded.length; await setModel(A, 'auto');
@@ -524,14 +533,15 @@ try {
   let deckFile = null;
   await step(A, 'report-deck', 'Reports: AI drafts the slides, the server builds a PowerPoint with native charts and tables', async () => {
     const before = recorded.length; await A.click('[data-r=todeck]'); await A.waitForSelector('#rpBrief');
-    await A.fill('#rpBrief', 'Laporan monitoring media mingguan untuk pimpinan tentang isu distribusi dan penerima manfaat, dengan rekomendasi strategi komunikasi.'); await A.click('[data-r=draftdeck]');
+    await A.fill('#rpBrief', 'Laporan monitoring media mingguan untuk pimpinan tentang isu distribusi dan penerima manfaat, dengan rekomendasi strategi komunikasi.');
+    await A.setInputFiles('#rpShotFile', PNG); await A.waitForSelector('[data-shot]'); await A.fill('[data-shot]', 'Wordcloud dashboard'); await A.click('[data-r=draftdeck]');
     await A.waitForSelector('.rp-slide', { timeout: TIMEOUT }); const slides = await A.locator('.rp-slide').count();
     const kid = await A.evaluate(() => fetch('/api/reports').then(r => r.json()).then(j => j.decks[0].id));
     const deck = JSON.parse((await apiCall(A, '/api/reports/decks/' + kid)).body); const unmasked = deck.outline.slides[1].caption.includes(SECRETS.term);
     const finReq = recorded.slice(before).find(r => r.kind === 'openai' && /second, senior analyst on a report presentation/.test(r.raw));
     const added = deck.outline.slides.find(x => x.title === 'Temuan Tambahan dari Data');
     const twoStage = !!finReq && finReq.raw.includes('analyze it yourself') && finReq.raw.includes('Kompas | 15') && /Analysis: Claude Core · finalized by GPT Standard/.test(deck.notes) && deck.outline.slides[2].title.endsWith('(final)') && deck.outline.slides[2].source.endsWith('/ Sebaran Sentimen')
-      && deck.outline.slides[1].kind === 'kpi' && !!added && /Kompas \(15 berita\)/.test(added.bullets[0]) && deck.outline.slides.length === 11;
+      && deck.outline.slides[1].kind === 'kpi' && !!added && /Kompas \(15 berita\)/.test(added.bullets[0]) && deck.outline.slides.length === 14;
     await A.click('[data-r=refinal]'); await A.waitForFunction(() => /\(final\) \(final\)/.test(document.querySelector('.rp-slide:nth-child(3) input[data-f=title]')?.value || ''), null, { timeout: TIMEOUT });
     const b64 = await A.evaluate(async kid => { const r = await fetch(`/api/reports/decks/${kid}/pptx`); const b = new Uint8Array(await r.arrayBuffer()); let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s); }, kid);
     deckFile = path.join(OUT, 'harness-deck.pptx'); fs.writeFileSync(deckFile, Buffer.from(b64, 'base64'));
@@ -539,10 +549,15 @@ try {
     const nSlides = files.filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f)).length, nCharts = files.filter(f => /^ppt\/charts\/chart\d+\.xml$/.test(f)).length, nEmb = files.filter(f => /^ppt\/embeddings\/.*\.xlsx$/.test(f)).length;
     const all = (await Promise.all(files.filter(f => /^ppt\/slides\/slide\d+\.xml$/.test(f)).map(f => z.file(f).async('string')))).join('');
     const realData = all.includes('Kompas') && all.includes(SECRETS.term) && !all.includes('⟦');
-    const outlineReq = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const sawMasked = outlineReq && !outlineReq.raw.includes(SECRETS.term) && !outlineReq.raw.includes(SECRETS.mediaPhone) && outlineReq.raw.includes('Gunakan istilah penerima manfaat. Hindari kata gratisan.') && outlineReq.raw.includes('ALFA-12') && outlineReq.raw.includes('Tegas namun empatik') && outlineReq.raw.includes('Analis Isu Senior') && /Tegas namun empatik/.test(finReq?.raw || '');
+    const slideRels = (await Promise.all(files.filter(f => /^ppt\/slides\/_rels\/.*\.rels$/.test(f)).map(f => z.file(f).async('string')))).join('');
+    const core = z.file('docProps/core.xml') ? await z.file('docProps/core.xml').async('string') : '';
+    const theme = await z.file('ppt/theme/theme1.xml').async('string'); const ppt = { style: theme.includes('<a:srgbClr val="2459F0"/>') && theme.includes('Plus Jakarta Sans'), footer: all.includes('Weekly Report Media Massa · November 2026'), logo: /Target="\.\.\/media\/canopus_1\.png"/.test(slideRels), link: /TargetMode="External"/.test(slideRels) && slideRels.includes('https://www.media.id/read/1'),
+      shot: (slideRels.match(/media\/canopus_\d+\.png/g) || []).length >= 2, spelling: all.includes('Sumatra Utara') && !all.includes('Sumatera'), summary: all.includes('agenda ') && all.includes('Siapkan data penyaluran'), meta: !/<dc:creator>[^<]+<\/dc:creator>/.test(core) };
+    const checks = JSON.parse((await apiCall(A, `/api/reports/decks/${kid}/checks`)).body); const flagged = checks.some(c => /Catatan/.test(c.text));
+    const outlineReq = recorded.slice(before).find(r => /senior media and communications analyst/.test(r.raw)); const sawParts = [outlineReq, !outlineReq.raw.includes(SECRETS.term), !outlineReq.raw.includes(SECRETS.mediaPhone), outlineReq.raw.includes('Gunakan istilah penerima manfaat. Hindari kata gratisan.'), outlineReq.raw.includes('ALFA-12'), outlineReq.raw.includes('Tegas namun empatik'), outlineReq.raw.includes('Analis Isu Senior'), /Tegas namun empatik/.test(finReq?.raw || '')]; const sawMasked = sawParts.every(Boolean); if (!sawMasked) fs.writeFileSync(path.join(OUT, 'outline-request.json'), JSON.stringify({ sawParts: sawParts.map(Boolean), raw: outlineReq?.raw?.slice(0, 20000) }, null, 1));
     let rendered = 'not rendered';
     try { require('child_process').execFileSync('soffice', ['--headless', '--convert-to', 'pdf', '--outdir', OUT, deckFile], { timeout: 120000, stdio: 'ignore' }); require('child_process').execFileSync('pdftoppm', ['-r', '50', '-png', path.join(OUT, 'harness-deck.pdf'), path.join(OUT, 'server-deck')], { timeout: 60000 }); rendered = 'rendered with LibreOffice'; } catch {}
-    return ok(twoStage && slides === 11 && nSlides >= 11 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `Claude analysis → GPT read the data itself and added “${added?.bullets[0]}”, sharpened titles, chart sources kept, dropped slide restored: ${twoStage} · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · Claude & GPT got client persona + analyst persona + client document, masked term, no phone: ${sawMasked} · ${rendered}`);
+    return ok(Object.values(ppt).every(Boolean) && flagged && twoStage && slides === 14 && nSlides >= 14 && all.includes('Rilis data distribusi per provinsi') && all.includes('Kekuatan') && nCharts === 2 && nEmb === 2 && realData && unmasked && sawMasked && !leaks().length, `pptx: ${Object.entries(ppt).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' ')} · checks flag “Catatan:”: ${flagged} · Claude analysis → GPT read the data itself and added “${added?.bullets[0]}”, sharpened titles, chart sources kept, dropped slide restored: ${twoStage} · ${slides} slides in editor · pptx: ${nSlides} slides, ${nCharts} charts (editable data: ${nEmb}) · real values in file: ${realData} · Claude & GPT got client persona + analyst persona + client document, masked term, no phone: ${sawMasked} · ${rendered}`);
   });
   await step(A, 'report-template', 'Reports: client B gets its own template from an earlier report, and can also reuse client A’s template', async () => {
     const before = recorded.length; await A.click('[data-r=backdeck]').catch(() => {});
@@ -552,7 +567,7 @@ try {
     const all = JSON.parse((await apiCall(A, '/api/reports')).body); const tB = all.templates.find(x => x.clientId === b.id); const tA = all.templates.find(x => x.clientId && x.clientId !== b.id);
     await A.click('[data-r=tab][data-x=decks]'); await A.waitForSelector('#rpBrief'); const defaultTpl = await A.inputValue('#rpTpl'); const groups = await A.locator('#rpTpl optgroup').count();
     await A.fill('#rpBrief', 'Laporan bulan ini untuk Klien B'); await A.click('[data-r=draftdeck]'); await A.waitForSelector('.rp-slide', { timeout: TIMEOUT });
-    const req = recorded.slice(before).find(r => /senior communications analyst/.test(r.raw)); const usedStructure = !!req && req.raw.includes('Reference structure') && req.raw.includes('Rekomendasi Strategi Komunikasi') && req.raw.includes('Nada santai');
+    const req = recorded.slice(before).find(r => /senior media and communications analyst/.test(r.raw)); const usedStructure = !!req && req.raw.includes('Reference structure') && req.raw.includes('Rekomendasi Strategi Komunikasi') && req.raw.includes('Nada santai');
     const dsA = all.datasets[0].id; const cross = await putJson(A, '/api/reports/decks', { client: b.id, template: tA.id, datasets: [dsA], brief: 'Pakai template klien A' }, 'POST'); const kid = JSON.parse(cross.body).id;
     const built = await A.evaluate(async kid => (await fetch(`/api/reports/decks/${kid}/pptx`)).status, kid);
     return ok(tB && tB.info.structure.length >= 8 && defaultTpl === tB.id && groups >= 2 && usedStructure && cross.status === 200 && built === 200, `B's template from earlier report: ${tB?.info.structure.length} reference slides · preselected for B: ${defaultTpl === tB?.id} · template groups ${groups} · AI followed B's structure + guidelines: ${usedStructure} · B deck on A's template: ${cross.status}/${built}`);

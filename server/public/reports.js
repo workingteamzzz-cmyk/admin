@@ -4,7 +4,7 @@ let C; // helpers from app.js
 const S = { tab: 'clients', client: '', clients: [], clientDocs: null, templates: [], datasets: [], decks: [], meta: {}, ds: null, dsResultTab: 0, plan: null, explanation: '', deck: null, sources: [], busy: '', loaded: false };
 const $ = s => document.querySelector(s);
 const esc = s => C.esc(s), ic = (n, c) => C.ic(n, c);
-const KIND_LABEL = { title: 'Cover', section: 'Section', bullets: 'Points', two: 'Two columns', kpi: 'Key numbers', quote: 'Quote', matrix: '2×2 matrix', actions: 'Action plan', table: 'Table', chart: 'Chart', closing: 'Closing' };
+const KIND_LABEL = { title: 'Cover', section: 'Section', summary: 'Executive summary', news: 'News samples', image: 'Screenshot', bullets: 'Points', two: 'Two columns', kpi: 'Key numbers', quote: 'Quote', matrix: '2×2 matrix', actions: 'Action plan', table: 'Table', chart: 'Chart', closing: 'Closing' };
 const DATA_CHIPS = ['Per sentimen: bersihkan data, buang duplikat, beri label sentimen (Positif/Netral/Negatif) yang kosong, lalu rekap sebaran sentimen, sentimen per media, dan tren harian',
   'Per topik: bersihkan data, buang duplikat, kelompokkan berita ke dalam topik/isu utama secara otomatis, lalu rekap per topik, topik per media, dan tren harian',
   'Sentimen dan topik: bersihkan, buang duplikat, beri label sentimen dan topik, lalu rekap topik × sentimen, per media, dan tren harian',
@@ -13,12 +13,33 @@ const CHIP_LABELS = ['By sentiment', 'By topic', 'Sentiment + topic', 'Negative 
 DATA_CHIPS.push(
   'Weekly media massa: gunakan tabel gabungan (kolom MEDIA TYPE). Bersihkan tag HTML di konten. Cek duplikat berlapis: URL sama termasuk varian amp/mobile/utm, judul sama di media yang sama, isi identik atau nyaris identik di media yang sama; berita sama di media berbeda bukan duplikat. Hapus noise yang tidak berkaitan dengan klien dan turunannya (pejabat, unit, program), termasuk yang hanya disebut di "Baca juga" dan kementerian negara lain. Beri SENTIMENT dari sudut pandang klien sesuai aturan sentimen di persona, konsisten untuk berita sindikasi. Beri SEKTOR sesuai persona. Beri ISU yang representatif dari isi konten: pakai daftar isu acuan klien, isu serupa digabung, boleh isu baru bila tidak ada yang cocok. Beri PROGRAM dari daftar program klien (lebih dari satu dipisah koma, tidak ada "-"). Rapikan kolom entitas (person, organization, influencer) dan isi sel kosong dengan "-". Rekap: sentimen per media type, sektor × sentimen, program × sentimen, isu × sentimen, top 10 media per media type, tren harian per sentimen, top 10 spokesperson.',
   'Weekly media sosial: gabungkan semua file (kolom PLATFORM). Bersihkan HTML dan spasi berlebih. Hapus duplikat: URL/ID post sama termasuk varian URL, akun sama dengan teks identik di hari yang sama; repost dari akun berbeda bukan duplikat. Hapus noise: tidak berkaitan dengan klien, hanya hashtag tempelan, spam loker/giveaway/jualan, kementerian negara lain. SENTIMENT dari sudut pandang klien sesuai persona (keluhan layanan = negatif; keluhan umum yang tidak menyalahkan klien = netral), konsisten untuk post yang sama. SEKTOR dan ISU memakai daftar isu acuan klien supaya sama dengan laporan media massa. PROGRAM dari daftar program klien. Rapikan kolom akun/entitas, isi sel kosong dengan "-". Rekap: sentimen per platform, sektor × sentimen, program × sentimen, isu × sentimen, top akun.');
+// Example structure (one analyst's weekly media-monitoring flow). Clients can use any structure.
+const STRUCTURE_PRESET = `Cover — logo klien, periode, sumber data
+Executive Summary — sintesis seluruh slide, tidak mengulang angka slide lain
+Tren Ekspos — tren harian per sentimen, puncak diberi anotasi peristiwa pemicunya
+Media Distribution — Top 10 media per platform (online, cetak, TV; TV tetap tampil meski 0)
+Top 10 Spokesperson — dengan jabatan
+Sentimen — proporsi sentimen, top 5 isu positif dan top 5 isu negatif
+Isu Sektor — 5 isu teratas per sektor/program prioritas klien
+Program & Platform — pemberitaan per program/platform klien
+Sorotan Pimpinan — pemberitaan tentang pimpinan klien
+Wordcloud — screenshot dashboard dipertahankan, dengan analisa
+Sebaran Lokasi — screenshot/peta dengan analisa yang dikaitkan ke kegiatan klien di daerah
+Sampel Berita Positif — 4 berita dengan tautan
+Sampel Berita Negatif — 4 berita dengan tautan
+Risk Mapping — potensi krisis, pemicu, tingkat risiko, langkah
+Potensi Positif & Rekomendasi — isu positif yang bisa diangkat, rekomendasi komunikasi, poin pantauan pekan depan
+Maks 15 slide`;
 const DECK_CHIPS = ['Laporan monitoring media mingguan untuk pimpinan', 'Analisis isu negatif dan rekomendasi strategi komunikasi', 'Ringkasan eksekutif 5 slide', 'Bahan rapat koordinasi humas: temuan, risiko, dan rencana aksi'];
 
 export function initReports(ctx) {
   C = ctx;
   document.addEventListener('click', onClick);
   document.addEventListener('change', async e => { if (e.target.id === 'rpDsFile') uploadDataset(e.target.files); if (e.target.id === 'rpDsMore') addDatasetFile(e.target.files);
+    if (e.target.id === 'rpLogoFile' && e.target.files.length) { let n = 0; for (const f of e.target.files) { try { await C.api(`/api/reports/clients/${S.client}/logos`, { method: 'POST', raw: f, headers: { 'content-type': f.type, 'x-filename': encodeURIComponent(f.name) } }); n++; } catch (err) { C.toast(`${f.name}: ${err.message}`, 5000); } }
+      delete S.styleCache[S.client]; await load(); renderReports(); if (n) C.toast(`${n} logo${n > 1 ? 's' : ''} added — style recommendation updated`); }
+    if ((e.target.id === 'rpShotFile' || e.target.id === 'rpDeckShot') && e.target.files.length) { if (e.target.id === 'rpShotFile') captureForm(); for (const f of e.target.files) { try { const im = await C.api('/api/reports/images', { method: 'POST', raw: f, headers: { 'content-type': f.type, 'x-filename': encodeURIComponent(f.name) } }); const rec = { id: im.id, label: f.name.replace(/\.(png|jpe?g)$/i, '') };
+        if (e.target.id === 'rpShotFile') (S.shots ||= []).push(rec); else { S.deck.images = [...(S.deck.images || []), rec]; await C.api('/api/reports/decks/' + S.deck.id, { method: 'PUT', body: { images: S.deck.images, outline: S.deck.outline } }); } } catch (err) { C.toast(`${f.name}: ${err.message}`, 5000); } } renderReports(); }
     if (e.target.classList?.contains('rp-flabel')) { try { S.ds = await C.api(`/api/reports/datasets/${S.ds.id}/files/${e.target.dataset.fi}`, { method: 'PATCH', body: { label: e.target.value } }); renderReports(); C.toast('Label saved'); } catch (err) { C.toast(err.message, 4000); } } if (e.target.id === 'rpTplFile') uploadTemplate(e.target.files); if (e.target.id === 'rpDocFile') uploadClientDocs(e.target.files);
     if (e.target.dataset?.tplmove) { try { await C.api('/api/reports/templates/' + e.target.dataset.tplmove, { method: 'PATCH', body: { clientId: e.target.value || null } }); await load(); renderReports(); C.toast('Template moved'); } catch (err) { C.toast(err.message, 4000); } } });
 }
@@ -42,7 +63,7 @@ export async function renderReports(fresh) {
       <div class="rp-clientbar"><label for="rpClient">Client</label><select id="rpClient" class="vsel"><option value="">All clients</option>${S.clients.map(c => `<option value="${c.id}" ${c.id === S.client ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><button class="btn sm" data-r="newclient">${ic('plus')}New client</button></div></div>
     <div class="tabs">${[['clients', 'users', 'Clients'], ['data', 'table', 'Data curation'], ['decks', 'layers', 'Presentations'], ['templates', 'grid', 'Templates']].map(([k, i, l]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-r="tab" data-x="${k}">${ic(i)}${l}</button>`).join('')}</div>
     <div id="rpBody" style="padding-top:14px"></div>`;
-  $('#rpClient').onchange = e => { S.client = e.target.value; savePrefs({ client: S.client }); S.ds = null; S.deck = null; S.clientDocs = null; renderReports(); };
+  $('#rpClient').onchange = e => { S.form = null; S.client = e.target.value; savePrefs({ client: S.client }); S.ds = null; S.deck = null; S.clientDocs = null; renderReports(); };
   ({ clients: clientsView, data: S.ds ? dsView : dataHome, decks: S.deck ? deckView : deckHome, templates: tplView }[S.tab])();
   C.hydrateIcons(page);
 }
@@ -182,20 +203,34 @@ function stepModal(i) {
 
 /* ================= presentations ================= */
 function deckHome() {
-  const curated = S.datasets.filter(d => d.curated && inClient(d));
+  const curated = S.datasets.filter(d => d.curated && inClient(d)); const F = S.form || {};
+  const sty = stylesOf(S.client); const selStyle = F.style ?? (curClient()?.style?.id || sty.styles.find(x => x.recommended)?.id || 'template');
   body(`<div class="set-sec"><h3>${ic('sparkle')}New presentation${curClient() ? ` for ${esc(curClient().name)}` : ''}</h3>${curClient() && (Object.keys(curClient().persona || {}).length || curClient().instructions) ? `<p class="help">${ic('check')} ${esc(curClient().name)}'s persona and your analyst persona are applied automatically.</p>` : ''}
-    <div class="row2"><div><label for="rpTitle">Title</label><input type="text" id="rpTitle" placeholder="e.g. Laporan Monitoring Media 1–14 November 2026"></div>
-      <div><label for="rpTpl">Template — any client's template can be used</label><select id="rpTpl" class="vsel" style="width:100%">${templateOptions()}</select></div></div>
-    <label>Data to use</label>${curated.length ? `<div class="checks" id="rpDs">${curated.map(d => `<label><input type="checkbox" value="${d.id}" ${S.prefDs === d.id ? 'checked' : ''}>${esc(d.name)} <span class="muted">(${(d.result_rows || 0).toLocaleString('id-ID')} rows)</span></label>`).join('')}</div>` : `<p class="help">No curated datasets yet — curate one in <a href="#" data-r="tab" data-x="data">Data curation</a>, or write the presentation from your brief alone.</p>`}
-    <label for="rpBrief">Brief</label><textarea id="rpBrief" rows="4" placeholder="Who is it for, what period, what should it emphasize? e.g. Laporan mingguan untuk Kepala Biro: sorot isu keterlambatan distribusi dan beri 3 rekomendasi strategi komunikasi."></textarea>
+    <div class="row2"><div><label for="rpTitle">Title</label><input type="text" id="rpTitle" value="${esc(F.title || '')}" placeholder="e.g. Laporan Monitoring Media 1–14 November 2026"></div>
+      <div><label for="rpTpl">Template — any client's template can be used</label><select id="rpTpl" class="vsel" style="width:100%">${templateOptions(F.tpl)}</select></div></div>
+    <label>Data to use</label>${curated.length ? `<div class="checks" id="rpDs">${curated.map(d => `<label><input type="checkbox" value="${d.id}" ${(F.ds ? F.ds.includes(d.id) : S.prefDs === d.id) ? 'checked' : ''}>${esc(d.name)} <span class="muted">(${(d.result_rows || 0).toLocaleString('id-ID')} rows)</span></label>`).join('')}</div>` : `<p class="help">No curated datasets yet — curate one in <a href="#" data-r="tab" data-x="data">Data curation</a>, or write the presentation from your brief alone.</p>`}
+    <label for="rpBrief">Brief</label><textarea id="rpBrief" rows="4" placeholder="Who is it for, what period, what should it emphasize? e.g. Laporan mingguan untuk Kepala Biro: sorot isu keterlambatan distribusi dan beri 3 rekomendasi strategi komunikasi.">${esc(F.brief || '')}</textarea>
     <div class="chips" style="margin:8px 0 12px">${DECK_CHIPS.map((c, i) => `<button class="chip" data-r="kchip" data-x="${i}">${esc(c)}</button>`).join('')}</div>
+    <label>Screenshots (optional) — dashboard word cloud, map, photos for the cover…</label><div class="rp-shots">${(S.shots || []).map(x => `<div class="rp-shot"><img src="/api/reports/images/${x.id}" alt=""><input type="text" data-shot="${x.id}" value="${esc(x.label)}" placeholder="What is it? e.g. Wordcloud dashboard"><button class="icon-btn" data-r="rmshot" data-x="${x.id}" title="Remove">${ic('trash')}</button></div>`).join('')}<button class="btn sm" data-r="pickshots">${ic('upload')}Add screenshots</button><input type="file" id="rpShotFile" accept="image/png,image/jpeg" multiple hidden></div>
+    ${C.me().config.imageUploads ? '' : '<p class="help">Image reading by AI is off (Admin → Settings), so screenshots are placed in the deck but the AI does not read them — describe them in the brief or label.</p>'}
+    <label>Style — colours and fonts applied to the template</label>${styleCards([{ id: 'template', name: 'Template as is', description: "Keep the template's own colours", colors: { dk2: '3A4250', accent1: '8892A0', accent2: 'B8C0CC', accent3: '1FA971', accent4: 'E04A4A', lt2: 'EEF1F5' } }, ...sty.styles], selStyle, 'pickstyle')}
     ${stageSelects()}
-    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px"><label class="help" style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rpKnow" ${curClient()?.docs ? 'checked' : ''}> ${curClient() ? `Use ${esc(curClient().name)}'s documents` : 'Also use internal knowledge'}</label><button class="btn primary" data-r="draftdeck" ${S.busy ? 'disabled' : ''}>${S.busy === 'deck' ? spin('Writing slides… (up to a minute)') : ic('sparkle') + 'Draft slides'}</button></div>
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:14px"><label class="help" style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rpKnow" ${(F.know ?? !!curClient()?.docs) ? 'checked' : ''}> ${curClient() ? `Use ${esc(curClient().name)}'s documents` : 'Also use internal knowledge'}</label><button class="btn primary" data-r="draftdeck" ${S.busy ? 'disabled' : ''}>${S.busy === 'deck' ? spin('Writing slides… (up to a minute)') : ic('sparkle') + 'Draft slides'}</button></div>
     <p class="help">The analysis model receives the summary tables and a sample of the data's text columns (personal-data columns left out), chooses the charts and writes the insights; the finalization model polishes the wording and checks the numbers but cannot change which data a chart or table shows. Charts and tables are filled from the real data on this server.</p></div>
     ${S.decks.filter(inClient).length ? `<div class="tblwrap"><table class="tbl"><thead><tr><th>Presentation</th><th class="r">Slides</th><th>Updated</th><th></th></tr></thead><tbody>${S.decks.filter(inClient).map(k => `<tr><td><a href="#" data-r="opendeck" data-x="${k.id}"><b>${esc(k.title)}</b></a><div class="muted">${k.clientId ? esc(clientName(k.clientId)) + ' · ' : ''}${esc(k.brief)}</div></td><td class="r">${k.slides}</td><td class="muted">${C.ago(k.updated)}</td><td class="r"><button class="btn sm" data-r="opendeck" data-x="${k.id}">Open</button> <button class="btn sm" data-r="pptx" data-x="${k.id}">${ic('download')}PPTX</button></td></tr>`).join('')}</tbody></table></div>` : ''}`);
 }
+/* ---------- styles: presets + a palette recommended from the client's logos ---------- */
+S.styleCache = {};
+async function ensureStyles(cid) { const k = cid || ''; if (S.styleCache[k]) return S.styleCache[k]; S.styleCache[k] = { styles: [], current: null, loading: true }; const r = await C.api('/api/reports/styles' + (cid ? `?client=${cid}` : '')).catch(() => ({ styles: [], current: null })); S.styleCache[k] = r; renderReports(); return r; }
+const stylesOf = cid => S.styleCache[cid || ''] || (ensureStyles(cid), { styles: [], current: null });
+const swatches = st => ['dk2', 'accent1', 'accent2', 'accent3', 'accent4', 'lt2'].map(k => `<span style="background:#${st.colors[k]}"></span>`).join('');
+function styleCards(list, selectedId, action) {
+  if (!list.length) return '<p class="help">Loading styles…</p>';
+  return `<div class="rp-styles">${list.map(st => `<button type="button" class="rp-style ${st.id === selectedId ? 'on' : ''}" data-r="${action}" data-x="${esc(st.id)}"><div class="rp-style-top" style="background:#${st.colors.dk2}"><i style="background:#${st.colors.accent2}"></i><b style="color:#fff">Aa</b><em style="background:#${st.colors.accent1}"></em></div>
+    <div class="rp-style-b"><b>${esc(st.name)}${st.recommended ? ' <span class="badge gold">Recommended</span>' : ''}</b><div class="sw">${swatches(st)}</div><small>${esc(st.description || '')}${st.font ? ` · ${esc(st.font)}` : ''}</small></div></button>`).join('')}</div>`;
+}
 async function openDeck(kid) { try { S.deck = await C.api('/api/reports/decks/' + kid); S.sources = await C.api('/api/reports/sources', { method: 'POST', body: { datasets: S.deck.datasets } }); S.tab = 'decks'; renderReports(); } catch (e) { C.toast(e.message, 4000); } }
-const tplColors = tid => S.templates.find(t => t.id === tid)?.info?.colors || {};
+const tplColors = tid => ({ ...(S.templates.find(t => t.id === tid)?.info?.colors || {}), ...(S.deck?.style?.colors || {}) });
 function slideThumb(s, colors) {
   const navy = '#' + (colors.dk2 || '1F3A5F'), acc = '#' + (colors.accent1 || '1E5AA8'), acc2 = '#' + (colors.accent2 || 'E8772E');
   const dark = ['title', 'section', 'closing'].includes(s.kind);
@@ -206,6 +241,9 @@ function slideThumb(s, colors) {
     : s.kind === 'table' ? `<div class="viz">${ic('table')}<span>${esc(s.source)}</span></div>`
     : s.kind === 'matrix' ? `<div class="mx">${s.quadrants.map(q => `<div><b style="color:${acc}">${esc(q.title)}</b>${q.points.slice(0, 2).map(p => `<span>${esc(p)}</span>`).join('')}</div>`).join('')}</div>`
     : s.kind === 'actions' ? `<div class="act"><div style="background:${acc}"><span>Aksi</span><span>PIC</span><span>Waktu</span></div>${s.rows.slice(0, 4).map(r => `<div><span>${esc(r.action)}</span><span>${esc(r.owner)}</span><span>${esc(r.when)}</span></div>`).join('')}</div>`
+    : s.kind === 'summary' ? `<div class="sm-head" style="background:${navy}">${esc((s.headline || '').replace(/\*\*/g, ''))}</div><div class="two">${(s.findings || []).slice(0, 3).map(f => `<div><b style="color:${acc}">${esc(f.label)}</b> ${esc(f.text.replace(/\*\*/g, '')).slice(0, 70)}</div>`).join('')}</div>`
+    : s.kind === 'news' ? `<div class="mx">${(s.items || []).slice(0, 4).map(it => `<div><b>${esc(it.headline).slice(0, 60)}</b><span>${esc(it.why).slice(0, 50)}</span></div>`).join('')}</div>`
+    : s.kind === 'image' ? `<div class="two"><div class="viz" style="height:auto;min-height:60px">${s.image ? `<img src="/api/reports/images/${esc(s.image)}" style="max-width:100%;max-height:70px" alt="">` : ic('image')}</div><div>${(s.points || []).slice(0, 3).map(p => `<div>• ${esc(p).slice(0, 60)}</div>`).join('')}</div></div>`
     : s.kind === 'quote' ? `<div class="qt" style="border-color:${acc2}">“${esc(s.quote)}”<small>${esc(s.source)}</small></div>` : `<div class="sub">${esc(s.subtitle || '')}</div>`;
   return `<div class="thumb169 ${dark ? 'dark' : ''}" style="${dark ? `background:${navy}` : ''}"><i style="background:${acc2}"></i><h4 style="color:${dark ? '#fff' : navy}">${esc(s.title)}</h4>${inner}</div>`;
 }
@@ -219,6 +257,11 @@ function slideFields(s, i) {
   if (s.kind === 'two') h += `<div class="row2"><div>${f('left_title', 'Left heading', s.left_title)}${f('left', 'Left points', s.left.join('\n'), 4)}</div><div>${f('right_title', 'Right heading', s.right_title)}${f('right', 'Right points', s.right.join('\n'), 4)}</div></div>`;
   if (s.kind === 'kpi') h += f('items', 'Numbers (one per line: value | label | note)', s.items.map(x => [x.value, x.label, x.note].filter(Boolean).join(' | ')).join('\n'), 4);
   if (s.kind === 'quote') h += f('quote', 'Quote', s.quote, 3) + f('source', 'Who said it, where', s.source);
+  if (s.kind === 'summary') h += f('headline', 'Synthesis (one sentence; **bold** = highlighted phrase)', s.headline, 2) + f('findings', 'Findings (one per line: LABEL | sentence)', (s.findings || []).map(x => `${x.label} | ${x.text}`).join('\n'), 4) + f('focus', 'Focus for next period', s.focus || '', 2);
+  if (s.kind === 'news') h += `<div class="row2"><div>${srcSel(s.source)}</div><div><label>Sentiment</label><select data-f="sentiment" data-i="${i}" class="vsel" style="width:100%">${['positif', 'negatif', 'netral'].map(v => `<option ${v === s.sentiment ? 'selected' : ''}>${v}</option>`).join('')}</select></div></div>${f('items', 'News (one per line: exact headline from the data | why it matters)', (s.items || []).map(x => `${x.headline} | ${x.why}`).join('\n'), 5)}`;
+  if (s.kind === 'image') h += `<label>Screenshot</label><select data-f="image" data-i="${i}" class="vsel" style="width:100%"><option value="">—</option>${(S.deck.images || []).map(x => `<option value="${x.id}" ${x.id === s.image ? 'selected' : ''}>${esc(x.label || x.id)}</option>`).join('')}</select>${f('points', 'Analysis (one sentence per line)', (s.points || []).join('\n'), 4)}`;
+  if (s.kind === 'chart') h += `<div class="row2"><div>${f('note', 'On-chart note (e.g. the peak)', s.note || '')}</div><div>${f('highlight', 'Highlight category', s.highlight || '')}</div></div>`;
+  if (s.kind === 'table' || s.kind === 'chart') h += `<div class="row2"><div>${f('filter_col', 'Only rows where column…', s.filter?.column || '')}</div><div>${f('filter_val', '…equals', s.filter?.value || '')}</div></div>`;
   if (s.kind === 'matrix') h += `<div class="row2">${s.quadrants.map((q, k) => `<div>${f('q' + k + 't', ['Top left', 'Top right', 'Bottom left', 'Bottom right'][k] + ' — heading', q.title)}${f('q' + k + 'p', 'Points (one per line)', q.points.join('\n'), 3)}</div>`).join('')}</div>`;
   if (s.kind === 'actions') h += f('rows', 'Actions (one per line: action | owner | when | success indicator)', s.rows.map(r => [r.action, r.owner, r.when, r.kpi].join(' | ')).join('\n'), 6);
   if (s.kind === 'chart') h += `<div class="row2"><div>${srcSel(s.source)}</div><div><label>Chart type</label><select data-f="chart" data-i="${i}" class="vsel" style="width:100%">${['column', 'bar', 'line', 'pie', 'doughnut'].map(c => `<option ${c === s.chart ? 'selected' : ''}>${c}</option>`).join('')}</select></div></div>${f('category', `Category column${cols.length ? ' — ' + cols.join(', ') : ''}`, s.category)}${f('series', 'Value columns (comma-separated)', s.series.join(', '))}<label class="help" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-f="stacked" data-i="${i}" ${s.stacked ? 'checked' : ''}> Stacked</label>`;
@@ -226,35 +269,52 @@ function slideFields(s, i) {
   if (['kpi', 'table', 'chart', 'matrix', 'actions'].includes(s.kind)) h += f('caption', 'Insight (shown under the visual)', s.caption || '', 2);
   return h;
 }
+// Remember the new-presentation form while uploads or choices re-render the page.
+function captureForm() { if (!$('#rpBrief')) return; S.form = { ...(S.form || {}), title: $('#rpTitle')?.value, brief: $('#rpBrief')?.value, tpl: $('#rpTpl')?.value, know: $('#rpKnow')?.checked, ds: [...document.querySelectorAll('#rpDs input:checked')].map(i => i.value) };
+  document.querySelectorAll('[data-shot]').forEach(el => { const sh = (S.shots || []).find(x => x.id === el.dataset.shot); if (sh) sh.label = el.value.trim(); }); }
 function deckView() {
   const k = S.deck; const colors = tplColors(k.template);
   body(`<div class="bar" style="align-items:center;flex-wrap:wrap;gap:8px"><button class="btn sm" data-r="backdeck">← All presentations</button><input type="text" id="rpDTitle" value="${esc(k.title)}" style="flex:1 1 320px;min-width:260px;font-size:18px;font-weight:600">
       <select id="rpDTpl" class="vsel" title="Template">${templateOptions(k.template)}</select>
       ${finalizeSelect()}<button class="btn sm" data-r="refinal" ${S.busy ? 'disabled' : ''}>${S.busy === 'final' ? spin('Finalizing…') : ic('sparkle') + 'Finalize again'}</button><button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
     ${k.notes ? `<div class="notice">${esc(k.notes)}</div>` : ''}
+    <details class="rp-deckstyle"><summary>${ic('sparkle')}Style: <b>${esc(k.style?.name || 'Template as is')}</b> — change colours and fonts</summary>${styleCards([{ id: 'template', name: 'Template as is', description: "Keep the template's own colours", colors: { dk2: '3A4250', accent1: '8892A0', accent2: 'B8C0CC', accent3: '1FA971', accent4: 'E04A4A', lt2: 'EEF1F5' } }, ...stylesOf(k.clientId).styles], k.style?.id || 'template', 'deckstyle')}</details>
+    <div id="rpChecks"></div>
+    <div class="rp-shots" style="margin:8px 0 4px">${(k.images || []).map(x => `<div class="rp-shot sm" title="${esc(x.label)}"><img src="/api/reports/images/${x.id}" alt=""><small>${esc(x.id)} · ${esc(x.label)}</small></div>`).join('')}<button class="btn sm" data-r="deckshot">${ic('upload')}Add screenshot</button><input type="file" id="rpDeckShot" accept="image/png,image/jpeg" multiple hidden></div>
     <div class="rp-slides">${k.outline.slides.map((s, i) => `<div class="rp-slide"><div class="rp-slide-l">${slideThumb(s, colors)}<div class="rp-slide-tools"><span class="badge">${i + 1} · ${KIND_LABEL[s.kind]}</span><button class="icon-btn" data-r="sup" data-x="${i}" title="Move up">↑</button><button class="icon-btn" data-r="sdown" data-x="${i}" title="Move down">↓</button><button class="icon-btn" data-r="sdel" data-x="${i}" title="Delete slide">${ic('trash')}</button></div></div><div class="rp-slide-r">${slideFields(s, i)}</div></div>`).join('')}</div>
     <div class="set-sec" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b style="flex:1">Add a slide</b>${Object.entries(KIND_LABEL).map(([kk, l]) => `<button class="btn sm" data-r="sadd" data-x="${kk}">${ic('plus')}${l}</button>`).join('')}</div>`);
+  loadChecks();
   $('#rpBody').oninput = $('#rpBody').onchange = e => { const el = e.target; if (el.dataset.f == null || el.dataset.i == null) return; const s = k.outline.slides[+el.dataset.i]; const v = el.type === 'checkbox' ? el.checked : el.value;
     const list = x => x.split('\n').map(y => y.trimEnd()).filter(y => y.trim());
     switch (el.dataset.f) {
       case 'bullets': case 'left': case 'right': s[el.dataset.f] = list(v); break;
       case 'series': case 'columns': s[el.dataset.f] = v.split(',').map(y => y.trim()).filter(Boolean); break;
-      case 'items': s.items = list(v).map(l => { const [value, label, note] = l.split('|').map(y => y.trim()); return { value: value || '', label: label || '', note: note || '' }; }); break;
+      case 'items': if (s.kind === 'news') { s.items = list(v).map(l => { const [headline, ...why] = l.split('|'); return { headline: headline.trim(), why: why.join('|').trim() }; }); break; } s.items = list(v).map(l => { const [value, label, note] = l.split('|').map(y => y.trim()); return { value: value || '', label: label || '', note: note || '' }; }); break;
       case 'top': s.top = +v || 0; break;
-      case 'rows': s.rows = list(v).map(l => { const [action, owner, when, kpi] = l.split('|').map(y => y.trim()); return { action: action || '', owner: owner || '', when: when || '', kpi: kpi || '' }; }); break;
+      case 'findings': s.findings = list(v).map(l => { const [label, ...rest] = l.split('|'); return rest.length ? { label: label.trim(), text: rest.join('|').trim() } : { label: '', text: label.trim() }; }); break;
+      case 'points': s.points = list(v); break;
+      case 'filter_col': case 'filter_val': { s.filter = { ...(s.filter || {}), [el.dataset.f === 'filter_col' ? 'column' : 'value']: v }; if (!s.filter.column) delete s.filter; break; }
+      case 'rows': s.rows = list(l => { const [action, owner, when, kpi] = l.split('|').map(y => y.trim()); return { action: action || '', owner: owner || '', when: when || '', kpi: kpi || '' }; }); break;
       default: { const q = el.dataset.f.match(/^q(\d)([tp])$/); if (q) { const quad = s.quadrants[+q[1]]; if (q[2] === 't') quad.title = v; else quad.points = list(v); } else s[el.dataset.f] = v; }
     }
     k.dirty = true; if (e.type === 'change') { const th = el.closest('.rp-slide')?.querySelector('.thumb169'); if (th) th.outerHTML = slideThumb(s, tplColors($('#rpDTpl').value)); }
   };
 }
+// Quality checks before delivery (slide limit, structure, labels, fragments, avoided terms, numbers not in the data).
+async function loadChecks() {
+  const box = $('#rpChecks'); if (!box || !S.deck) return; const cs = await C.api(`/api/reports/decks/${S.deck.id}/checks`).catch(() => []);
+  box.innerHTML = cs.length ? `<div class="rp-checks"><b>${C.ic('check')}Quality checks · ${cs.length} to review</b>${cs.slice(0, 30).map(c => `<div class="${c.level}">${esc(c.text)}</div>`).join('')}</div>` : `<div class="rp-checks ok"><b>${C.ic('check')}Quality checks passed</b></div>`;
+}
 async function saveDeck(quiet) {
   const k = S.deck; const r = await C.api('/api/reports/decks/' + k.id, { method: 'PUT', body: { title: $('#rpDTitle')?.value ?? k.title, template: $('#rpDTpl')?.value ?? k.template, outline: k.outline } });
-  S.deck = r; S.decks = (await C.api('/api/reports')).decks; if (!quiet) C.toast('Saved');
+  S.deck = r; S.decks = (await C.api('/api/reports')).decks; if (!quiet) C.toast('Saved'); loadChecks();
 }
 const NEW_SLIDE = { title: { kind: 'title', title: 'Judul', subtitle: '' }, section: { kind: 'section', title: 'Bagian baru' }, bullets: { kind: 'bullets', title: 'Judul', bullets: ['Poin pertama'] },
   two: { kind: 'two', title: 'Perbandingan', left_title: 'Kiri', left: ['Poin'], right_title: 'Kanan', right: ['Poin'] }, kpi: { kind: 'kpi', title: 'Angka kunci', items: [{ value: '0', label: 'Label', note: '' }], caption: '' },
   quote: { kind: 'quote', title: 'Kutipan', quote: 'Teks kutipan', source: '' },
   matrix: { kind: 'matrix', title: 'Analisis SWOT', quadrants: [{ title: 'Kekuatan', points: [] }, { title: 'Kelemahan', points: [] }, { title: 'Peluang', points: [] }, { title: 'Ancaman', points: [] }], caption: '' },
+  summary: { kind: 'summary', title: 'Executive Summary', headline: 'Kesimpulan utama dengan **frasa kunci**.', findings: [{ label: 'DORONGAN', text: 'Temuan pertama.' }], focus: '' },
+  news: { kind: 'news', title: 'Sampel Berita Positif', source: '', sentiment: 'positif', items: [] }, image: { kind: 'image', title: 'Wordcloud', image: '', points: [], caption: '' },
   actions: { kind: 'actions', title: 'Rencana Aksi', rows: [{ action: 'Aksi', owner: 'PIC', when: 'Minggu ini', kpi: 'Indikator' }], caption: '' }, table: { kind: 'table', title: 'Tabel', source: '', columns: [], top: 10, caption: '' },
   chart: { kind: 'chart', title: 'Grafik', source: '', chart: 'column', category: '', series: [], stacked: false, caption: '' }, closing: { kind: 'closing', title: 'Terima kasih', subtitle: '' } };
 
@@ -283,6 +343,7 @@ function clientModal(c) {
     <label for="clName">Name</label><input type="text" id="clName" value="${esc(c?.name || '')}" autofocus placeholder="e.g. Kementerian X">
     <label for="clDesc">Short description</label><input type="text" id="clDesc" value="${esc(c?.description || '')}" placeholder="e.g. Ministry, monthly media monitoring + quarterly strategy">
     <div class="persona-box"><b>${ic('star')}Client persona</b><p>The client's voice and boundaries. Applied to every deck for this client and to chats aimed at this client's space, on top of each analyst's own persona.</p>${C.personaFields('cp', C.me().personaFields.client, c?.persona || {})}</div>
+    <div style="margin:6px 0 0"><button type="button" class="btn sm" data-r="structpreset">${ic('memo')}Insert example structure (weekly media monitoring)</button></div>
     <label for="clInstr">Other guidelines</label><textarea id="clInstr" rows="3" placeholder="Report structure they expect, who signs off, deadlines…">${esc(c?.instructions || '')}</textarea>
     <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-r="saveclient" data-x="${c?.id || ''}">Save</button></div>`, 'wide');
 }
@@ -304,6 +365,11 @@ function clientsView() {
   const tpls = S.templates.filter(t => t.clientId === c.id), ds = S.datasets.filter(d => d.clientId === c.id), decks = S.decks.filter(k => k.clientId === c.id);
   body(`<div class="bar" style="align-items:center;flex-wrap:wrap"><h2 style="flex:1;margin:0;font-size:22px">${esc(c.name)}</h2><button class="btn sm" data-r="editclient">${ic('edit')}Edit</button><button class="btn sm" data-r="tab" data-x="data">${ic('table')}Curate data</button><button class="btn sm primary" data-r="tab" data-x="decks">${ic('layers')}New presentation</button><button class="icon-btn" data-r="delclient" title="Delete client">${ic('trash')}</button></div>
     <div class="set-sec"><h3>${ic('star')}Client persona</h3>${personaView(c) || `<p>No persona yet. Describe the client's voice, audiences, key messages, terms to use or avoid and sensitive issues — applied to every deck and to chats aimed at this client. <a href="#" data-r="editclient">Add persona</a></p>`}</div>
+    <div class="set-sec"><div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:220px"><h3>${ic('image')}Logos</h3><p>Upload every version you have (colour, white, partner logos). Canopus places the darkest on light slides and the footer, the brightest on dark covers, and reads their colours to recommend a style.</p></div>
+      <button class="btn sm" data-r="picklogo">${ic('upload')}Upload logos</button><input type="file" id="rpLogoFile" accept="image/png,image/jpeg" multiple hidden></div>
+      <div class="rp-logos">${(c.logos || []).map(l => `<div class="rp-logo-card ${l.lum > 0.75 ? 'light' : ''}"><img src="/api/reports/clients/${c.id}/logos/${l.id}" alt=""><small>${esc(l.label)}${l.colors?.length ? `<span class="sw">${l.colors.map(x => `<span style="background:#${x}"></span>`).join('')}</span>` : ''}</small><button class="icon-btn" data-r="dellogo" data-x="${l.id}" title="Remove">${ic('trash')}</button></div>`).join('') || '<p class="help">No logos yet.</p>'}</div></div>
+    <div class="set-sec"><h3>${ic('sparkle')}Default style</h3><p>Colours and fonts applied to this client's decks on top of any template. “Recommended” is built from the logo colours. You can still change it per presentation.</p>
+      ${styleCards([{ id: 'template', name: 'Template as is', description: "Keep the template's own colours", colors: { dk2: '3A4250', accent1: '8892A0', accent2: 'B8C0CC', accent3: '1FA971', accent4: 'E04A4A', lt2: 'EEF1F5' } }, ...stylesOf(c.id).styles], c.style?.id || 'template', 'clientstyle')}</div>
     ${tplUploadBox()}${tpls.length ? `<div class="cards rp-tpls">${tpls.map(tplCard).join('')}</div>` : ''}
     <div class="set-sec"><h3>${ic('refresh')}Data recipes</h3><p>Curation plans saved from earlier work for this client. Load one on next month's file: no AI planning needed.</p>
       ${c.recipeList.length ? c.recipeList.map(r => `<div class="doc-row">${ic('bolt')}<span class="t">${esc(r.name)}</span><small>${r.columns.length} columns · ${C.ago(r.created)}</small><button class="icon-btn" data-r="delrecipe" data-x="${r.id}" title="Delete">${ic('trash')}</button></div>`).join('') : '<p class="help">Run a plan in Data curation, then “Save plan as recipe”.</p>'}</div>
@@ -327,12 +393,21 @@ async function uploadTemplate(files) {
 /* ================= events ================= */
 async function onClick(e) {
   const t = e.target.closest('[data-r]'); if (!t) return; e.preventDefault();
-  const r = t.dataset.r, x = t.dataset.x;
+  const r = t.dataset.r, x = t.dataset.x, x_ = x;
   try {
     switch (r) {
       case 'tab': S.tab = x; if (x === 'decks') S.deck = null; renderReports(); break;
       case 'pickds': $('#rpDsFile').click(); break;
       case 'pickdoc': $('#rpDocFile').click(); break;
+      case 'structpreset': { const el = document.getElementById('cp_structure'); if (el) { el.value = el.value.trim() ? el.value : STRUCTURE_PRESET; el.rows = 10; el.focus(); } break; }
+      case 'picklogo': $('#rpLogoFile').click(); break;
+      case 'dellogo': await C.api(`/api/reports/clients/${S.client}/logos/${x}`, { method: 'DELETE' }); delete S.styleCache[S.client]; await load(); renderReports(); break;
+      case 'pickshots': captureForm(); $('#rpShotFile').click(); break;
+      case 'rmshot': captureForm(); S.shots = (S.shots || []).filter(x => x.id !== x_); renderReports(); break;
+      case 'pickstyle': captureForm(); S.form.style = x; renderReports(); break;
+      case 'clientstyle': { const st = x === 'template' ? null : stylesOf(S.client).styles.find(y => y.id === x); await C.api(`/api/reports/clients/${S.client}/style`, { method: 'PUT', body: { style: st } }); await load(); renderReports(); C.toast(st ? `${st.name} is now ${curClient().name}'s default style` : 'Default style cleared'); break; }
+      case 'deckstyle': { const st = x === 'template' ? null : stylesOf(S.deck.clientId).styles.find(y => y.id === x) || null; S.deck.style = st; S.deck.dirty = true; await C.api('/api/reports/decks/' + S.deck.id, { method: 'PUT', body: { style: st, outline: S.deck.outline } }); renderReports(); C.toast(st ? `Style: ${st.name}` : "Using the template's colours"); break; }
+      case 'deckshot': $('#rpDeckShot').click(); break;
       case 'addfile': $('#rpDsMore').click(); break;
       case 'saveissues': { const c = S.clients.find(k => k.id === (S.ds.clientId || S.client)); if (!c) { C.toast('Choose a client first'); break; }
         const labels = JSON.parse(t.dataset.labels || '[]'); const cur = (c.persona?.issues || '').split(/[\n;]+/).map(x => x.trim()).filter(Boolean); const merged = [...new Set([...cur, ...labels])];
@@ -378,9 +453,11 @@ async function onClick(e) {
       case 'todeck': S.prefDs = S.ds.id; S.tab = 'decks'; S.deck = null; await load(); renderReports(); break;
       case 'draftdeck': { const datasets = [...document.querySelectorAll('#rpDs input:checked')].map(i => i.value); const brief = $('#rpBrief').value.trim();
         if (!brief && !datasets.length) { C.toast('Write a brief or choose data first'); break; }
-        const payload = { client: S.client || null, title: $('#rpTitle').value.trim(), template: $('#rpTpl').value, datasets, brief, model: $('#rpDModel')?.value, finalizeModel: $('#rpFModel')?.value, knowledge: $('#rpKnow').checked }; savePrefs({ analysis: payload.model, finalize: payload.finalizeModel });
+        document.querySelectorAll('[data-shot]').forEach(el => { const sh = (S.shots || []).find(x => x.id === el.dataset.shot); if (sh) sh.label = el.value.trim(); });
+        captureForm(); const styleSel = S.form?.style ?? (curClient()?.style?.id || stylesOf(S.client).styles.find(x => x.recommended)?.id || 'template'); const styleObj = stylesOf(S.client).styles.find(x => x.id === styleSel) || null;
+        const payload = { style: styleObj, images: (S.shots || []).map(x => ({ id: x.id, label: x.label })), client: S.client || null, title: $('#rpTitle').value.trim(), template: $('#rpTpl').value, datasets, brief, model: $('#rpDModel')?.value, finalizeModel: $('#rpFModel')?.value, knowledge: $('#rpKnow').checked }; savePrefs({ analysis: payload.model, finalize: payload.finalizeModel });
         S.busy = 'deck'; renderReports();
-        try { const k = await C.api('/api/reports/decks', { method: 'POST', body: payload }); S.busy = ''; await load(); await openDeck(k.id); C.refreshMe?.(); }
+        try { const k = await C.api('/api/reports/decks', { method: 'POST', body: payload }); S.busy = ''; S.shots = []; S.form = null; await load(); await openDeck(k.id); C.refreshMe?.(); }
         finally { S.busy = ''; if (!S.deck) renderReports(); } break; }
       case 'opendeck': await openDeck(x); break;
       case 'refinal': { const fm = $('#rpReFModel').value; savePrefs({ finalize: fm }); await saveDeck(true); S.busy = 'final'; renderReports();
@@ -392,7 +469,7 @@ async function onClick(e) {
       case 'deldeck': if (await C.confirmBox('Delete presentation?', 'The outline is removed. Files you downloaded are not affected.')) { await C.api('/api/reports/decks/' + S.deck.id, { method: 'DELETE' }); S.deck = null; await load(); renderReports(); } break;
       case 'sup': case 'sdown': { const s = S.deck.outline.slides; const i = +x, j = r === 'sup' ? i - 1 : i + 1; if (j >= 0 && j < s.length) { [s[i], s[j]] = [s[j], s[i]]; S.deck.dirty = true; renderReports(); } break; }
       case 'sdel': S.deck.outline.slides.splice(+x, 1); S.deck.dirty = true; renderReports(); break;
-      case 'sadd': { const s = structuredClone(NEW_SLIDE[x]); if (s.source !== undefined) s.source = S.sources.find(v => !v.main)?.ref || S.sources[0]?.ref || ''; S.deck.outline.slides.push(s); S.deck.dirty = true; renderReports(); setTimeout(() => document.querySelector('.rp-slide:last-child')?.scrollIntoView({ behavior: 'smooth' }), 30); break; }
+      case 'sadd': { const s = structuredClone(NEW_SLIDE[x]); if (s.source !== undefined) s.source = s.kind === 'news' ? (S.sources.find(v => v.main)?.ref || '') : S.sources.find(v => !v.main)?.ref || S.sources[0]?.ref || ''; S.deck.outline.slides.push(s); S.deck.dirty = true; renderReports(); setTimeout(() => document.querySelector('.rp-slide:last-child')?.scrollIntoView({ behavior: 'smooth' }), 30); break; }
       case 'tpldl': await download(`/api/reports/templates/${x}/file`); break;
       case 'tpldel': if (await C.confirmBox('Delete template?', 'Presentations that use it will fall back to a plain layout until you choose another template.')) { await C.api('/api/reports/templates/' + x, { method: 'DELETE' }); await load(); renderReports(); } break;
     }

@@ -300,16 +300,17 @@ async function runOpenAI({ model, system, messages, useKnowledge, mode, emit, si
 }
 
 // Short non-streaming completion (titles, prompt polishing, routing).
-export async function complete(user, model, system, text, purpose, maxTokens = 1024, effort = 'low') {
+export async function complete(user, model, system, text, purpose, maxTokens = 1024, effort = 'low', images = []) {
+  const imgs = model.vision ? images : [];
   if (oaStyle(model.provider)) {
     const ep = endpoint(model.provider);
-    const res = await (model.provider === 'local' ? fetch : httpFetch)(ep.base + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ep.key }, body: JSON.stringify({ model: model.api, messages: [{ role: 'system', content: system }, { role: 'user', content: text }] }), signal: AbortSignal.timeout(maxTokens > 4096 ? 300e3 : 60e3) });
+    const res = await (model.provider === 'local' ? fetch : httpFetch)(ep.base + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ep.key }, body: JSON.stringify({ model: model.api, messages: [{ role: 'system', content: system }, { role: 'user', content: imgs.length ? [...imgs.map(im => ({ type: 'image_url', image_url: { url: `data:${im.mime};base64,${im.data}` } })), { type: 'text', text }] : text }] }), signal: AbortSignal.timeout(maxTokens > 4096 ? 300e3 : 60e3) });
     if (!res.ok) throw Object.assign(new Error('HTTP ' + res.status), { status: res.status });
     const j = await res.json(); const u = j.usage || {};
     recordUsage(user, model, { input: u.prompt_tokens, output: u.completion_tokens }, purpose);
     return (j.choices?.[0]?.message?.content || '').trim();
   }
-  const r = await (await anthropic()).messages.create({ model: model.api, max_tokens: maxTokens, output_config: { effort }, system, messages: [{ role: 'user', content: text }] });
+  const r = await (await anthropic()).messages.create({ model: model.api, max_tokens: maxTokens, output_config: { effort }, system, messages: [{ role: 'user', content: imgs.length ? [...imgs.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.mime, data: im.data } })), { type: 'text', text }] : text }] });
   const u = r.usage || {}; recordUsage(user, model, { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens }, purpose);
   return r.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
 }
