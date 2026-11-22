@@ -316,7 +316,7 @@ try {
   await step(A, 'auto-route', 'Auto sends quick tasks to the cheapest model and writing to the standard one', async () => {
     await A.goto(canopus.url + '#home'); await A.reload(); await A.waitForSelector('#app:not([hidden])'); await setModel(A, 'auto');
     const a = await ask(A, 'Halo'); const b = await ask(A, 'Tolong ringkas dan tulis surat undangan rapat koordinasi.');
-    return ok(a.route?.auto && a.model === 'Claude Swift' && b.route?.category === 'writing' && b.model === 'Claude Core', `“Halo” → ${a.model} (${a.route?.category}) · surat → ${b.model} (${b.route?.category})`);
+    return ok(a.route?.auto && a.model === 'Magellan' && b.route?.category === 'writing' && b.model === 'Triangulum', `“Halo” → ${a.model} (${a.route?.category}) · surat → ${b.model} (${b.route?.category})`);
   });
   await step(A, 'gpt-knowledge', 'GPT answers from internal knowledge with numbered citations', async () => {
     await setModel(A, 'openai:gpt-sim'); const r = await ask(A, 'Berapa anggaran Program Makan Bergizi Gratis tahun 2026?');
@@ -413,7 +413,7 @@ try {
     const r = await ask(B, 'Tolong tulis surat undangan rapat.'); const forced = await apiCall(B, '/api/me');
     const allowed = JSON.parse(forced.body).config.models.map(m => m.id);
     await putJson(A, '/api/admin/groups/' + gid, { models: null }, 'PATCH');
-    return ok(r.model === 'Claude Swift' && allowed.join() === 'swift', `writing → ${r.model} · allowed: ${allowed.join(', ')}`);
+    return ok(r.model === 'Magellan' && allowed.join() === 'swift', `writing → ${r.model} · allowed: ${allowed.join(', ')}`);
   });
   await step(B, 'group-budget', 'A group over its shared budget is stopped', async () => {
     await putJson(A, '/api/admin/groups/' + gid, { budget_usd: 0.000001 }, 'PATCH');
@@ -546,7 +546,7 @@ try {
     const deck = JSON.parse((await apiCall(A, '/api/reports/decks/' + kid)).body); const unmasked = deck.outline.slides[1].caption.includes(SECRETS.term);
     const finReq = recorded.slice(before).find(r => r.kind === 'openai' && /second, senior analyst on a report presentation/.test(r.raw));
     const added = deck.outline.slides.find(x => x.title === 'Temuan Tambahan dari Data');
-    const twoStage = !!finReq && finReq.raw.includes('analyze it yourself') && finReq.raw.includes('Kompas | 15') && /Analysis: Claude Core \(weekly report on ordinary data\) · finalized by GPT Standard/.test(deck.notes) && deck.outline.slides[2].title.endsWith('(final)') && deck.outline.slides[2].source.endsWith('/ Sebaran Sentimen')
+    const twoStage = !!finReq && finReq.raw.includes('analyze it yourself') && finReq.raw.includes('Kompas | 15') && /Analysis: Triangulum \(weekly report on ordinary data\) · finalized by GPT Standard/.test(deck.notes) && deck.outline.slides[2].title.endsWith('(final)') && deck.outline.slides[2].source.endsWith('/ Sebaran Sentimen')
       && deck.outline.slides[1].kind === 'kpi' && !!added && /Kompas \(15 berita\)/.test(added.bullets[0]) && deck.outline.slides.length === 14;
     await A.click('[data-r=refinal]'); await A.waitForFunction(() => /\(final\) \(final\)/.test(document.querySelector('.rp-slide:nth-child(3) input[data-f=title]')?.value || ''), null, { timeout: TIMEOUT });
     const b64 = await A.evaluate(async kid => { const r = await fetch(`/api/reports/decks/${kid}/pptx`); const b = new Uint8Array(await r.arrayBuffer()); let s = ''; for (const x of b) s += String.fromCharCode(x); return btoa(s); }, kid);
@@ -578,7 +578,7 @@ try {
     const dB = JSON.parse((await apiCall(A, '/api/reports')).body).decks.find(x => x.reportType === 'monthly'); const deckB = dB && JSON.parse((await apiCall(A, '/api/reports/decks/' + dB.id)).body);
     const dsA = all.datasets[0].id; const cross = await putJson(A, '/api/reports/decks', { client: b.id, template: tA.id, datasets: [dsA], brief: 'Pakai template klien A' }, 'POST'); const kid = JSON.parse(cross.body).id;
     const built = await A.evaluate(async kid => (await fetch(`/api/reports/decks/${kid}/pptx`)).status, kid);
-    return ok(monthly && /Analysis: Claude Prime \(a longer-period report needs strategic depth\)/.test(deckB?.notes || '') && deckB?.period === 'Oktober 2026' && deckB?.outline.footer === 'Weekly Report Media Massa · November 2026' && tB && tB.info.structure.length >= 8 && defaultTpl === tB.id && groups >= 2 && usedStructure && cross.status === 200 && built === 200, `Monthly type shaped the request (period, weekly trend buckets, monthly structure): ${monthly} · B's template from earlier report: ${tB?.info.structure.length} reference slides · preselected for B: ${defaultTpl === tB?.id} · template groups ${groups} · AI followed B's structure + guidelines: ${usedStructure} · B deck on A's template: ${cross.status}/${built}`);
+    return ok(monthly && /Analysis: Andromeda \(a longer-period report needs strategic depth\)/.test(deckB?.notes || '') && deckB?.period === 'Oktober 2026' && deckB?.outline.footer === 'Weekly Report Media Massa · November 2026' && tB && tB.info.structure.length >= 8 && defaultTpl === tB.id && groups >= 2 && usedStructure && cross.status === 200 && built === 200, `Monthly type shaped the request (period, weekly trend buckets, monthly structure): ${monthly} · B's template from earlier report: ${tB?.info.structure.length} reference slides · preselected for B: ${defaultTpl === tB?.id} · template groups ${groups} · AI followed B's structure + guidelines: ${usedStructure} · B deck on A's template: ${cross.status}/${built}`);
   });
   await step(A, 'report-recipe', 'Reports: next month’s file for client A reuses the saved recipe with no AI planning', async () => {
     const before = recorded.length; await A.selectOption('#rpClient', (JSON.parse((await apiCall(A, '/api/reports')).body)).clients.find(c => c.name === 'Kementerian A').id);

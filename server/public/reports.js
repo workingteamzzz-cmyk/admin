@@ -77,7 +77,7 @@ function stepper() {
   if (!['data', 'decks'].includes(S.tab)) return '';
   const d = S.ds, k = S.deck; const final = k && /finali[sz]ed by/i.test(k.notes || '');
   const at = S.tab === 'data' ? (!d ? 1 : d.result ? 3 : 2) : !k ? 3 : k.review ? 6 : final ? 5 : 4;
-  const steps = ['Upload Excel', 'Curate (your style)', 'Claude: deck & analysis', 'GPT: check the narrative', 'Review with editor knowledge', 'Download & edit offline', 'Editor uploads the final'];
+  const steps = ['Upload Excel', 'Curate (your style)', 'Deck & analysis', 'Narrative check', 'Review with editor knowledge', 'Download & edit offline', 'Editor uploads the final'];
   return `<ol class="rp-flow">${steps.map((t, i) => `<li class="${i + 1 < at ? 'done' : i + 1 === at ? 'now' : ''}"><span>${i + 1 < at ? '✓' : i + 1}</span>${t}</li>`).join('')}</ol>`;
 }
 const body = html => { $('#rpBody').innerHTML = stepper() + html; C.hydrateIcons($('#rpBody')); };
@@ -92,7 +92,7 @@ function stageSelects() {
   const aDef = ms.some(m => m.id === p.analysis) ? p.analysis : 'auto';
   const fDef = p.finalize === 'none' || ms.some(m => m.id === p.finalize) ? p.finalize : (gpt.find(m => m.tier === 'standard') || gpt[0])?.id || 'none';
   const opts = sel => ms.map(m => `<option value="${m.id}" ${sel === m.id ? 'selected' : ''}>${esc(m.label)}</option>`).join('');
-  return `<div class="row2 rp-stages"><div><label for="rpDModel">1 · Analysis — charts, insights, recommendations</label><select id="rpDModel" class="vsel" style="width:100%"><option value="auto" ${aDef === 'auto' ? 'selected' : ''}>Auto — Canopus picks for this report (recommended)</option>${opts(aDef)}</select><p class="help" style="margin:4px 0 0">Auto: Claude Core for daily–bi-weekly reports on ordinary data; Claude Prime for monthly and longer, ad-hoc, both channels, 3+ files or over 20,000 rows. Steps down when under 20% of your monthly budget is left.</p></div>
+  return `<div class="row2 rp-stages"><div><label for="rpDModel">1 · Analysis — charts, insights, recommendations</label><select id="rpDModel" class="vsel" style="width:100%"><option value="auto" ${aDef === 'auto' ? 'selected' : ''}>Auto — Canopus picks for this report (recommended)</option>${opts(aDef)}</select><p class="help" style="margin:4px 0 0">Auto: Triangulum for daily–bi-weekly reports on ordinary data; Andromeda for monthly and longer, ad-hoc, both channels, 3+ files or over 20,000 rows. Steps down when under 20% of your monthly budget is left.</p></div>
     <div><label for="rpFModel">2 · Finalization — wording, titles, consistency</label><select id="rpFModel" class="vsel" style="width:100%"><option value="none" ${fDef === 'none' ? 'selected' : ''}>None (use the analysis as is)</option>${opts(fDef)}</select></div></div>`;
 }
 const finalizeSelect = () => { const ms = C.me().config.models; const p = prefs(); const gpt = ms.filter(m => m.provider === 'openai'); const def = ms.some(m => m.id === p.finalize) ? p.finalize : (gpt[0] || ms[0])?.id;

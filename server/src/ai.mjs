@@ -302,7 +302,7 @@ async function runOpenAI({ model, system, messages, useKnowledge, mode, emit, si
 // Errors that will not go away by retrying: no credit left, quota exhausted, a wrong or revoked key. They become a 402
 // with a plain message, so background jobs stop at once instead of retrying every batch.
 export function fatalAiError(e, model) {
-  const msg = String(e?.message || ''), st = e?.status, who = model?.provider === 'anthropic' ? 'Claude' : model?.label || 'the AI provider';
+  const msg = String(e?.message || ''), st = e?.status, who = model?.label || 'The AI provider';
   if (/credit balance|insufficient_quota|exceeded your current quota|billing|payment required/i.test(msg) || st === 402) return Object.assign(new Error(`${who}: the prepaid credit is used up (or the quota is reached). Nothing more will be charged. An administrator can top up the credit in the provider's console, then run this again.`), { status: 402, fatal: true });
   if (st === 401 || st === 403 || /invalid x-api-key|invalid api key|incorrect api key/i.test(msg)) return Object.assign(new Error(`${who}: the API key was refused (wrong, revoked or without access to this model). An administrator needs to check the key.`), { status: 402, fatal: true });
   return null;
@@ -433,11 +433,11 @@ export function reportModel(user, requested, rule = 'writing') {
   return substitute(want, allowed, false);
 }
 // Auto for reports: each task gets the model that fits it, within what the user may use.
-//  - bulk labelling, filtering, name cleanup → the cheapest (Claude Swift) — see helperModel
-//  - curation plans, reviews, URS checks → Claude Core: structured work, fast, half the price
-//  - the deck's analysis → Claude Core for daily, weekly and bi-weekly reports on ordinary data; Claude Prime for
+//  - bulk labelling, filtering, name cleanup → the cheapest (Magellan) — see helperModel
+//  - curation plans, reviews, URS checks → Triangulum: structured work, fast, half the price
+//  - the deck's analysis → Triangulum for daily, weekly and bi-weekly reports on ordinary data; Andromeda for
 //    monthly and longer reports, ad-hoc analyses, both channels at once, several data files or very large data
-//  - style profiles (URS, analyst style) → Claude Prime: rare, and everyone's reports follow them
+//  - style profiles (URS, analyst style) → Andromeda: rare, and everyone's reports follow them
 // When less than 20% of the month's budget is left, Auto steps down one level. A model the user picks stays as picked.
 const DEEP_TYPES = ['monthly', 'bimonthly', 'quarterly', 'semester', 'yearly', 'adhoc'];
 export function autoReportModel(user, requested, task, ctx = {}) {

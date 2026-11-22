@@ -42,11 +42,13 @@ export const config = {
   maxUploadMb: +(env.MAX_UPLOAD_MB || 60),
 };
 
-// Built-in Claude models. OpenAI models are added by the administrator (Admin → Models).
+// Built-in Claude models, shown under galaxy names (Andromeda = Opus, Triangulum = Sonnet, Magellan = Haiku).
+// Suggested names for models the administrator adds: Sombrero (main GPT), Pinwheel (GPT mini), Cartwheel (GPT nano),
+// Milky Way (on-premise). OpenAI models are added by the administrator (Admin → Models).
 export const MODELS = {
-  prime: { id: 'prime', provider: 'anthropic', tier: 'advanced', label: 'Claude Prime', api: 'claude-opus-5-5', d: 'Claude Opus 5.5 · most capable', fallback: true, search: 'web_search_20260209', vision: true },
-  core: { id: 'core', provider: 'anthropic', tier: 'standard', label: 'Claude Core', api: 'claude-sonnet-5-5', d: 'Claude Sonnet 5.5 · fast and smart', fallback: true, search: 'web_search_20260209', vision: true },
-  swift: { id: 'swift', provider: 'anthropic', tier: 'light', label: 'Claude Swift', api: 'claude-haiku-5-5', d: 'Claude Haiku 5.5 · fastest, lowest cost', fallback: false, search: 'web_search_20250305', vision: true },
+  prime: { id: 'prime', provider: 'anthropic', tier: 'advanced', label: 'Andromeda', api: 'claude-opus-5-5', d: 'most capable · deepest analysis', fallback: true, search: 'web_search_20260209', vision: true },
+  core: { id: 'core', provider: 'anthropic', tier: 'standard', label: 'Triangulum', api: 'claude-sonnet-5-5', d: 'fast and smart · everyday reports', fallback: true, search: 'web_search_20260209', vision: true },
+  swift: { id: 'swift', provider: 'anthropic', tier: 'light', label: 'Magellan', api: 'claude-haiku-5-5', d: 'fastest, lowest cost · bulk labelling', fallback: false, search: 'web_search_20250305', vision: true },
 };
 export const TIERS = ['light', 'standard', 'advanced'];
 // What the Auto router decides between. The admin maps each category to a model.
