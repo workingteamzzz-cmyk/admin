@@ -46,9 +46,10 @@ function setGroups(table, col, ownerId, groupIds) {
 }
 function knowledgeFor(user) {
   ensureSpaces(user);
-  return allowedCollections(user).map(c => ({ ...c, mine: c.owner_id === user.id, canUpload: canUpload(user, c), ownerName: c.owner_id ? (one(`SELECT name,email FROM users WHERE id=?`, c.owner_id) || {}).name || '' : '',
+  return allowedCollections(user).map(c => ({ ...c, style_profile: c.style_profile ? JSON.parse(c.style_profile) : null, owner_id: c.kind === 'senior' && user.role !== 'admin' ? null : c.owner_id, mine: c.owner_id === user.id, canUpload: canUpload(user, c), ownerName: c.owner_id && (c.kind !== 'senior' || user.role === 'admin') ? (one(`SELECT name,email FROM users WHERE id=?`, c.owner_id) || {}).name || '' : '',
     clientId: c.kind === 'client' ? one(`SELECT id FROM clients WHERE collection_id=?`, c.id)?.id || null : null, groups: all(`SELECT g.id,g.name FROM groups g JOIN collection_groups cg ON cg.group_id=g.id WHERE cg.collection_id=?`, c.id),
-    docs: all(`SELECT d.id,d.title,d.filename,d.size,d.classification,d.status,d.error,d.chunks,d.pages,d.sensitive,d.created,d.uploaded_by,COALESCE(NULLIF(u.name,''),u.email) uploader FROM docs d LEFT JOIN users u ON u.id=d.uploaded_by WHERE d.collection_id=? ORDER BY d.created DESC`, c.id) }));
+    docs: all(`SELECT d.id,d.title,d.filename,d.size,d.classification,d.status,d.error,d.chunks,d.pages,d.sensitive,d.created,d.uploaded_by,COALESCE(NULLIF(u.name,''),u.email) uploader FROM docs d LEFT JOIN users u ON u.id=d.uploaded_by WHERE d.collection_id=? ORDER BY d.created DESC`, c.id)
+      .map(d => (c.kind === 'senior' && user.role !== 'admin' ? { ...d, uploader: c.name, uploaded_by: d.uploaded_by === user.id ? d.uploaded_by : null } : d)) }));
 }
 function mePayload(u) {
   const s = getSettings(); const ms = modelsFor(u, s);
@@ -192,7 +193,9 @@ route('POST', '/api/knowledge/collections/:id/docs', async (req, res, u, p) => {
   if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification, collection: c.id }, clientIp(req)); emitWebhook('knowledge.upload_refused', { file: fileName(req), classification, by: u.email }); throw new HttpError(422, problem); }
   const buf = await readBody(req, config.maxUploadMb * MB);
   const doc = await ingestDoc({ collectionId: c.id, filename: fileName(req), mime: String(req.headers['content-type'] || '').split(';')[0], buf, classification, title: req.headers['x-title'] ? decodeURIComponent(req.headers['x-title']) : null, userId: u.id });
-  audit(u.id, 'knowledge.upload', { doc: doc.id, title: doc.title, classification, status: doc.status, collection: c.id, kind: c.kind }, clientIp(req)); json(res, 200, doc);
+  audit(u.id, 'knowledge.upload', { doc: doc.id, title: doc.title, classification, status: doc.status, collection: c.id, kind: c.kind }, clientIp(req));
+  if (c.kind === 'senior' && doc.status === 'ready') R.buildStyleProfile(u, c.id).catch(e => console.warn('[style profile]', e.message));
+  json(res, 200, doc);
 });
 // Remove a document: the person who uploaded it, the owner of a personal space, or an administrator.
 route('DELETE', '/api/knowledge/docs/:id', (req, res, u, p) => {
@@ -202,6 +205,24 @@ route('DELETE', '/api/knowledge/docs/:id', (req, res, u, p) => {
   deleteDoc(p.id); audit(u.id, 'knowledge.doc_deleted', { doc: p.id, title: d.title }, clientIp(req)); json(res, 200, { ok: true });
 });
 // Your own space is readable by everyone by default; make it private to keep it to yourself.
+// Senior reference spaces: named with a codename (e.g. a star), linked to the account that uploads; managed by admins.
+route('POST', '/api/knowledge/seniors', async (req, res, u) => {
+  requireAdmin(u); const { name, userId } = await readJson(req, 5e3); const nm = String(name || '').trim().slice(0, 60); if (!nm) throw new HttpError(400, 'Give the senior a codename.');
+  if (one(`SELECT 1 FROM collections WHERE kind='senior' AND name=? COLLATE NOCASE`, nm)) throw new HttpError(409, 'This codename is already used.');
+  if (userId && !one(`SELECT 1 FROM users WHERE id=?`, userId)) throw new HttpError(404, 'User not found');
+  const cid = id(); run(`INSERT INTO collections(id,name,description,created,kind,owner_id) VALUES(?,?,?,?,?,?)`, cid, nm, 'Best reports shared by a senior analyst.', now(), 'senior', userId || null);
+  audit(u.id, 'knowledge.senior_created', { collection: cid, codename: nm }, clientIp(req)); json(res, 200, { id: cid });
+});
+route('PATCH', '/api/knowledge/seniors/:id', async (req, res, u, p) => {
+  requireAdmin(u); const c = one(`SELECT * FROM collections WHERE id=? AND kind='senior'`, p.id); if (!c) throw new HttpError(404, 'Not found'); const b = await readJson(req, 5e3);
+  const nm = b.name !== undefined ? String(b.name).trim().slice(0, 60) || c.name : c.name; if (one(`SELECT 1 FROM collections WHERE kind='senior' AND name=? COLLATE NOCASE AND id<>?`, nm, c.id)) throw new HttpError(409, 'This codename is already used.');
+  run(`UPDATE collections SET name=?, owner_id=? WHERE id=?`, nm, b.userId !== undefined ? (b.userId || null) : c.owner_id, c.id); audit(u.id, 'knowledge.senior_updated', { collection: c.id }, clientIp(req)); json(res, 200, { ok: true });
+});
+route('DELETE', '/api/knowledge/seniors/:id', (req, res, u, p) => { requireAdmin(u); const c = one(`SELECT * FROM collections WHERE id=? AND kind='senior'`, p.id); if (!c) throw new HttpError(404, 'Not found'); deleteCollection(c.id); audit(u.id, 'knowledge.senior_deleted', { codename: c.name }, clientIp(req)); json(res, 200, { ok: true }); });
+route('POST', '/api/knowledge/spaces/:id/style', async (req, res, u, p) => { const prof = await R.buildStyleProfile(u, p.id); audit(u.id, 'knowledge.style_profile_built', { collection: p.id }, clientIp(req)); json(res, 200, prof); });
+route('PUT', '/api/knowledge/spaces/:id/style', async (req, res, u, p) => { const prof = R.saveStyleProfile(u, p.id, (await readJson(req, 30e3)).profile); audit(u.id, 'knowledge.style_profile_edited', { collection: p.id }, clientIp(req)); json(res, 200, prof); });
+route('GET', '/api/knowledge/style-fields', (req, res) => json(res, 200, R.STYLE_PROFILE_FIELDS));
+route('GET', '/api/knowledge/seniors/users', (req, res, u) => { requireAdmin(u); json(res, 200, all(`SELECT id, COALESCE(NULLIF(name,''),email) name FROM users WHERE disabled=0 ORDER BY name`)); });
 route('PATCH', '/api/knowledge/mine', async (req, res, u) => {
   const { private: priv } = await readJson(req, 2e3); ensureSpaces(u);
   run(`UPDATE collections SET private=?, name=? WHERE kind='person' AND owner_id=?`, priv ? 1 : 0, u.name || u.email, u.id); audit(u.id, 'knowledge.space_visibility', { private: !!priv }, clientIp(req)); json(res, 200, { ok: true });

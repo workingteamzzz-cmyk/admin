@@ -87,6 +87,7 @@ function reportMock(sys, q) {
     { op: 'summary', name: 'Rekap per Media', group_by: ['Nama Media'], measures: [{ fn: 'count', as: 'Jumlah' }, { fn: 'sum', column: 'AVE (Rp)', as: 'Total AVE' }], total: true },
     { op: 'summary', name: 'Sebaran Sentimen', group_by: ['Sentimen'], measures: [{ fn: 'count', as: 'Jumlah' }, { fn: 'percent', as: '%' }] },
     { op: 'pivot', name: 'Tren Sentimen', rows: 'Tanggal', columns: 'Sentimen', fn: 'count' }] });
+  if (/reverse-engineers a writing and presentation style/.test(sys)) return JSON.stringify({ summary: 'Lugas, berbasis data, selalu menautkan temuan ke kegiatan klien.', titles: 'Judul berupa topik singkat dua sampai tiga kata.', structure: 'Ringkasan dulu, lalu tren, isu, risiko, rekomendasi.', findings: 'Setiap angka diikuti maknanya dan pemicunya.', recommendations: 'Rekomendasi bernomor dengan pemilik dan waktu.', language: 'Kalimat pendek, formal, istilah baku.', design: 'Grafik lebih banyak daripada tabel.', avoid: 'Tidak memakai label Catatan.', examples: ['Volume naik 12 persen karena pendaftaran MagangHub', 'Isu PHK perlu respons dalam 24 jam'] });
   if (/You design a small set of categories/.test(sys)) return JSON.stringify({ labels: ['Distribusi', 'Anggaran', 'Layanan Digital'] });
   if (/You label texts/.test(sys)) { const allowed = [...sys.matchAll(/"([^"]+)"/g)].map(m => m[1]); const out = {};
     for (const m of q.matchAll(/^(\d+)\. (.*)$/gm)) { const t = m[2]; if (allowed.includes('Relevan')) { out[m[1]] = /korea|taiwan/i.test(t) ? 'Noise: kementerian/lembaga negara lain' : /baca juga/i.test(t) && !/kemnaker.*kemnaker/i.test(t) ? 'Noise: hanya disebut di Baca juga' : 'Relevan'; continue; }
@@ -637,6 +638,22 @@ try {
     await A.locator('#rpRef').scrollIntoViewIfNeeded(); await A.screenshot({ path: path.join(OUT, 'server-report-medsos-ref.png') });
     const checks = { pptxIndexed: up.status === 'ready' && up.chunks > 0, listed: !!ref && ref.design, medsosStruct: /Platform Distribution/.test(medsosStruct) && /Sampel Post Positif/.test(medsosStruct) && /Konten Viral/.test(medsosStruct), usedRef, designFromRef: deck.template === 'doc:' + up.id && deck.channel === 'medsos', built: built === 200, uiOptions: opts >= 2 };
     return ok(Object.values(checks).every(Boolean) && !leaks().length, Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' '));
+  });
+  await step(A, 'urs', 'URS (Ultimate Reference Style): star codename, style profile distilled from the reports, used by Claude and GPT', async () => {
+    const before = recorded.length; const r1 = await putJson(A, '/api/knowledge/seniors', { name: 'Sirius', userId: JSON.parse((await apiCall(A, '/api/me')).body).user.id }, 'POST'); const sid = JSON.parse(r1.body).id;
+    const b64 = fs.readFileSync(deckFile).toString('base64');
+    const up = await A.evaluate(async ([cid, b64]) => { const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); const r = await fetch(`/api/knowledge/collections/${cid}/docs`, { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': 'Weekly Terbaik.pptx', 'content-type': 'application/octet-stream' }, body: bin }); return r.json(); }, [sid, b64]);
+    let prof = null; for (let i = 0; i < 30 && !prof; i++) { await A.waitForTimeout(300); prof = JSON.parse((await apiCall(A, '/api/knowledge')).body).find(c => c.id === sid)?.style_profile; }
+    const asB = JSON.parse((await apiCall(B, '/api/knowledge')).body).find(c => c.id === sid); const hidden = !!asB && !asB.owner_id && !asB.ownerName && asB.docs.every(d => d.uploader === 'Sirius');
+    const refs = JSON.parse((await apiCall(A, '/api/reports')).body).references; const urs = refs.find(x => x.id === 'senior:' + sid);
+    const cA = JSON.parse((await apiCall(A, '/api/reports')).body).clients.find(c => c.name === 'Kementerian A');
+    const d = await putJson(A, '/api/reports/decks', { client: cA.id, reportType: 'weekly', reference: 'senior:' + sid, finalizeModel: 'openai:gpt-sim', brief: 'Weekly dengan gaya Sirius' }, 'POST'); const deck = JSON.parse(d.body);
+    const sent = recorded.slice(before); const claude = sent.find(x => /senior media and communications analyst/.test(x.raw)); const gpt = sent.find(x => x.kind === 'openai' && /second, senior analyst/.test(x.raw));
+    const used = !!claude && claude.raw.includes('pattern of senior analyst ★Sirius') && claude.raw.includes('Isu PHK perlu respons dalam X jam') && !!gpt && gpt.raw.includes('pattern of senior analyst ★Sirius');
+    await A.goto(canopus.url + '#knowledge'); await A.reload(); await A.waitForSelector('.k-style', { timeout: 10000 }); await A.locator('.k-style').first().scrollIntoViewIfNeeded(); await A.click('.k-style summary').catch(() => {}); await A.waitForTimeout(300); await A.screenshot({ path: path.join(OUT, 'server-urs.png') });
+    await A.goto(canopus.url + '#reports'); await A.waitForSelector('#rpClient');
+    const checks = { created: r1.status === 200, indexed: up.status === 'ready', profile: !!prof?.summary && prof.examples?.length >= 2, hiddenFromUsers: hidden, listed: !!urs, claudeAndGpt: used, deck: d.status === 200 && deck.reference === 'senior:' + sid };
+    return ok(Object.values(checks).every(Boolean), Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' '));
   });
   await step(A, 'report-ask', 'Reports: “Ask in chat” attaches the curated data (without personal columns) for questions and brainstorming', async () => {
     const before = recorded.length; await A.click('[data-r=tab][data-x=data]'); await A.waitForTimeout(200); if (!(await A.isVisible('[data-r=askds]'))) await A.click('[data-r=opends]'); await A.waitForSelector('[data-r=askds]'); await A.click('[data-r=askds]');

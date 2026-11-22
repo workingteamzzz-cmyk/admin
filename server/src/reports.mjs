@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS ai_tag_cache(key TEXT PRIMARY KEY, value TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '', collection_id TEXT, created_by TEXT, created INTEGER NOT NULL, updated INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS client_recipes(id TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL, plan TEXT NOT NULL, columns TEXT NOT NULL DEFAULT '[]', created_by TEXT, created INTEGER NOT NULL);
 `);
-for (const sql of ['ALTER TABLE decks ADD COLUMN channel TEXT', 'ALTER TABLE decks ADD COLUMN reference TEXT', 'ALTER TABLE decks ADD COLUMN report_type TEXT', 'ALTER TABLE decks ADD COLUMN period TEXT', 'ALTER TABLE decks ADD COLUMN structure TEXT', "ALTER TABLE clients ADD COLUMN structures TEXT NOT NULL DEFAULT '{}'", "ALTER TABLE clients ADD COLUMN logos TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE clients ADD COLUMN style TEXT', 'ALTER TABLE decks ADD COLUMN style TEXT', "ALTER TABLE decks ADD COLUMN images TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT', "ALTER TABLE datasets ADD COLUMN files TEXT NOT NULL DEFAULT '[]'"]) { try { db.exec(sql); } catch {} }
+for (const sql of ['ALTER TABLE collections ADD COLUMN style_profile TEXT', 'ALTER TABLE collections ADD COLUMN style_updated INTEGER', 'ALTER TABLE decks ADD COLUMN channel TEXT', 'ALTER TABLE decks ADD COLUMN reference TEXT', 'ALTER TABLE decks ADD COLUMN report_type TEXT', 'ALTER TABLE decks ADD COLUMN period TEXT', 'ALTER TABLE decks ADD COLUMN structure TEXT', "ALTER TABLE clients ADD COLUMN structures TEXT NOT NULL DEFAULT '{}'", "ALTER TABLE clients ADD COLUMN logos TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE clients ADD COLUMN style TEXT', 'ALTER TABLE decks ADD COLUMN style TEXT', "ALTER TABLE decks ADD COLUMN images TEXT NOT NULL DEFAULT '[]'", 'ALTER TABLE report_templates ADD COLUMN client_id TEXT', 'ALTER TABLE datasets ADD COLUMN client_id TEXT', 'ALTER TABLE decks ADD COLUMN client_id TEXT', 'ALTER TABLE clients ADD COLUMN persona TEXT', "ALTER TABLE datasets ADD COLUMN files TEXT NOT NULL DEFAULT '[]'"]) { try { db.exec(sql); } catch {} }
 try { db.exec(`UPDATE collections SET kind='client' WHERE kind='admin' AND id IN (SELECT collection_id FROM clients)`); } catch {}
 const DIR = path.join(config.dataDir, 'reports');
 fs.mkdirSync(path.join(DIR, 'datasets'), { recursive: true, mode: 0o700 });
@@ -449,22 +449,52 @@ export function structureFor(client, typeId, channel = 'medmas') {
 export function structurePreview(cid, typeId, channel) { const c = cid ? one(`SELECT * FROM clients WHERE id=?`, cid) : null; return structureFor(c, typeId, channel || 'medmas'); }
 export function setClientStructure(user, cid, { type, channel, text }) { const c = clientRow(cid); if (!reportType(type)) throw err(400, 'Unknown report type'); const m = JSON.parse(c.structures || '{}'); const key = structKey(type, channel); if (String(text || '').trim()) m[key] = String(text).slice(0, 6000); else delete m[key]; run(`UPDATE clients SET structures=?, updated=? WHERE id=?`, JSON.stringify(m), now(), cid); }
 
+/* ---------- style profiles: the language and styling patterns of a senior's reports ---------- */
+// The models are not retrained: Canopus distils the pattern once (a style profile plus typical sentences) and gives it
+// to Claude and GPT with every deck that follows this senior. It is rebuilt whenever the senior adds a report.
+const PROFILE_FIELDS = [['summary', 'In short'], ['titles', 'Slide titles'], ['structure', 'Flow of the report'], ['findings', 'How findings and causes are phrased'], ['recommendations', 'How recommendations are written'], ['language', 'Tone, sentence length and vocabulary'], ['design', 'Visual habits'], ['avoid', 'Never']];
+export async function buildStyleProfile(user, cid) {
+  const c = one(`SELECT * FROM collections WHERE id=? AND kind IN ('senior','person')`, cid); if (!c || !allowedCollections(user).some(x => x.id === cid)) throw err(404, 'Space not found');
+  const docs = all(`SELECT id, title FROM docs WHERE collection_id=? AND status='ready' ORDER BY created DESC LIMIT 8`, cid); if (!docs.length) throw err(409, 'Add at least one report first.');
+  const per = Math.floor(16000 / docs.length); const red = redactorFor(user, 'style:' + cid);
+  const text = docs.map(d => `=== ${d.title} ===\n${all(`SELECT text FROM kchunks WHERE doc_id=? ORDER BY idx`, d.id).map(r => r.text).join('\n').slice(0, per)}`).join('\n\n');
+  checkLimits(user); const model = reportModel(user, null, 'writing');
+  const raw = await askJson(user, model, `You are an editor who reverse-engineers a writing and presentation style. Below are excerpts of reports by one senior analyst (codename "${c.name}"). Describe the style so other analysts and AI models can write new reports the same way. Describe patterns, never facts. Reply with JSON only: {${PROFILE_FIELDS.map(([k]) => `"${k}": ${k === 'summary' ? '2–3 sentences' : 'one short paragraph'}`).join(', ')}, "examples": [4–6 short sentences or titles copied from the text that typify the style, with every number replaced by "X" and every name of a person replaced by "[nama]"]}.${red.enabled ? ' ' + SYSTEM_NOTE : ''}`, red.mask(text), 'report.style', 4000, 'medium');
+  const prof = { ...Object.fromEntries(PROFILE_FIELDS.map(([k]) => [k, String(red.unmask(String(raw[k] || ''))).slice(0, 1200)])), examples: (Array.isArray(raw.examples) ? raw.examples : []).slice(0, 6).map(x => String(red.unmask(String(x))).replace(/\d[\d.,]*/g, 'X').slice(0, 240)), from: docs.length };
+  run(`UPDATE collections SET style_profile=?, style_updated=? WHERE id=?`, JSON.stringify(prof), now(), cid); return prof;
+}
+export function saveStyleProfile(user, cid, profile) {
+  const c = one(`SELECT * FROM collections WHERE id=? AND kind IN ('senior','person')`, cid); if (!c) throw err(404, 'Space not found');
+  if (user.role !== 'admin' && c.owner_id !== user.id) throw err(403, 'Only the owner of this space or an administrator can edit its style profile.');
+  const prof = { ...Object.fromEntries(PROFILE_FIELDS.map(([k]) => [k, String(profile?.[k] || '').slice(0, 1500)])), examples: (Array.isArray(profile?.examples) ? profile.examples : String(profile?.examples || '').split('\n')).map(x => String(x).trim()).filter(Boolean).slice(0, 8), edited: true };
+  run(`UPDATE collections SET style_profile=?, style_updated=? WHERE id=?`, JSON.stringify(prof), now(), cid); return prof;
+}
+export const STYLE_PROFILE_FIELDS = PROFILE_FIELDS;
+function styleBlock(c) {
+  const p = c?.style_profile ? JSON.parse(c.style_profile) : null; if (!p) return '';
+  const who = c.kind === 'senior' ? `★${c.name}` : c.name;
+  return `\n\nWriting and presentation style to follow — the pattern of senior analyst ${who} (follow how they write, never copy facts or numbers):\n${PROFILE_FIELDS.filter(([k]) => p[k]).map(([k, l]) => `- ${l}: ${p[k]}`).join('\n')}${p.examples?.length ? `\nTypical sentences (numbers shown as X):\n${p.examples.map(x => `  • ${x}`).join('\n')}` : ''}`;
+}
+
 /* ---------- reference reports from seniors (knowledge by person) ---------- */
 // Reports that analysts can follow: PowerPoint (design + structure + writing style) or PDF/Word (structure + writing style).
 export function referenceReports(user) {
-  const cols = allowedCollections(user).filter(c => ['person', 'team', 'client'].includes(c.kind)); if (!cols.length) return [];
-  return all(`SELECT d.id, d.title, d.filename, d.created, d.collection_id, c.kind, c.name collection, COALESCE(NULLIF(u.name,''),u.email) owner FROM docs d JOIN collections c ON c.id=d.collection_id LEFT JOIN users u ON u.id=c.owner_id
-    WHERE d.status='ready' AND d.collection_id IN (${cols.map(() => '?').join(',')}) AND (lower(d.filename) LIKE '%.pptx' OR lower(d.filename) LIKE '%.pdf' OR lower(d.filename) LIKE '%.docx') ORDER BY c.kind='person' DESC, d.created DESC`, ...cols.map(c => c.id))
-    .map(d => ({ id: d.id, title: d.title, filename: d.filename, created: d.created, kind: d.kind, by: d.kind === 'person' ? d.owner : d.collection, design: /\.pptx$/i.test(d.filename) }));
+  const cols = allowedCollections(user).filter(c => ['senior', 'person', 'team', 'client'].includes(c.kind)); if (!cols.length) return [];
+  const styles = cols.filter(c => c.kind === 'senior' && c.style_profile).map(c => ({ id: 'senior:' + c.id, title: `URS ★${c.name} — language & style from all reports`, kind: 'senior', by: '★ ' + c.name, design: false, style: true }));
+  return [...styles, ...all(`SELECT d.id, d.title, d.filename, d.created, d.collection_id, c.kind, c.name collection, COALESCE(NULLIF(u.name,''),u.email) owner FROM docs d JOIN collections c ON c.id=d.collection_id LEFT JOIN users u ON u.id=c.owner_id
+    WHERE d.status='ready' AND d.collection_id IN (${cols.map(() => '?').join(',')}) AND (lower(d.filename) LIKE '%.pptx' OR lower(d.filename) LIKE '%.pdf' OR lower(d.filename) LIKE '%.docx') ORDER BY c.kind='senior' DESC, c.kind='person' DESC, c.name, d.created DESC`, ...cols.map(c => c.id))
+    .map(d => ({ id: d.id, title: d.title, filename: d.filename, created: d.created, kind: d.kind, by: d.kind === 'senior' ? '★ ' + d.collection : d.kind === 'person' ? d.owner : d.collection, design: /\.pptx$/i.test(d.filename) }))];
 }
 function referenceDoc(user, did) {
   const d = one(`SELECT * FROM docs WHERE id=?`, did); if (!d || !allowedCollections(user).some(c => c.id === d.collection_id)) throw err(404, 'Reference report not found');
-  return { ...d, buf: fs.readFileSync(path.join(config.dataDir, 'docs', d.id)), owner: one(`SELECT COALESCE(NULLIF(u.name,''),u.email) n FROM collections c LEFT JOIN users u ON u.id=c.owner_id WHERE c.id=?`, d.collection_id)?.n || '' };
+  const col = one(`SELECT kind, name FROM collections WHERE id=?`, d.collection_id); // seniors are named only by their codename, also towards the AI
+  return { ...d, buf: fs.readFileSync(path.join(config.dataDir, 'docs', d.id)), owner: col?.kind === 'senior' ? col.name : one(`SELECT COALESCE(NULLIF(u.name,''),u.email) n FROM collections c LEFT JOIN users u ON u.id=c.owner_id WHERE c.id=?`, d.collection_id)?.n || '' };
 }
 async function referenceNote(user, did) {
   const d = referenceDoc(user, did); const pages = all(`SELECT text FROM kchunks WHERE doc_id=? ORDER BY idx`, d.id).map(r => r.text).join('\n').slice(0, 9000);
   let structure = ''; if (/\.pptx$/i.test(d.filename)) { try { const info = describeTemplate(await openTemplate(d.buf)); structure = info.structure.map((x, i) => `${i + 1}. ${x.title || '(no title)'}${x.has?.length ? ` [${x.has.join(', ')}]` : ''}`).join('\n'); } catch {} }
-  return { doc: d, structure, text: `\n\nReference report chosen by the analyst: "${d.title}"${d.owner ? ` by ${d.owner}` : ''}. Follow its structure, depth, tone and writing style — the way it titles slides, phrases findings, explains causes and makes recommendations — but with this period's data and content; never copy its numbers or facts.${structure ? `\nIts slides:\n${structure}` : ''}\nExcerpts of its text (style examples):\n${pages}` };
+  const col = one(`SELECT * FROM collections WHERE id=?`, d.collection_id);
+  return { doc: d, structure, style: styleBlock(col), text: styleBlock(col) + `\n\nReference report chosen by the analyst: "${d.title}"${d.owner ? ` by ${d.owner}` : ''}. Follow its structure, depth, tone and writing style — the way it titles slides, phrases findings, explains causes and makes recommendations — but with this period's data and content; never copy its numbers or facts.${structure ? `\nIts slides:\n${structure}` : ''}\nExcerpts of its text (style examples):\n${pages}` };
 }
 const maxOf = text => { const m = String(text || '').match(/maks(?:imal|imum)?\.?\s*(\d+)\s*slide|max(?:imum)?\.?\s*(\d+)\s*slides?/i); return m ? +(m[1] || m[2]) : 0; };
 const maxSlidesOf = client => { const m = (parsePersona(client?.persona, CLIENT_FIELDS).structure || '').match(/maks(?:imal|imum)?\.?\s*(\d+)\s*slide|max(?:imum)?\.?\s*(\d+)\s*slides?/i); return m ? +(m[1] || m[2]) : 0; };
@@ -585,8 +615,10 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   const imgs = (Array.isArray(images) ? images : []).slice(0, 8).map(x => ({ id: String(x.id || ''), label: String(x.label || x.name || '').slice(0, 120) })).filter(x => loadImage(user, x.id));
   const allowImages = getSettings().imageUploads; const vision = allowImages ? imgs.map(x => { const im = loadImage(user, x.id); return { mime: im.mime, data: im.buf.toString('base64') }; }) : [];
   const imgNote = imgs.length ? `\n\nScreenshots provided (use their ids in "image" slides${allowImages ? '; they are attached in this order' : '; you cannot see them, so describe only what the brief says about them'}):\n${imgs.map(x => `- ${x.id}: ${x.label || 'screenshot'}`).join('\n')}` : '';
-  const tp = reportType(rt); const per = String(period || '').trim().slice(0, 80); const chn = channelOf(channel); const ref = reference ? await referenceNote(user, String(reference)) : null; const rstruct = ref?.structure ? { text: ref.structure, source: 'reference' } : structureFor(client, tp?.id, chn.id);
-  if (ref && useReferenceDesign !== false && /\.pptx$/i.test(ref.doc.filename)) template = 'doc:' + ref.doc.id;
+  const tp = reportType(rt); const per = String(period || '').trim().slice(0, 80); const chn = channelOf(channel); const seniorStyle = String(reference || '').startsWith('senior:') ? one(`SELECT * FROM collections WHERE id=? AND kind='senior'`, String(reference).slice(7)) : null;
+  if (seniorStyle && !allowedCollections(user).some(c => c.id === seniorStyle.id)) throw err(404, 'Senior reference not found');
+  const ref = reference && !seniorStyle ? await referenceNote(user, String(reference)) : seniorStyle ? { text: styleBlock(seniorStyle), style: styleBlock(seniorStyle), structure: '', doc: null } : null; const rstruct = ref?.structure ? { text: ref.structure, source: 'reference' } : structureFor(client, tp?.id, chn.id);
+  if (ref?.doc && useReferenceDesign !== false && /\.pptx$/i.test(ref.doc.filename)) template = 'doc:' + ref.doc.id;
   const cap = maxOf(rstruct.text) || (tp?.maxSlides || 0); const capNote = `\n\n${chn.note}${tp ? `\n${typeNote(tp, per)}` : ''}${ref ? ref.text : ''}${rstruct.text ? `\n\nReport structure for this deck (${rstruct.source === 'reference' ? 'from the chosen reference report' : rstruct.source === 'client' ? "the client's own" : `default for ${tp?.label || 'this report'}`}) — follow it exactly, one slide per line, in this order:\n${rstruct.text}` : ''}${cap ? `\n\nSlide limit: at most ${cap} slides.` : ''}`;
   const raw = await askJson(user, model, outlineSystem() + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt + red.mask(imgNote + capNote), 'report.outline', 16000, 'medium', vision);
   let outline = sanitizeOutline(unmaskDeep(red, raw)); let notes = red.unmask(String(raw.notes || ''));
@@ -594,11 +626,11 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   const cov = chooseCover(user, cover); if (cov) outline.cover = cov;
   if (cap && outline.slides.length > cap) { notes = [notes, `Trimmed to the ${cap}-slide limit.`].filter(Boolean).join(' '); outline.slides = outline.slides.slice(0, cap); }
   let finalizer = null;
-  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: [clientBlock(client), analystBlock(user), brief || ''].filter(Boolean).join('\n\n'), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
+  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: [clientBlock(client), analystBlock(user), ref?.style || '', brief || ''].filter(Boolean).join('\n\n'), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
   notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, notes].filter(Boolean).join(' ');
   if (!outline.footer && tp && tp.id !== 'adhoc') outline.footer = `${tp.label.replace(/ report$/, ' Report')}${per ? ` · ${per}` : ''}`;
   const t = String(title || outline.title || 'Presentation').slice(0, 160);
-  const st = sanitizeStyle(style); run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id,images,style,report_type,period,structure,channel,reference) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null, JSON.stringify(imgs), st ? JSON.stringify(st) : null, tp?.id || null, per, rstruct.text || null, chn.id, ref?.doc.id || null);
+  const st = sanitizeStyle(style); run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id,images,style,report_type,period,structure,channel,reference) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null, JSON.stringify(imgs), st ? JSON.stringify(st) : null, tp?.id || null, per, rstruct.text || null, chn.id, ref?.doc?.id || (seniorStyle ? 'senior:' + seniorStyle.id : null));
   return { ...getDeck(user, kid), model: { id: model.id, label: model.label }, finalizer: finalizer && { id: finalizer.id, label: finalizer.label } };
 }
 // Finalize (again) after the user edited the slides.
@@ -606,7 +638,8 @@ export async function refinalizeDeck(user, kid, { finalizeModel }) {
   checkLimits(user); const k = getDeck(user, kid); if (!k.outline) throw err(409, 'This presentation has no outline yet.');
   const red = redactorFor(user, 'deck:' + kid);
   const c = k.clientId ? one(`SELECT * FROM clients WHERE id=?`, k.clientId) : null;
-  const f = await finalizeOutline(user, k.outline, { brief: [clientBlock(c), analystBlock(user), k.brief].filter(Boolean).join('\n\n'), catalog: catalogText(deckTables(user, k.datasets), 150), finalizeModel, red });
+  const refCol = k.reference ? (k.reference.startsWith('senior:') ? one(`SELECT * FROM collections WHERE id=?`, k.reference.slice(7)) : one(`SELECT c.* FROM collections c JOIN docs d ON d.collection_id=c.id WHERE d.id=?`, k.reference)) : null;
+  const f = await finalizeOutline(user, k.outline, { brief: [clientBlock(c), analystBlock(user), styleBlock(refCol), k.brief].filter(Boolean).join('\n\n'), catalog: catalogText(deckTables(user, k.datasets), 150), finalizeModel, red });
   run(`UPDATE decks SET outline=?, notes=?, updated=? WHERE id=?`, JSON.stringify(f.outline), `Finalized by ${f.finalizer.label}. ${f.note}`.trim().slice(0, 1000), now(), kid);
   return { ...getDeck(user, kid), finalizer: { id: f.finalizer.id, label: f.finalizer.label } };
 }
