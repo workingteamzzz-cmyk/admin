@@ -695,3 +695,8 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 .rp-deckstyle summary{cursor:pointer;display:flex;align-items:center;gap:7px;font-size:14px}
 .rp-deckstyle summary svg{width:15px;height:15px;color:var(--gold)}
 .sw span{display:inline-block;flex:none;min-width:14px;min-height:14px}
+
+.rp-cover{cursor:pointer}
+.rp-cover.on{border-color:var(--gold);box-shadow:0 0 0 2px rgba(244,199,106,.35)}
+.rp-cover input{display:none}
+.rp-covopts{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px}

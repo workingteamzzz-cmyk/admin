@@ -262,7 +262,22 @@ export async function buildDeck(templateBuf, outline, resolve, opts = {}) {
     if (s.kind === 'title' || s.kind === 'closing' || s.kind === 'section') {
       const shapes = titleShapes(L, title); const sub = L.phs.find(p => p.type === 'subTitle') || L.phs.find(p => isBody(p) && !isTitle(p));
       if ((s.subtitle || '').trim() && sub) shapes.push(phShape(3, sub, paras(String(s.subtitle).split('\n'), { bullets: false })));
-      const rels = [];
+      const rels = []; const cov = s.kind === 'title' ? opts.cover : null; const photo = cov?.image ? imageFor(cov.image) : null;
+      if (photo && cov.layout !== 'none') { // cover with a photo: Canopus sets the title itself so it stays readable over the image
+        const full = cov.layout === 'full'; const shapes2 = []; rels.push(`<Relationship Id="rIdPhoto" Type="${REL}/image" Target="${photo.target}"/>`);
+        const crop = (box, size) => { if (!size?.w) return { box, src: '' }; const r = box.w / box.h, ir = size.w / size.h; if (ir > r) { const cut = (1 - r / ir) / 2 * 100000; return { box, src: `<a:srcRect l="${Math.round(cut)}" r="${Math.round(cut)}"/>` }; } const cut = (1 - ir / r) / 2 * 100000; return { box, src: `<a:srcRect t="${Math.round(cut)}" b="${Math.round(cut)}"/>` }; };
+        const area = full ? { x: 0, y: 0, w: t.width, h: t.height } : { x: t.width * 0.56, y: 0, w: t.width * 0.44, h: t.height }; const c = crop(area, photo.size);
+        shapes2.push(picShape(71, area, 'rIdPhoto', 'Cover photo').replace('<a:stretch>', `${c.src}<a:stretch>`));
+        if (full) shapes2.push(`<p:sp><p:nvSpPr><p:cNvPr id="72" name="Overlay"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${t.width}" cy="${t.height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="tx2"><a:alpha val="94000"/></a:schemeClr></a:gs><a:gs pos="62000"><a:schemeClr val="tx2"><a:alpha val="78000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="tx2"><a:alpha val="35000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill><a:ln><a:noFill/></a:ln></p:spPr></p:sp>`);
+        else shapes2.push(rectShape(72, { x: 0, y: 0, w: t.width * 0.56, h: t.height }, L.dark ? null : 'bg1'));
+        const onDark = full || L.dark; const tc = onDark ? 'bg1' : 'tx2'; const lw = full ? t.width * 0.62 : t.width * 0.48;
+        shapes2.push(rectShape(73, { x: t.width * 0.06, y: t.height * 0.56, w: t.width * 0.08, h: 45720 }, 'accent2'));
+        shapes2.push(textBox(74, { x: t.width * 0.06, y: t.height * 0.3, w: lw, h: t.height * 0.25 }, styled(title, { sz: title.length > 50 ? 3200 : 4000, b: true, clr: tc }), { anchor: 'b', inset: 0 }));
+        if (s.subtitle) shapes2.push(textBox(75, { x: t.width * 0.06, y: t.height * 0.6, w: lw, h: t.height * 0.2 }, String(s.subtitle).split('\n').map(l => styled(l, { sz: 1600, clr: tc })).join(''), { anchor: 't', inset: 0 }));
+        const cl2 = onDark ? logoOnDark : logo;
+        if (cl2) { rels.push(`<Relationship Id="rIdCover" Type="${REL}/image" Target="${cl2.target}"/>`); shapes2.push(picShape(70, fit({ x: t.width * 0.06, y: t.height * 0.08, w: t.width * 0.2, h: t.height * 0.12 }, cl2.size), 'rIdCover', 'Logo')); shapes2[shapes2.length - 1] = shapes2.at(-1).replace(/<a:off x="(\d+)"/, `<a:off x="${Math.round(t.width * 0.06)}"`); }
+        addSlide(L, shapes2, rels, true); continue;
+      }
       const cl = L.dark ? logoOnDark : logo;
       if (s.kind === 'title' && cl) { rels.push(`<Relationship Id="rIdCover" Type="${REL}/image" Target="${cl.target}"/>`); shapes.push(picShape(70, fit({ x: t.width * 0.05, y: t.height * 0.07, w: t.width * 0.2, h: t.height * 0.12 }, cl.size), 'rIdCover', 'Logo')); }
       if (s.kind === 'title' && s.image && imageFor(s.image)) { const im = imageFor(s.image); rels.push(`<Relationship Id="rIdPhoto" Type="${REL}/image" Target="${im.target}"/>`); shapes.unshift(picShape(71, { x: t.width * 0.58, y: 0, w: t.width * 0.42, h: t.height }, 'rIdPhoto', 'Photo')); }
@@ -450,5 +465,6 @@ export function sanitizeOutline(o) {
     if (r.kind === 'kpi' && !s.items.length) continue;
     slides.push(s);
   }
-  return { title: st(o?.title, 160), footer: st(o?.footer, 160), slides };
+  const cover = o?.cover?.image ? { image: st(o.cover.image, 40), layout: ['full', 'split', 'none'].includes(o.cover.layout) ? o.cover.layout : 'full', mode: o.cover.mode === 'pick' ? 'pick' : 'auto', candidates: (Array.isArray(o.cover.candidates) ? o.cover.candidates : []).slice(0, 10).map(x => st(x, 40)) } : null;
+  return { title: st(o?.title, 160), footer: st(o?.footer, 160), ...(cover ? { cover } : {}), slides };
 }

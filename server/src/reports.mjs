@@ -10,7 +10,7 @@ import { Redactor, SYSTEM_NOTE } from './redact.mjs';
 import { complete, reportModel, helperModel, limitProblem } from './ai.mjs';
 import { search } from './knowledge.mjs';
 import { loadWorkbook, profile, sanitizePlan, describe, runPlan, writeXlsx, reportSensitive, guessCol, OPS, FILTERS, CLEANS, DERIVES, MEASURES } from './tables.mjs';
-import { openTemplate, describeTemplate, buildDeck, sanitizeOutline, SLIDE_KINDS } from './slides.mjs';
+import { openTemplate, describeTemplate, buildDeck, sanitizeOutline, SLIDE_KINDS, imgSize } from './slides.mjs';
 import { CLIENT_FIELDS, parsePersona, analystBlock, clientBlock } from './persona.mjs';
 import { logoInfo, recommendStyles, sanitizeStyle, STYLE_PRESETS } from './brand.mjs';
 
@@ -525,12 +525,22 @@ async function finalizeOutline(user, outline, { brief, catalog, finalizeModel, r
   }
   // Draft slides the reviewer left out are put back where they were.
   outline.slides.forEach((s0, i) => { if (!used.has(i)) { kept++; const at = out.findIndex(x => x._n > i); out.splice(at < 0 ? out.length : at, 0, { ...s0, _n: i }); } });
-  const result = { footer: outline.footer, title: (typeof fin.title === 'string' && fin.title.trim() ? red.unmask(fin.title).slice(0, 160) : outline.title), slides: out.map(({ added: _a, _n: _b, ...x }) => x).slice(0, 40) };
+  const { slides: _drop, title: _t, ...keep } = outline; // footer, cover and other deck settings carry over
+  const result = { ...keep, title: (typeof fin.title === 'string' && fin.title.trim() ? red.unmask(fin.title).slice(0, 160) : outline.title), slides: out.map(({ added: _a, _n: _b, ...x }) => x).slice(0, 40) };
   const note = [red.unmask(String(fin.notes || '')), added ? `${finalizer.label} added ${added} slide${added > 1 ? 's' : ''} from its own reading of the data.` : '', kept ? `${kept} draft slide${kept > 1 ? 's were' : ' was'} kept unchanged.` : ''].filter(Boolean).join(' ');
   return { outline: result, finalizer, note };
 }
 
-export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId, images = [], style }) {
+// Cover photo: the user picks one, or Canopus picks the best of the uploads (closest to a landscape slide, highest resolution).
+function chooseCover(user, cover) {
+  const cands = (cover?.candidates || []).map(String).filter(x => loadImage(user, x)); if (!cands.length || cover?.layout === 'none') return null;
+  let pick = cover.mode === 'pick' && cands.includes(String(cover.image)) ? String(cover.image) : null;
+  const size = id_ => imgSize(loadImage(user, id_).buf) || { w: 1, h: 1 };
+  if (!pick) pick = [...cands].sort((a, b) => { const sc = x => { const z = size(x); const r = z.w / z.h; return -Math.abs(Math.log(r / (16 / 9))) * 2 + Math.log10(z.w * z.h); }; return sc(b) - sc(a); })[0];
+  const z = size(pick); const layout = ['full', 'split'].includes(cover?.layout) ? cover.layout : (z.w / z.h >= 1.2 ? 'full' : 'split');
+  return { image: pick, layout, mode: cover?.mode === 'pick' ? 'pick' : 'auto', candidates: cands };
+}
+export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId, images = [], style, cover }) {
   checkLimits(user); const client = clientRow(clientId);
   const ids = [...new Set(datasets)].slice(0, 6); const tables = deckTables(user, ids);
   const tdesc = await templateDesc(user, template);
@@ -549,6 +559,7 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   const raw = await askJson(user, model, outlineSystem() + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt + red.mask(imgNote + capNote), 'report.outline', 16000, 'medium', vision);
   let outline = sanitizeOutline(unmaskDeep(red, raw)); let notes = red.unmask(String(raw.notes || ''));
   if (!outline.slides.length) throw err(502, 'The AI did not return any slides. Try again with a more specific brief.');
+  const cov = chooseCover(user, cover); if (cov) outline.cover = cov;
   if (cap && outline.slides.length > cap) { notes = [notes, `Trimmed to the ${cap}-slide limit.`].filter(Boolean).join(' '); outline.slides = outline.slides.slice(0, cap); }
   let finalizer = null;
   if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: [clientBlock(client), analystBlock(user), brief || ''].filter(Boolean).join('\n\n'), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
@@ -566,7 +577,8 @@ export async function refinalizeDeck(user, kid, { finalizeModel }) {
   run(`UPDATE decks SET outline=?, notes=?, updated=? WHERE id=?`, JSON.stringify(f.outline), `Finalized by ${f.finalizer.label}. ${f.note}`.trim().slice(0, 1000), now(), kid);
   return { ...getDeck(user, kid), finalizer: { id: f.finalizer.id, label: f.finalizer.label } };
 }
-export function saveDeck(user, kid, { title, outline, template, datasets, images, style }) {
+export function saveDeck(user, kid, { title, outline, template, datasets, images, style, cover }) {
+  if (outline && cover !== undefined) outline.cover = cover ? chooseCover(user, cover) : null;
   if (style !== undefined) { const st = sanitizeStyle(style); run(`UPDATE decks SET style=? WHERE id=? AND user_id=?`, st ? JSON.stringify(st) : null, kid, user.id); }
   if (Array.isArray(images)) run(`UPDATE decks SET images=? WHERE id=? AND user_id=?`, JSON.stringify(images.slice(0, 12).map(x => ({ id: String(x.id), label: String(x.label || '').slice(0, 120) })).filter(x => loadImage(user, x.id))), kid, user.id);
   const k = ownDeck(user, kid); if (template) templateRow(user, template);
@@ -579,7 +591,8 @@ export async function deckPptx(user, kid) {
   const tables = deckTables(user, k.datasets); const client = k.clientId ? one(`SELECT * FROM clients WHERE id=?`, k.clientId) : null;
   const images = new Map(k.images.map(x => [x.id, loadImage(user, x.id)]).filter(([, v]) => v));
   const style = k.style || (client?.style ? JSON.parse(client.style) : null); // none chosen → the template's own colours
-  const r = await buildDeck(templateBuf(user, k.template), k.outline, resolver(tables), { ...pickLogos(k.clientId), style, images, replace: spellingPairs(client), footer: k.outline.footer || k.title });
+  for (const c of k.outline.cover?.candidates || []) if (!images.has(c)) { const im = loadImage(user, c); if (im) images.set(c, im); }
+  const r = await buildDeck(templateBuf(user, k.template), k.outline, resolver(tables), { ...pickLogos(k.clientId), style, images, cover: k.outline.cover, replace: spellingPairs(client), footer: k.outline.footer || k.title });
   return { ...r, warnings: [...r.warnings, ...checkDeck(user, kid).map(c => c.text)], name: `${k.title.replace(/[^\p{L}\p{N} _-]+/gu, '').trim() || 'presentation'}.pptx` };
 }
 // Quality checks before delivery, from the team's review rules: slide limit, structure, banned labels and terms,
