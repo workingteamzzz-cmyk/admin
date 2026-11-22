@@ -432,6 +432,32 @@ export function reportModel(user, requested, rule = 'writing') {
   const want = allModels(settings).find(m => m.id === settings.routing.rules[rule]) || allowed[0];
   return substitute(want, allowed, false);
 }
+// Auto for reports: each task gets the model that fits it, within what the user may use.
+//  - bulk labelling, filtering, name cleanup → the cheapest (Claude Swift) — see helperModel
+//  - curation plans, reviews, URS checks → Claude Core: structured work, fast, half the price
+//  - the deck's analysis → Claude Core for daily, weekly and bi-weekly reports on ordinary data; Claude Prime for
+//    monthly and longer reports, ad-hoc analyses, both channels at once, several data files or very large data
+//  - style profiles (URS, analyst style) → Claude Prime: rare, and everyone's reports follow them
+// When less than 20% of the month's budget is left, Auto steps down one level. A model the user picks stays as picked.
+const DEEP_TYPES = ['monthly', 'bimonthly', 'quarterly', 'semester', 'yearly', 'adhoc'];
+export function autoReportModel(user, requested, task, ctx = {}) {
+  if (requested && requested !== 'auto') { const m = reportModel(user, requested, 'writing'); return { model: m, reason: 'chosen by you' }; }
+  let tier = 'standard', why = '';
+  if (task === 'deck') {
+    const big = (ctx.rows || 0) > 20000, many = (ctx.files || 0) >= 3, both = ctx.channel === 'both';
+    if (DEEP_TYPES.includes(ctx.reportType)) { tier = 'advanced'; why = ctx.reportType === 'adhoc' ? 'an ad-hoc analysis needs depth' : 'a longer-period report needs strategic depth'; }
+    else if (big || many || both) { tier = 'advanced'; why = big ? `large data (${Number(ctx.rows).toLocaleString('en')} rows)` : many ? `${ctx.files} data files` : 'media massa and media sosial together'; }
+    else why = `${ctx.reportType || 'routine'} report on ordinary data`;
+  } else if (task === 'style') { tier = 'advanced'; why = 'a style profile is built rarely and everyone follows it'; }
+  else { why = { plan: 'curation plans are structured work', review: 'reviews are structured work', urs: 'URS checks are structured work' }[task] || 'structured work'; }
+  const budget = budgetFor(user); const left = budget > 0 ? (budget - spentThisMonth(user.id)) / budget : 1;
+  if (left < 0.2 && tier !== 'light') { tier = tier === 'advanced' ? 'standard' : 'light'; why += ' — stepped down: under 20% of this month’s budget left'; }
+  const settings = getSettings(); const allowed = modelsFor(user, settings);
+  if (!allowed.length) throw Object.assign(new Error('No AI model is available to you. Ask your administrator.'), { status: 503 });
+  const want = Object.values(MODELS).find(m => m.tier === tier) || allowed[0];
+  const m = substitute(want, allowed, false) || allowed[0];
+  return { model: m, reason: m.id === want.id ? why : `${why} (${want.label} is not available to you, so ${m.label})` };
+}
 // The cheapest model the user may use (for bulk labelling).
 export function helperModel(user) {
   const helper = modelsFor(user).sort((a, b) => tierRank(a.tier) - tierRank(b.tier) || (a.provider === 'anthropic' ? -1 : 1))[0];

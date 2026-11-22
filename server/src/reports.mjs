@@ -7,7 +7,7 @@ import path from 'node:path';
 import { config, ROOT } from './config.mjs';
 import { db, one, all, run, id, now, sha256, getSettings, audit, allowedCollections } from './db.mjs';
 import { Redactor, SYSTEM_NOTE } from './redact.mjs';
-import { complete, reportModel, helperModel, limitProblem } from './ai.mjs';
+import { complete, reportModel, helperModel, limitProblem, autoReportModel } from './ai.mjs';
 import { search, sensitiveValues } from './knowledge.mjs';
 import { loadWorkbook, profile, sanitizePlan, describe, runPlan, writeXlsx, reportSensitive, guessCol, OPS, FILTERS, CLEANS, DERIVES, MEASURES } from './tables.mjs';
 import { openTemplate, describeTemplate, buildDeck, sanitizeOutline, SLIDE_KINDS, imgSize } from './slides.mjs';
@@ -226,7 +226,7 @@ Guidelines: start with cleaning (trim, empty_words; date/number where the profil
 export async function planDataset(user, did, { instruction, model: requested, sheet, reportType: rt, channel }) {
   checkLimits(user);
   const d = ownDataset(user, did); const sheets = await loadSource(d); const t = pickSheet(sheets, sheet || d.sheet);
-  const red = redactorFor(user, 'report:' + did); const model = reportModel(user, requested, 'writing');
+  const red = redactorFor(user, 'report:' + did); const { model } = autoReportModel(user, requested, 'plan');
   const prof = profile(t, extraCols());
   const ctx = [clientBlock(d.client_id ? one(`SELECT * FROM clients WHERE id=?`, d.client_id) : null), analystBlock(user), analystStyle(user)].filter(Boolean).join('\n\n');
   const chn = channelOf(channel); const tp = reportType(rt); const tnote = `${chn.note}${chn.id === 'medsos' ? ' Use a PLATFORM column (from the file, the URL domain or a source column); reposts by different accounts are separate exposures, not duplicates; detect account categories when useful.' : ''}\n` + (tp ? `${typeNote(tp)}${tp.derive ? ` For the trend summary, derive a period column from the date with fn "${tp.derive}" and pivot it by sentiment.` : ''}\n\n` : '');
@@ -470,7 +470,7 @@ export async function buildStyleProfile(user, cid) {
   if (!items.length) throw err(409, c.kind === 'person' ? 'Add a report to this space, or download or submit a presentation first.' : 'Add at least one report first.');
   const per = Math.floor(16000 / items.length); const red = redactorFor(user, 'style:' + cid);
   const text = items.map(d => `=== ${d.title} ===\n${String(d.text || '').slice(0, per)}`).join('\n\n');
-  checkLimits(user); const model = reportModel(user, null, 'writing');
+  checkLimits(user); const { model } = autoReportModel(user, null, 'style');
   const raw = await askJson(user, model, `You are an editor who reverse-engineers a writing and presentation style. Below are excerpts of reports by ${c.kind === 'senior' ? `one senior analyst (codename "${c.name}")` : `one analyst ("${c.name}")`}. Describe the style so other analysts and AI models can write new reports the same way. Describe patterns, never facts. Reply with JSON only: {${PROFILE_FIELDS.map(([k]) => `"${k}": ${k === 'summary' ? '2–3 sentences' : 'one short paragraph'}`).join(', ')}, "examples": [4–6 short sentences or titles copied from the text that typify the style, with every number replaced by "X" and every name of a person replaced by "[nama]"]}.${red.enabled ? ' ' + SYSTEM_NOTE : ''}`, red.mask(text), 'report.style', 4000, 'medium');
   const prof = { ...Object.fromEntries(PROFILE_FIELDS.map(([k]) => [k, String(red.unmask(String(raw[k] || ''))).slice(0, 1200)])), examples: (Array.isArray(raw.examples) ? raw.examples : []).slice(0, 6).map(x => String(red.unmask(String(x))).replace(/\d[\d.,]*/g, 'X').slice(0, 240)), from: items.length };
   run(`UPDATE collections SET style_profile=?, style_updated=? WHERE id=?`, JSON.stringify(prof), now(), cid); return prof;
@@ -623,7 +623,8 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   checkLimits(user); const client = clientRow(clientId);
   const ids = [...new Set(datasets)].slice(0, 6); const tables = deckTables(user, ids);
   const tdesc = await templateDesc(user, template);
-  const model = reportModel(user, requested, 'writing'); const kid = id();
+  const auto = autoReportModel(user, requested, 'deck', { reportType: rt || 'weekly', channel, files: ids.reduce((a, x) => { const d = one(`SELECT * FROM datasets WHERE id=?`, x); return a + (d ? filesOf(d).length : 0); }, 0), rows: tables.filter(t => t.main).reduce((a, t) => a + t.rows.length, 0) });
+  const model = auto.model; const kid = id();
   const red = redactorFor(user, 'deck:' + kid); const catalog = catalogText(tables);
   let excerpts = '';
   if (knowledge && brief) { const hits = search(user, String(brief).slice(0, 300), { limit: 6, collections: client?.collection_id ? [client.collection_id] : null }).filter(h => !h.localOnly); if (hits.length) excerpts = `\n\nRelevant internal documents:\n${hits.map((h, i) => `[${i + 1}] ${h.title}${h.page ? ' p.' + h.page : ''}: ${h.text.slice(0, 900)}`).join('\n')}`; }
@@ -650,7 +651,7 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   if (cap && outline.slides.length > cap) { notes = [notes, `Trimmed to the ${cap}-slide limit.`].filter(Boolean).join(' '); outline.slides = outline.slides.slice(0, cap); }
   let finalizer = null;
   if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: [clientBlock(client), analystBlock(user), ref?.style || '', fin.text ? fin.text.slice(0, 4000) : '', brief || ''].filter(Boolean).join('\n\n'), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
-  notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, fin.used.length ? `Learned from final report${fin.used.length > 1 ? 's' : ''}: ${fin.used.map(f => `“${f.title}”`).join(', ')}.` : '', notes].filter(Boolean).join(' ');
+  notes = [`Analysis: ${model.label} (${auto.reason})${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, fin.used.length ? `Learned from final report${fin.used.length > 1 ? 's' : ''}: ${fin.used.map(f => `“${f.title}”`).join(', ')}.` : '', notes].filter(Boolean).join(' ');
   if (!outline.footer && tp && tp.id !== 'adhoc') outline.footer = `${tp.label.replace(/ report$/, ' Report')}${per ? ` · ${per}` : ''}`;
   const t = String(title || outline.title || 'Presentation').slice(0, 160);
   const st = sanitizeStyle(style); run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id,images,style,report_type,period,structure,channel,reference) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null, JSON.stringify(imgs), st ? JSON.stringify(st) : null, tp?.id || null, per, rstruct.text || null, chn.id, ref?.doc?.id || (seniorStyle ? 'senior:' + seniorStyle.id : null));
@@ -710,4 +711,4 @@ export function checkDeck(user, kid) {
 export function deckSources(user, datasetIds) { return deckTables(user, datasetIds).map(t => ({ ref: t.ref, columns: t.columns, rows: t.rows.length, main: !!t.main })); }
 export const REPORT_META = { channels: CHANNELS.map(({ id, label }) => ({ id, label })), ops: OPS, kinds: SLIDE_KINDS, presets: STYLE_PRESETS, types: REPORT_TYPES.map(({ id, label, short, period, maxSlides, structure, focus }) => ({ id, label, short, period, maxSlides, structure, focus })) };
 // Shared with the editor review (review.mjs).
-export const aiHelpers = { askJson, redactorFor, checkLimits, styleBlock, reportModel, analystStyle };
+export const aiHelpers = { askJson, redactorFor, checkLimits, styleBlock, reportModel, analystStyle, autoReportModel };

@@ -90,8 +90,8 @@ export function submissionFile(sid) { const s = row(sid); return { buf: fs.readF
 export async function checkAgainstUrs(user, sid, ursId) {
   const s = row(sid); if (!isEditor(user)) throw err(403, 'Only editors can run the URS check.');
   const c = allowedCollections(user).find(x => x.id === ursId && x.kind === 'senior' && x.style_profile && !x.local_only); if (!c) throw err(404, 'URS not found');
-  const { askJson, redactorFor, checkLimits, styleBlock, reportModel } = aiHelpers; checkLimits(user);
-  const red = redactorFor(user, 'review:' + s.id); const model = reportModel(user, null, 'writing');
+  const { askJson, redactorFor, checkLimits, styleBlock } = aiHelpers; checkLimits(user);
+  const red = redactorFor(user, 'review:' + s.id); const { model } = aiHelpers.autoReportModel(user, null, 'urs');
   const client = s.client_id ? one(`SELECT * FROM clients WHERE id=?`, s.client_id) : null;
   const system = `You are the editor of a media-monitoring and communications report. Compare the analyst's report with the URS (Ultimate Reference Style) of a senior below: language, slide titles, flow, depth of analysis, how findings and causes are phrased, recommendations. Do not judge the numbers. Reply with JSON only: {"summary": "2–3 sentences in the report's language", "score": 1-5 (how closely it follows the URS), "items": [{"slide": number or null, "issue": "what departs from the URS", "suggestion": "how to rewrite it, concretely, in the report's language"}]} — at most 12 items, most important first.${red.enabled ? '\n\n' + SYSTEM_NOTE : ''}`;
   const prompt = red.mask(`${clientBlock(client)}${styleBlock(c)}\n\nThe analyst's report "${s.title}" (version ${s.version}):\n${s.text.slice(0, 24000)}`);
@@ -137,9 +137,9 @@ const EDITABLE = ['title', 'subtitle', 'bullets', 'headline', 'caption', 'points
 const slideText = s => Object.fromEntries(Object.entries(s).filter(([key]) => EDITABLE.includes(key) || ['kind', 'findings', 'items', 'rows', 'quadrants', 'quote'].includes(key)));
 export async function reviewDeck(user, kid, { urs } = {}) {
   const k = getDeck(user, kid); if (!k.outline?.slides?.length) throw err(409, 'This presentation has no slides yet.');
-  const { askJson, redactorFor, checkLimits, reportModel } = aiHelpers; checkLimits(user);
+  const { askJson, redactorFor, checkLimits } = aiHelpers; checkLimits(user);
   const kn = editorKnowledge(user, k, urs); if (!kn.text.trim()) throw err(409, 'There is no editor knowledge yet: add a URS (Knowledge → URS) or file a final report for this client.');
-  const red = redactorFor(user, 'deck:' + k.id); const model = reportModel(user, null, 'writing');
+  const red = redactorFor(user, 'deck:' + k.id); const { model } = aiHelpers.autoReportModel(user, null, 'review');
   const client = k.clientId ? one(`SELECT * FROM clients WHERE id=?`, k.clientId) : null;
   const system = `You are the editor who approves this team's media-monitoring and communications reports. Review the analyst's presentation the way the editor would, using the editor knowledge below (URS, the client's final reports and editors' notes): slide titles, flow, the sharpness of findings and causes, recommendations, tone, terms and spelling. Never change numbers, data or charts. Reply with JSON only: {"summary": "2–3 sentences in the presentation's language", "score": 1-5 (ready for the editor = 5), "items": [{"slide": number or null, "issue": "…", "suggestion": "…", "change": {"field": one of ${JSON.stringify(EDITABLE)}, "value": string, or an array of strings for bullets/points/left/right} or null}]} — at most 15 items, most important first. Give "change" whenever the fix is a rewrite of that slide's text; the field must exist on that slide.${red.enabled ? '\n\n' + SYSTEM_NOTE : ''}`;
   const prompt = red.mask(`${clientBlock(client)}\n\nEditor knowledge:${kn.text}\n\nThe analyst's presentation "${k.title}"${k.period ? ` (${k.period})` : ''}:\n${JSON.stringify(k.outline.slides.map((x, i) => ({ n: i + 1, ...slideText(x) })))}`);

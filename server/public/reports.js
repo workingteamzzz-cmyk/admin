@@ -88,11 +88,11 @@ const prefs = () => { try { return JSON.parse(localStorage.getItem(PREF_KEY) || 
 const savePrefs = p => { try { localStorage.setItem(PREF_KEY, JSON.stringify({ ...prefs(), ...p })); } catch {} };
 function stageSelects() {
   const ms = C.me().config.models; const p = prefs();
-  const claude = ms.filter(m => m.provider === 'anthropic'); const gpt = ms.filter(m => m.provider === 'openai');
-  const aDef = ms.some(m => m.id === p.analysis) ? p.analysis : (claude.find(m => m.tier === 'standard') || claude[0] || ms[0])?.id;
+  const gpt = ms.filter(m => m.provider === 'openai');
+  const aDef = ms.some(m => m.id === p.analysis) ? p.analysis : 'auto';
   const fDef = p.finalize === 'none' || ms.some(m => m.id === p.finalize) ? p.finalize : (gpt.find(m => m.tier === 'standard') || gpt[0])?.id || 'none';
   const opts = sel => ms.map(m => `<option value="${m.id}" ${sel === m.id ? 'selected' : ''}>${esc(m.label)}</option>`).join('');
-  return `<div class="row2 rp-stages"><div><label for="rpDModel">1 · Analysis — charts, insights, recommendations</label><select id="rpDModel" class="vsel" style="width:100%">${opts(aDef)}</select></div>
+  return `<div class="row2 rp-stages"><div><label for="rpDModel">1 · Analysis — charts, insights, recommendations</label><select id="rpDModel" class="vsel" style="width:100%"><option value="auto" ${aDef === 'auto' ? 'selected' : ''}>Auto — Canopus picks for this report (recommended)</option>${opts(aDef)}</select><p class="help" style="margin:4px 0 0">Auto: Claude Core for daily–bi-weekly reports on ordinary data; Claude Prime for monthly and longer, ad-hoc, both channels, 3+ files or over 20,000 rows. Steps down when under 20% of your monthly budget is left.</p></div>
     <div><label for="rpFModel">2 · Finalization — wording, titles, consistency</label><select id="rpFModel" class="vsel" style="width:100%"><option value="none" ${fDef === 'none' ? 'selected' : ''}>None (use the analysis as is)</option>${opts(fDef)}</select></div></div>`;
 }
 const finalizeSelect = () => { const ms = C.me().config.models; const p = prefs(); const gpt = ms.filter(m => m.provider === 'openai'); const def = ms.some(m => m.id === p.finalize) ? p.finalize : (gpt[0] || ms[0])?.id;
