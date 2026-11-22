@@ -299,13 +299,24 @@ async function runOpenAI({ model, system, messages, useKnowledge, mode, emit, si
   return { turn, text, cites, usage, stop: stop === 'tool_calls' ? 'end_turn' : stop === 'length' ? 'max_tokens' : stop === 'content_filter' ? 'refusal' : 'end_turn' };
 }
 
+// Errors that will not go away by retrying: no credit left, quota exhausted, a wrong or revoked key. They become a 402
+// with a plain message, so background jobs stop at once instead of retrying every batch.
+export function fatalAiError(e, model) {
+  const msg = String(e?.message || ''), st = e?.status, who = model?.provider === 'anthropic' ? 'Claude' : model?.label || 'the AI provider';
+  if (/credit balance|insufficient_quota|exceeded your current quota|billing|payment required/i.test(msg) || st === 402) return Object.assign(new Error(`${who}: the prepaid credit is used up (or the quota is reached). Nothing more will be charged. An administrator can top up the credit in the provider's console, then run this again.`), { status: 402, fatal: true });
+  if (st === 401 || st === 403 || /invalid x-api-key|invalid api key|incorrect api key/i.test(msg)) return Object.assign(new Error(`${who}: the API key was refused (wrong, revoked or without access to this model). An administrator needs to check the key.`), { status: 402, fatal: true });
+  return null;
+}
 // Short non-streaming completion (titles, prompt polishing, routing).
-export async function complete(user, model, system, text, purpose, maxTokens = 1024, effort = 'low', images = []) {
+export async function complete(...args) {
+  try { return await completeRaw(...args); } catch (e) { throw fatalAiError(e, args[1]) || e; }
+}
+async function completeRaw(user, model, system, text, purpose, maxTokens = 1024, effort = 'low', images = []) {
   const imgs = model.vision ? images : [];
   if (oaStyle(model.provider)) {
     const ep = endpoint(model.provider);
     const res = await (model.provider === 'local' ? fetch : httpFetch)(ep.base + '/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + ep.key }, body: JSON.stringify({ model: model.api, messages: [{ role: 'system', content: system }, { role: 'user', content: imgs.length ? [...imgs.map(im => ({ type: 'image_url', image_url: { url: `data:${im.mime};base64,${im.data}` } })), { type: 'text', text }] : text }] }), signal: AbortSignal.timeout(maxTokens > 4096 ? 300e3 : 60e3) });
-    if (!res.ok) throw Object.assign(new Error('HTTP ' + res.status), { status: res.status });
+    if (!res.ok) { let msg = ''; try { const j = await res.json(); msg = j.error?.message || j.error?.code || JSON.stringify(j).slice(0, 300); } catch {} throw Object.assign(new Error(msg || 'HTTP ' + res.status), { status: res.status }); }
     const j = await res.json(); const u = j.usage || {};
     recordUsage(user, model, { input: u.prompt_tokens, output: u.completion_tokens }, purpose);
     return (j.choices?.[0]?.message?.content || '').trim();

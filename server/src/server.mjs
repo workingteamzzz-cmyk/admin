@@ -8,6 +8,8 @@ import { hashPassword, verifyPassword, passwordProblem, createInvite, inviteUser
 import { ingestDoc, deleteDoc, deleteCollection, classificationProblem, search } from './knowledge.mjs';
 import { converse, quick, modelsFor, allModels, providerReady, listOpenAIModels } from './ai.mjs';
 import { emit as emitWebhook } from './webhooks.mjs';
+import { loadZip } from './zipguard.mjs';
+import * as F from './finals.mjs';
 import * as R from './reports.mjs';
 import { ANALYST_FIELDS, CLIENT_FIELDS, parsePersona } from './persona.mjs';
 import { bootstrapAdmin } from './cli.mjs';
@@ -235,15 +237,41 @@ route('POST', '/api/knowledge/search', async (req, res, u) => {
   audit(u.id, 'knowledge.direct_search', { query: q.slice(0, 100), results: hits.length }, clientIp(req));
   json(res, 200, hits.map(h => ({ title: h.title, page: h.page, collection: h.collection, docId: h.docId, text: h.text, localOnly: h.localOnly })));
 });
-route('GET', '/api/knowledge/docs/:id/file', (req, res, u, p) => {
+route('GET', '/api/knowledge/docs/:id/file', async (req, res, u, p) => {
   const d = one(`SELECT * FROM docs WHERE id=?`, p.id);
   if (!d || !allowedCollections(u).some(c => c.id === d.collection_id)) throw new HttpError(404, 'Not found');
   audit(u.id, 'knowledge.open', { doc: d.id }, clientIp(req));
   const inline = d.mime === 'application/pdf';
+  const col_ = one(`SELECT kind, name FROM collections WHERE id=?`, d.collection_id);
+  if (col_?.kind === 'senior' && u.role !== 'admin') { // URS: the file's own metadata must not reveal the senior behind the codename
+    const buf = await scrubAuthor(fs.readFileSync(path.join(config.dataDir, 'docs', d.id)), d.filename, '★ ' + col_.name);
+    res.writeHead(200, { 'content-type': inline ? 'application/pdf' : 'application/octet-stream', 'content-security-policy': 'sandbox', 'content-disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(d.filename)}`, 'cache-control': 'private, no-store' });
+    return res.end(buf);
+  }
   res.writeHead(200, { 'content-type': inline ? 'application/pdf' : 'application/octet-stream', 'content-security-policy': 'sandbox', 'content-disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(d.filename)}`, 'cache-control': 'private, no-store' });
   fs.createReadStream(path.join(config.dataDir, 'docs', d.id)).pipe(res);
 });
 
+// Author names inside Office files (document properties, comment authors) and PDFs (Author/Creator), replaced by a codename.
+async function scrubAuthor(buf, filename, alias) {
+  const x = v => String(v).replace(/[<&>"]/g, c => ({ '<': '&lt;', '&': '&amp;', '>': '&gt;', '"': '&quot;' }[c]));
+  if (/\.(pptx|docx|xlsx)$/i.test(filename)) {
+    const zip = await loadZip(buf, { what: 'file' });
+    for (const [n, f] of Object.entries(zip.files)) {
+      if (f.dir || !/^docProps\/(core|app)\.xml$|commentAuthors\.xml$|comments\d*\.xml$|people\.xml$/i.test(n)) continue;
+      let t = await f.async('string');
+      t = t.replace(/<(dc:creator|cp:lastModifiedBy|Company|Manager)>[\s\S]*?<\/\1>/g, (m, tag) => `<${tag}>${tag === 'Company' || tag === 'Manager' ? '' : x(alias)}</${tag}>`)
+        .replace(/\b(name|w:author|author|initials|userId|w:initials)="[^"]*"/g, (m, a) => `${a}="${/initials/i.test(a) ? '' : x(alias)}"`);
+      zip.file(n, t);
+    }
+    return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  }
+  if (/\.pdf$/i.test(filename)) { // same length, so the PDF's byte offsets stay valid
+    const s = buf.toString('latin1').replace(/\/(Author|Creator)\s*(\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]*>)/g, (m, k, v) => m.slice(0, m.length - v.length) + v[0] + (v[0] === '(' ? ' ' : '0').repeat(v.length - 2) + v[v.length - 1]);
+    return Buffer.from(s, 'latin1');
+  }
+  return buf;
+}
 /* ---------- admin ---------- */
 route('GET', '/api/admin/overview', (req, res, u) => {
   requireAdmin(u);
@@ -435,7 +463,8 @@ route('POST', '/api/v1/ask', async (req, res) => {
 route('GET', '/api/v1/collections', (req, res) => { const { u } = tokenUser(req, 'knowledge:read'); json(res, 200, knowledgeFor(u).map(c => ({ id: c.id, name: c.name, documents: c.docs.map(d => ({ id: d.id, title: d.title, status: d.status, classification: d.classification })) }))); }, { public: true, token: true });
 route('POST', '/api/v1/collections/:id/docs', async (req, res, _u, p) => {
   const { u, t } = tokenUser(req, 'knowledge:write');
-  if (!allowedCollections(u).some(c => c.id === p.id)) throw new HttpError(404, 'Collection not found');
+  const col = allowedCollections(u).find(c => c.id === p.id); if (!col) throw new HttpError(404, 'Collection not found');
+  if (!canUpload(u, col)) { req.resume(); throw new HttpError(403, 'This token’s owner cannot add documents to this collection.'); }
   const classification = String(req.headers['x-classification'] || ''); const problem = classificationProblem(classification);
   if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification, via: t.name }, clientIp(req)); emitWebhook('knowledge.upload_refused', { file: fileName(req), classification, via: t.name }); throw new HttpError(422, problem); }
   const buf = await readBody(req, config.maxUploadMb * MB);
@@ -453,6 +482,7 @@ route('PUT', '/api/reports/clients/:id', async (req, res, u, p) => { R.saveClien
 route('DELETE', '/api/reports/clients/:id', (req, res, u, p) => { const c = R.deleteClient(u, p.id); audit(u.id, 'report.client_deleted', { client: c.id, name: c.name }, clientIp(req)); json(res, 200, { ok: true }); });
 route('POST', '/api/reports/clients/:id/docs', async (req, res, u, p) => { // client knowledge: earlier reports, briefs, guidelines
   const c = R.listClients().find(x => x.id === p.id); if (!c?.collection_id) throw new HttpError(404, 'Client not found');
+  const ccol = allowedCollections(u).find(x => x.id === c.collection_id); if (!ccol || !canUpload(u, ccol)) { req.resume(); throw new HttpError(403, 'You do not have access to this client’s documents.'); }
   const classification = String(req.headers['x-classification'] || 'biasa'); const problem = classificationProblem(classification);
   if (problem) { req.resume(); audit(u.id, 'knowledge.upload_refused', { file: fileName(req), classification, client: c.id }, clientIp(req)); throw new HttpError(422, problem); }
   const buf = await readBody(req, config.maxUploadMb * MB);
@@ -469,6 +499,18 @@ route('POST', '/api/reports/templates', async (req, res, u) => {
 });
 route('PATCH', '/api/reports/templates/:id', async (req, res, u, p) => { R.updateTemplate(u, p.id, await readJson(req, 10e3)); json(res, 200, { ok: true }); });
 route('DELETE', '/api/reports/templates/:id', (req, res, u, p) => { const t = R.deleteTemplate(u, p.id); audit(u.id, 'report.template_deleted', { template: t.id, name: t.name }, clientIp(req)); json(res, 200, { ok: true }); });
+// Final reports (edited by the editor), filed per client, channel and report type. Kept on this server.
+const FINAL_MIME = { pptx: PPTX_TYPE, pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' };
+route('GET', '/api/reports/finals', (req, res, u) => { const q = new URL(req.url, 'http://x').searchParams; const c = q.get('client') || null;
+  json(res, 200, q.get('q') && c ? F.searchFinals(u, c, q.get('q')) : F.listFinals(u, c)); });
+route('POST', '/api/reports/finals', async (req, res, u) => {
+  const buf = await readBody(req, config.maxUploadMb * MB); const h = k => decodeURIComponent(String(req.headers['x-' + k] || ''));
+  const f = await F.addFinal(u, { clientId: h('client'), buf, filename: fileName(req), reportType: h('type'), channel: h('channel'), period: h('period'), title: h('title'), deckId: h('deck') || null, learn: h('learn') !== '0', note: h('note') });
+  audit(u.id, 'report.final_added', { final: f.id, client: f.clientId, type: f.reportType, channel: f.channel, file: f.filename }, clientIp(req)); json(res, 200, f);
+});
+route('PATCH', '/api/reports/finals/:id', async (req, res, u, p) => json(res, 200, F.updateFinal(u, p.id, await readJson(req, 20e3))));
+route('DELETE', '/api/reports/finals/:id', (req, res, u, p) => { const f = F.deleteFinal(u, p.id); audit(u.id, 'report.final_deleted', { final: f.id, client: f.client_id, file: f.filename }, clientIp(req)); json(res, 200, { ok: true }); });
+route('GET', '/api/reports/finals/:id/file', (req, res, u, p) => { const f = F.finalFile(p.id); audit(u.id, 'report.final_download', { final: f.id }, clientIp(req)); sendFile(res, f.buf, f.filename, FINAL_MIME[f.filename.split('.').pop().toLowerCase()] || 'application/octet-stream'); });
 route('GET', '/api/reports/templates/:id/file', (req, res, u, p) => { const f = R.templateFile(u, p.id); sendFile(res, f.buf, f.name, PPTX_TYPE); });
 route('POST', '/api/reports/datasets', async (req, res, u) => {
   const buf = await readBody(req, config.maxUploadMb * MB); const d = await R.addDataset(u, { filename: fileName(req), buf, clientId: String(req.headers['x-client'] || '') || null });

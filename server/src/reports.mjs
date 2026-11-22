@@ -8,12 +8,13 @@ import { config, ROOT } from './config.mjs';
 import { db, one, all, run, id, now, sha256, getSettings, audit, allowedCollections } from './db.mjs';
 import { Redactor, SYSTEM_NOTE } from './redact.mjs';
 import { complete, reportModel, helperModel, limitProblem } from './ai.mjs';
-import { search } from './knowledge.mjs';
+import { search, sensitiveValues } from './knowledge.mjs';
 import { loadWorkbook, profile, sanitizePlan, describe, runPlan, writeXlsx, reportSensitive, guessCol, OPS, FILTERS, CLEANS, DERIVES, MEASURES } from './tables.mjs';
 import { openTemplate, describeTemplate, buildDeck, sanitizeOutline, SLIDE_KINDS, imgSize } from './slides.mjs';
 import { CLIENT_FIELDS, parsePersona, analystBlock, clientBlock } from './persona.mjs';
 import { logoInfo, recommendStyles, sanitizeStyle, STYLE_PRESETS } from './brand.mjs';
 import { REPORT_TYPES, reportType, typeNote, CHANNELS, channelOf, adaptStructure } from './report-types.mjs';
+import { finalsNote, finalsPreview } from './finals.mjs';
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS report_templates(id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT, filename TEXT NOT NULL, size INTEGER, info TEXT NOT NULL, created INTEGER NOT NULL, created_by TEXT);
@@ -66,7 +67,8 @@ export function addRecipe(user, cid, { name, plan, columns }) {
   return rid;
 }
 export function getRecipe(rid) { const r = one(`SELECT * FROM client_recipes WHERE id=?`, rid); if (!r) throw err(404, 'Recipe not found'); const plan = JSON.parse(r.plan); return { ...r, plan: { ...plan, steps: plan.steps.map(x => ({ ...x, text: describe(x) })) }, columns: JSON.parse(r.columns) }; }
-export function deleteRecipe(user, rid) { const r = one(`SELECT * FROM client_recipes WHERE id=?`, rid); if (!r) throw err(404, 'Recipe not found'); run(`DELETE FROM client_recipes WHERE id=?`, rid); return r; }
+const mayManage = (user, createdBy) => user.role === 'admin' || user.role === 'ultimate' || createdBy === user.id;
+export function deleteRecipe(user, rid) { const r = one(`SELECT * FROM client_recipes WHERE id=?`, rid); if (!r) throw err(404, 'Recipe not found'); if (!mayManage(user, r.created_by)) throw err(403, 'Only the person who saved this recipe, Ultimate accounts and administrators can delete it.'); run(`DELETE FROM client_recipes WHERE id=?`, rid); return r; }
 
 /* ================= templates ================= */
 // No built-in template is offered: every deck uses a template someone uploaded (usually a client's). "plain" is only a
@@ -84,7 +86,7 @@ function templateRow(user, tid) {
 }
 function templateBuf(user, tid) { if (String(tid || '').startsWith('doc:')) return referenceDoc(user, tid.slice(4)).buf; const r = templateRow(user, tid); return fs.readFileSync(r ? path.join(DIR, 'templates', r.id + '.pptx') : PLAIN); }
 let plainInfo;
-async function templateDesc(user, tid) { if (String(tid || '').startsWith('doc:')) { const d = referenceDoc(user, tid.slice(4)); return { name: d.title, info: describeTemplate(await openTemplate(d.buf)) }; } const r = templateRow(user, tid); if (!r) { plainInfo ??= await templateInfo(fs.readFileSync(PLAIN)); return { name: 'Plain layout', info: plainInfo }; } return { name: r.name, info: JSON.parse(r.info) }; }
+async function templateDesc(user, tid) { if (String(tid || '').startsWith('doc:')) { const d = referenceDoc(user, tid.slice(4), true); return { name: d.title, info: describeTemplate(await openTemplate(d.buf)) }; } const r = templateRow(user, tid); if (!r) { plainInfo ??= await templateInfo(fs.readFileSync(PLAIN)); return { name: 'Plain layout', info: plainInfo }; } return { name: r.name, info: JSON.parse(r.info) }; }
 export async function addTemplate(user, { filename, buf, name, clientId, personal }) {
   if (!/\.(pptx|potx)$/i.test(filename)) throw err(415, 'Upload a PowerPoint file (.pptx or .potx).');
   if (clientId) clientRow(clientId);
@@ -97,6 +99,7 @@ export async function addTemplate(user, { filename, buf, name, clientId, persona
 // Templates can be moved to another client or renamed; any client may *use* any team template.
 export function updateTemplate(user, tid, { name, clientId }) {
   const r = templateRow(user, tid); if (!r) throw err(404, 'Template not found'); if (clientId) clientRow(clientId);
+  if (!r.owner_id && !mayManage(user, r.created_by)) throw err(403, 'Only the person who uploaded this template, Ultimate accounts and administrators can change it.');
   run(`UPDATE report_templates SET name=?, client_id=? WHERE id=?`, String(name ?? r.name).trim().slice(0, 120) || r.name, clientId === undefined ? r.client_id : clientId || null, tid);
 }
 export function deleteTemplate(user, tid) {
@@ -177,7 +180,7 @@ export function deleteDataset(user, did) { const d = ownDataset(user, did); fs.r
 const pickSheet = (sheets, name) => sheets.find(s => s.name === name) || [...sheets].sort((a, b) => b.rows.length - a.rows.length)[0];
 
 /* ---------- AI helpers ---------- */
-function redactorFor(user, scope) { const s = getSettings(); return new Redactor({ userId: user.id, chatId: scope, enabled: s.redaction.enabled, terms: s.redaction.terms, values: [] }); }
+function redactorFor(user, scope) { const s = getSettings(); return new Redactor({ userId: user.id, chatId: scope, enabled: s.redaction.enabled, terms: s.redaction.terms, values: s.redaction.enabled ? sensitiveValues() : [] }); }
 function checkLimits(user) { const lim = limitProblem(user); if (lim && lim.code !== 'rate') throw err(402, lim.message); }
 function parseJson(text) {
   const t = String(text || '').replace(/^```(?:json)?\s*|\s*```$/g, '');
@@ -288,11 +291,11 @@ function makeTagger(user, did, progress = () => {}, client = null) {
         batch.forEach((x, k) => { const raw = String(r[k + 1] ?? '').trim(); let v = norm.get(raw.toLowerCase());
           if (!v && allowNew && /^new\s*:/i.test(raw) && added.length < 20) { v = raw.replace(/^new\s*:\s*/i, '').slice(0, 90); if (v && !norm.has(v.toLowerCase())) { norm.set(v.toLowerCase(), v); added.push(v); } }
           if (v) run(`INSERT OR REPLACE INTO ai_tag_cache(key,value,created) VALUES(?,?,?)`, keyOf(x), v, now()); });
-      } catch (e) { if (e.status === 402) throw e; failed += batch.length; }
+      } catch (e) { if (e.status === 402) { next = batches.length; throw e; } failed += batch.length; lastErr = e; }
       done += batch.length; progress({ phase: 'label', done, total: todo.length });
     };
-    let next = 0; await Promise.all(Array.from({ length: Math.min(TAG_PARALLEL, batches.length) }, async () => { while (next < batches.length) await work(batches[next++]); }));
-    if (failed && failed === todo.length) throw new Error('AI labelling failed. Try again in a moment.');
+    let next = 0, lastErr = null; await Promise.all(Array.from({ length: Math.min(TAG_PARALLEL, batches.length) }, async () => { while (next < batches.length) await work(batches[next++]); }));
+    if (failed) throw new Error(`AI labelling failed for ${failed.toLocaleString('en')} of ${todo.length.toLocaleString('en')} rows${lastErr?.message ? ` (${String(lastErr.message).slice(0, 160)})` : ''}. Run it again: rows already labelled are cached, so only the rest is sent.`);
     const lookup = x => one(`SELECT value FROM ai_tag_cache WHERE key=?`, keyOf(x))?.value || ''; // new labels are cached under the same key
     return { labels: [...use, ...added], added, values: texts.map(x => (x ? lookup(x) : '')) };
   };
@@ -446,7 +449,11 @@ export function structureFor(client, typeId, channel = 'medmas') {
   const general = parsePersona(client?.persona, CLIENT_FIELDS).structure; if (general?.trim() && (!typeId || typeId === 'weekly') && channel === 'medmas') return { text: general, source: 'client' };
   const t = reportType(typeId); const base = t?.structure || ''; return { text: adaptStructure(base, channel) || general || '', source: base ? 'default' : general ? 'client' : 'none' };
 }
-export function structurePreview(cid, typeId, channel) { const c = cid ? one(`SELECT * FROM clients WHERE id=?`, cid) : null; return structureFor(c, typeId, channel || 'medmas'); }
+export function structurePreview(cid, typeId, channel) {
+  const c = cid ? one(`SELECT * FROM clients WHERE id=?`, cid) : null; const st = structureFor(c, typeId, channel || 'medmas'); const finals = finalsPreview(c?.id, typeId, channel || 'medmas');
+  if (st.source !== 'client' && finals.using.length) { const fin = finalsNote(c.id, typeId, channel || 'medmas'); if (fin.structure) return { text: fin.structure, source: 'final', finals }; }
+  return { ...st, finals };
+}
 export function setClientStructure(user, cid, { type, channel, text }) { const c = clientRow(cid); if (!reportType(type)) throw err(400, 'Unknown report type'); const m = JSON.parse(c.structures || '{}'); const key = structKey(type, channel); if (String(text || '').trim()) m[key] = String(text).slice(0, 6000); else delete m[key]; run(`UPDATE clients SET structures=?, updated=? WHERE id=?`, JSON.stringify(m), now(), cid); }
 
 /* ---------- style profiles: the language and styling patterns of a senior's reports ---------- */
@@ -455,6 +462,8 @@ export function setClientStructure(user, cid, { type, channel, text }) { const c
 const PROFILE_FIELDS = [['summary', 'In short'], ['titles', 'Slide titles'], ['structure', 'Flow of the report'], ['findings', 'How findings and causes are phrased'], ['recommendations', 'How recommendations are written'], ['language', 'Tone, sentence length and vocabulary'], ['design', 'Visual habits'], ['avoid', 'Never']];
 export async function buildStyleProfile(user, cid) {
   const c = one(`SELECT * FROM collections WHERE id=? AND kind IN ('senior','person')`, cid); if (!c || !allowedCollections(user).some(x => x.id === cid)) throw err(404, 'Space not found');
+  if (user.role !== 'admin' && c.owner_id !== user.id) throw err(403, 'Only the owner of this space or an administrator can rebuild its style profile.');
+  if (c.local_only) throw err(403, 'This space is on-premise only, so its reports cannot be sent to a cloud AI to build a style profile.');
   const docs = all(`SELECT id, title FROM docs WHERE collection_id=? AND status='ready' ORDER BY created DESC LIMIT 8`, cid); if (!docs.length) throw err(409, 'Add at least one report first.');
   const per = Math.floor(16000 / docs.length); const red = redactorFor(user, 'style:' + cid);
   const text = docs.map(d => `=== ${d.title} ===\n${all(`SELECT text FROM kchunks WHERE doc_id=? ORDER BY idx`, d.id).map(r => r.text).join('\n').slice(0, per)}`).join('\n\n');
@@ -479,19 +488,20 @@ function styleBlock(c) {
 /* ---------- reference reports from seniors (knowledge by person) ---------- */
 // Reports that analysts can follow: PowerPoint (design + structure + writing style) or PDF/Word (structure + writing style).
 export function referenceReports(user) {
-  const cols = allowedCollections(user).filter(c => ['senior', 'person', 'team', 'client'].includes(c.kind)); if (!cols.length) return [];
+  const cols = allowedCollections(user).filter(c => ['senior', 'person', 'team', 'client'].includes(c.kind) && !c.local_only); if (!cols.length) return [];
   const styles = cols.filter(c => c.kind === 'senior' && c.style_profile).map(c => ({ id: 'senior:' + c.id, title: `URS ★${c.name} — language & style from all reports`, kind: 'senior', by: '★ ' + c.name, design: false, style: true }));
   return [...styles, ...all(`SELECT d.id, d.title, d.filename, d.created, d.collection_id, c.kind, c.name collection, COALESCE(NULLIF(u.name,''),u.email) owner FROM docs d JOIN collections c ON c.id=d.collection_id LEFT JOIN users u ON u.id=c.owner_id
     WHERE d.status='ready' AND d.collection_id IN (${cols.map(() => '?').join(',')}) AND (lower(d.filename) LIKE '%.pptx' OR lower(d.filename) LIKE '%.pdf' OR lower(d.filename) LIKE '%.docx') ORDER BY c.kind='senior' DESC, c.kind='person' DESC, c.name, d.created DESC`, ...cols.map(c => c.id))
     .map(d => ({ id: d.id, title: d.title, filename: d.filename, created: d.created, kind: d.kind, by: d.kind === 'senior' ? '★ ' + d.collection : d.kind === 'person' ? d.owner : d.collection, design: /\.pptx$/i.test(d.filename) }))];
 }
-function referenceDoc(user, did) {
+function referenceDoc(user, did, forAi = false) {
   const d = one(`SELECT * FROM docs WHERE id=?`, did); if (!d || !allowedCollections(user).some(c => c.id === d.collection_id)) throw err(404, 'Reference report not found');
+  if (forAi && one(`SELECT local_only FROM collections WHERE id=?`, d.collection_id)?.local_only) throw err(403, 'This report is in an on-premise-only collection, so it cannot be sent to a cloud AI as a reference.');
   const col = one(`SELECT kind, name FROM collections WHERE id=?`, d.collection_id); // seniors are named only by their codename, also towards the AI
   return { ...d, buf: fs.readFileSync(path.join(config.dataDir, 'docs', d.id)), owner: col?.kind === 'senior' ? col.name : one(`SELECT COALESCE(NULLIF(u.name,''),u.email) n FROM collections c LEFT JOIN users u ON u.id=c.owner_id WHERE c.id=?`, d.collection_id)?.n || '' };
 }
 async function referenceNote(user, did) {
-  const d = referenceDoc(user, did); const pages = all(`SELECT text FROM kchunks WHERE doc_id=? ORDER BY idx`, d.id).map(r => r.text).join('\n').slice(0, 9000);
+  const d = referenceDoc(user, did, true); const pages = all(`SELECT text FROM kchunks WHERE doc_id=? ORDER BY idx`, d.id).map(r => r.text).join('\n').slice(0, 9000);
   let structure = ''; if (/\.pptx$/i.test(d.filename)) { try { const info = describeTemplate(await openTemplate(d.buf)); structure = info.structure.map((x, i) => `${i + 1}. ${x.title || '(no title)'}${x.has?.length ? ` [${x.has.join(', ')}]` : ''}`).join('\n'); } catch {} }
   const col = one(`SELECT * FROM collections WHERE id=?`, d.collection_id);
   return { doc: d, structure, style: styleBlock(col), text: styleBlock(col) + `\n\nReference report chosen by the analyst: "${d.title}"${d.owner ? ` by ${d.owner}` : ''}. Follow its structure, depth, tone and writing style — the way it titles slides, phrases findings, explains causes and makes recommendations — but with this period's data and content; never copy its numbers or facts.${structure ? `\nIts slides:\n${structure}` : ''}\nExcerpts of its text (style examples):\n${pages}` };
@@ -600,7 +610,7 @@ function chooseCover(user, cover) {
   const z = size(pick); const layout = ['full', 'split'].includes(cover?.layout) ? cover.layout : (z.w / z.h >= 1.2 ? 'full' : 'split');
   return { image: pick, layout, mode: cover?.mode === 'pick' ? 'pick' : 'auto', candidates: cands };
 }
-export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId, images = [], style, cover, reportType: rt, period, channel, reference, useReferenceDesign }) {
+export async function draftDeck(user, { title, template, datasets = [], brief, model: requested, finalizeModel, knowledge, client: clientId, images = [], style, cover, reportType: rt, period, channel, reference, useReferenceDesign, learnFinals }) {
   checkLimits(user); const client = clientRow(clientId);
   const ids = [...new Set(datasets)].slice(0, 6); const tables = deckTables(user, ids);
   const tdesc = await templateDesc(user, template);
@@ -618,16 +628,20 @@ export async function draftDeck(user, { title, template, datasets = [], brief, m
   const tp = reportType(rt); const per = String(period || '').trim().slice(0, 80); const chn = channelOf(channel); const seniorStyle = String(reference || '').startsWith('senior:') ? one(`SELECT * FROM collections WHERE id=? AND kind='senior'`, String(reference).slice(7)) : null;
   if (seniorStyle && !allowedCollections(user).some(c => c.id === seniorStyle.id)) throw err(404, 'Senior reference not found');
   const ref = reference && !seniorStyle ? await referenceNote(user, String(reference)) : seniorStyle ? { text: styleBlock(seniorStyle), style: styleBlock(seniorStyle), structure: '', doc: null } : null; const rstruct = ref?.structure ? { text: ref.structure, source: 'reference' } : structureFor(client, tp?.id, chn.id);
+  // The client's final reports (as the editor approved them) for this type and channel. Their structure is used when
+  // the client has not written its own; their titles, phrasing and the editor's corrections always guide the writing.
+  const fin = !reference && learnFinals !== false && client ? finalsNote(client.id, tp?.id, chn.id) : { text: '', structure: '', used: [] };
+  if (fin.structure && rstruct.source !== 'client') { rstruct.text = fin.structure; rstruct.source = 'final'; }
   if (ref?.doc && useReferenceDesign !== false && /\.pptx$/i.test(ref.doc.filename)) template = 'doc:' + ref.doc.id;
-  const cap = maxOf(rstruct.text) || (tp?.maxSlides || 0); const capNote = `\n\n${chn.note}${tp ? `\n${typeNote(tp, per)}` : ''}${ref ? ref.text : ''}${rstruct.text ? `\n\nReport structure for this deck (${rstruct.source === 'reference' ? 'from the chosen reference report' : rstruct.source === 'client' ? "the client's own" : `default for ${tp?.label || 'this report'}`}) — follow it exactly, one slide per line, in this order:\n${rstruct.text}` : ''}${cap ? `\n\nSlide limit: at most ${cap} slides.` : ''}`;
+  const cap = maxOf(rstruct.text) || (tp?.maxSlides || 0); const capNote = `\n\n${chn.note}${tp ? `\n${typeNote(tp, per)}` : ''}${ref ? ref.text : ''}${fin.text}${rstruct.text ? `\n\nReport structure for this deck (${rstruct.source === 'reference' ? 'from the chosen reference report' : rstruct.source === 'final' ? "from the client's latest final report, as the editor approved it — keep its slides and order, with this period's content" : rstruct.source === 'client' ? "the client's own" : `default for ${tp?.label || 'this report'}`}) — follow it exactly, one slide per line, in this order:\n${rstruct.text}` : ''}${cap ? `\n\nSlide limit: at most ${cap} slides.` : ''}`;
   const raw = await askJson(user, model, outlineSystem() + (red.enabled ? '\n\n' + SYSTEM_NOTE : ''), prompt + red.mask(imgNote + capNote), 'report.outline', 16000, 'medium', vision);
   let outline = sanitizeOutline(unmaskDeep(red, raw)); let notes = red.unmask(String(raw.notes || ''));
   if (!outline.slides.length) throw err(502, 'The AI did not return any slides. Try again with a more specific brief.');
   const cov = chooseCover(user, cover); if (cov) outline.cover = cov;
   if (cap && outline.slides.length > cap) { notes = [notes, `Trimmed to the ${cap}-slide limit.`].filter(Boolean).join(' '); outline.slides = outline.slides.slice(0, cap); }
   let finalizer = null;
-  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: [clientBlock(client), analystBlock(user), ref?.style || '', brief || ''].filter(Boolean).join('\n\n'), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
-  notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, notes].filter(Boolean).join(' ');
+  if (finalizeModel && finalizeModel !== 'none') { const f = await finalizeOutline(user, outline, { brief: [clientBlock(client), analystBlock(user), ref?.style || '', fin.text ? fin.text.slice(0, 4000) : '', brief || ''].filter(Boolean).join('\n\n'), catalog: catalogText(tables, 150), finalizeModel, red }); outline = f.outline; finalizer = f.finalizer; notes = [notes, f.note].filter(Boolean).join(' '); }
+  notes = [`Analysis: ${model.label}${finalizer ? ` · finalized by ${finalizer.label}` : ''}.`, fin.used.length ? `Learned from final report${fin.used.length > 1 ? 's' : ''}: ${fin.used.map(f => `“${f.title}”`).join(', ')}.` : '', notes].filter(Boolean).join(' ');
   if (!outline.footer && tp && tp.id !== 'adhoc') outline.footer = `${tp.label.replace(/ report$/, ' Report')}${per ? ` · ${per}` : ''}`;
   const t = String(title || outline.title || 'Presentation').slice(0, 160);
   const st = sanitizeStyle(style); run(`INSERT INTO decks(id,user_id,title,template_id,datasets,brief,outline,notes,created,updated,client_id,images,style,report_type,period,structure,channel,reference) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, kid, user.id, t, template && !['default', 'plain'].includes(template) ? template : null, JSON.stringify(ids), String(brief || '').slice(0, 6000), JSON.stringify(outline), notes.slice(0, 1000), now(), now(), client?.id || null, JSON.stringify(imgs), st ? JSON.stringify(st) : null, tp?.id || null, per, rstruct.text || null, chn.id, ref?.doc?.id || (seniorStyle ? 'senior:' + seniorStyle.id : null));

@@ -15,7 +15,7 @@ export function decodePng(buf) {
   }
   if (depth !== 8 || interlace || !w || !h || w * h > 25e6) return null;
   const ch = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[type]; if (!ch) return null;
-  let raw; try { raw = zlib.inflateSync(Buffer.concat(idat)); } catch { return null; }
+  let raw; try { raw = zlib.inflateSync(Buffer.concat(idat), { maxOutputLength: 120 * 1024 * 1024 }); } catch { return null; }
   const stride = w * ch, out = new Uint8Array(w * h * 4); let prev = new Uint8Array(stride), p = 0;
   for (let y = 0; y < h; y++) {
     const f = raw[p++]; const line = new Uint8Array(raw.subarray(p, p + stride)); p += stride;

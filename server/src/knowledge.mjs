@@ -1,5 +1,6 @@
 // Internal knowledge: text extraction, chunking, local full-text index, and permission-aware search.
 // Nothing here calls an external service; documents are indexed on this server only.
+import { loadZip } from './zipguard.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { db, one, all, run, id, now, sha256, tx, allowedCollections, getSettings } from './db.mjs';
@@ -52,7 +53,7 @@ const attr = (tag, name) => tag.match(new RegExp(`\\s${name}="([^"]*)"`))?.[1];
 function colIndex(ref) { const l = ref.match(/^[A-Z]+/)?.[0] || 'A'; let n = 0; for (const c of l) n = n * 26 + (c.charCodeAt(0) - 64); return n - 1; }
 function excelDate(serial) { const d = new Date(Math.round((serial - 25569) * 864e5)); return isNaN(d) ? String(serial) : d.toISOString().slice(0, 10); }
 async function readXlsx(buf) {
-  const JSZip = (await import('jszip')).default; const zip = await JSZip.loadAsync(buf);
+  const zip = await loadZip(buf, { what: 'file' });
   const file = async n => { const f = zip.file(n); return f ? f.async('string') : ''; };
   if (Object.keys(zip.files).length > 2000) throw new Error('Spreadsheet has too many parts');
   const shared = [...(await file('xl/sharedStrings.xml')).matchAll(/<si>([\s\S]*?)<\/si>/g)].map(m => unxml([...m[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map(t => t[1]).join('')));
@@ -106,7 +107,7 @@ export async function extractDoc(buf, filename, mime = '') {
 }
 
 async function pptxSlides(buf) {
-  const JSZip = (await import('jszip')).default; const zip = await JSZip.loadAsync(buf);
+  const zip = await loadZip(buf, { what: 'file' });
   const pres = await zip.file('ppt/presentation.xml')?.async('string') || ''; const rels = await zip.file('ppt/_rels/presentation.xml.rels')?.async('string') || '';
   const target = Object.fromEntries([...rels.matchAll(/<Relationship\b[^>]*\/>/g)].map(m => [attr(m[0], 'Id'), attr(m[0], 'Target')]));
   const out = [];
@@ -121,7 +122,7 @@ async function pptxSlides(buf) {
 export async function extractText(buf, filename, mime = '') {
   if (/\.pptx$/i.test(filename)) return pptxSlides(buf);
   if (/\.pdf$/i.test(filename) || mime === 'application/pdf') return pdfPages(buf);
-  if (/\.docx$/i.test(filename)) { const mammoth = (await import('mammoth')).default; const r = await mammoth.extractRawText({ buffer: buf }); return [r.value]; }
+  if (/\.docx$/i.test(filename)) { await loadZip(buf, { what: 'document' }); const mammoth = (await import('mammoth')).default; const r = await mammoth.extractRawText({ buffer: buf }); return [r.value]; }
   if (HTML_EXT.test(filename)) return [buf.toString('utf8').replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+\n/g, '\n')];
   if (/\.(csv|tsv|xlsx)$/i.test(filename)) return (await extractTable(buf, filename)).pages;
   if (TEXT_EXT.test(filename) || /^text\//.test(mime)) return [buf.toString('utf8')];

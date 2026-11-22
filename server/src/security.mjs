@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.mjs';
-import { run, now, getSettings } from './db.mjs';
+import { run, now, getSettings, monthStart } from './db.mjs';
 
 /* ---------- server secret (encrypts TOTP secrets at rest) ---------- */
 let KEY;
@@ -57,7 +57,7 @@ export function ipAllowed(ip) {
 export function purge() {
   const s = getSettings().security; const day = 864e5;
   if (s.maskingRetentionDays > 0) run(`DELETE FROM redactions WHERE created < ?`, now() - s.maskingRetentionDays * day);
-  if (s.logRetentionDays > 0) { run(`DELETE FROM audit WHERE ts < ?`, now() - s.logRetentionDays * day); run(`DELETE FROM usage WHERE ts < ?`, now() - s.logRetentionDays * day); }
+  if (s.logRetentionDays > 0) { run(`DELETE FROM audit WHERE ts < ?`, now() - s.logRetentionDays * day); run(`DELETE FROM usage WHERE ts < ?`, Math.min(now() - s.logRetentionDays * day, monthStart(new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1)))); } // usage is kept at least for this and last month, so budgets stay correct
   run(`DELETE FROM chat_requests WHERE ts < ?`, now() - 2 * day);
   run(`DELETE FROM sessions WHERE expires < ?`, now());
 }

@@ -1,6 +1,7 @@
 // PowerPoint builder: reads an organization's .pptx/.potx template (its masters, layouts and theme), then writes new
 // slides on those layouts from a structured outline. Tables and charts are native PowerPoint objects (charts carry an
 // embedded workbook so they stay editable). Runs entirely on this server.
+import { loadZip } from './zipguard.mjs';
 import { writeXlsx, toNumber, guessCol } from './tables.mjs';
 import { applyStyle } from './brand.mjs';
 
@@ -26,7 +27,7 @@ function placeholders(xml) {
   return out;
 }
 export async function openTemplate(buf) {
-  const JSZip = (await import('jszip')).default; const zip = await JSZip.loadAsync(buf);
+  const zip = await loadZip(buf, { what: 'presentation' });
   if (Object.keys(zip.files).length > 3000) throw new Error('The template has too many parts');
   const read = async n => (zip.file(n) ? zip.file(n).async('string') : '');
   const pres = await read('ppt/presentation.xml'); if (!pres) throw new Error('This is not a PowerPoint file (.pptx or .potx)');

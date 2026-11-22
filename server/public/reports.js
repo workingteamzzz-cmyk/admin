@@ -66,10 +66,10 @@ export async function renderReports(fresh) {
   if (!S.loaded) { page.innerHTML = '<div class="help" style="padding:40px">Loading…</div>'; try { await load(); } catch (e) { page.innerHTML = `<div class="help" style="color:var(--red)">${esc(e.message)}</div>`; return; } }
   page.innerHTML = `<div class="page-head"><div><h1><span class="h-ic c-orange">${ic('chart')}</span>Reports</h1><p class="sub">Your clients' data and templates in one place. Upload a client's spreadsheet and PowerPoint, describe what you need, and Canopus curates the data and builds the deck on that client's template. Data is processed and files are built on this server.</p></div>
       <div class="rp-clientbar"><label for="rpClient">Client</label><select id="rpClient" class="vsel"><option value="">All clients</option>${S.clients.map(c => `<option value="${c.id}" ${c.id === S.client ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select><button class="btn sm" data-r="newclient">${ic('plus')}New client</button></div></div>
-    <div class="tabs">${[['clients', 'users', 'Clients'], ['data', 'table', 'Data curation'], ['decks', 'layers', 'Presentations'], ['templates', 'grid', 'Templates']].map(([k, i, l]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-r="tab" data-x="${k}">${ic(i)}${l}</button>`).join('')}</div>
+    <div class="tabs">${[['clients', 'users', 'Clients'], ['data', 'table', 'Data curation'], ['decks', 'layers', 'Presentations'], ['finals', 'archive', 'Final reports'], ['templates', 'grid', 'Templates']].map(([k, i, l]) => `<button class="tab ${S.tab === k ? 'on' : ''}" data-r="tab" data-x="${k}">${ic(i)}${l}</button>`).join('')}</div>
     <div id="rpBody" style="padding-top:14px"></div>`;
-  $('#rpClient').onchange = e => { S.form = null; S.client = e.target.value; savePrefs({ client: S.client }); S.ds = null; S.deck = null; S.clientDocs = null; renderReports(); };
-  ({ clients: clientsView, data: S.ds ? dsView : dataHome, decks: S.deck ? deckView : deckHome, templates: tplView }[S.tab])();
+  $('#rpClient').onchange = e => { S.form = null; S.client = e.target.value; savePrefs({ client: S.client }); S.ds = null; S.deck = null; S.clientDocs = null; S.finals = null; S.finQ = ''; renderReports(); };
+  ({ clients: clientsView, data: S.ds ? dsView : dataHome, decks: S.deck ? deckView : deckHome, finals: finalsView, templates: tplView }[S.tab])();
   C.hydrateIcons(page);
 }
 // The report flow: Excel → curate (topic / sentiment) → Claude builds the deck & analysis → GPT finalizes → download.
@@ -290,20 +290,28 @@ function slideFields(s, i) {
 function groupRefs() { const m = new Map(); for (const r of S.references || []) { const k = r.by || 'Team'; if (!m.has(k)) m.set(k, []); m.get(k).push(r); } return [...m]; }
 S.structCache = {};
 function structPreview(typeId, channel) { const key = `${S.client}|${typeId}|${channel}`; if (!S.structCache[key]) { S.structCache[key] = { loading: true }; C.api(`/api/reports/structure?client=${S.client || ''}&type=${typeId}&channel=${channel}`).then(r => { S.structCache[key] = r; const a = document.activeElement, fid = a?.id, sel = [a?.selectionStart, a?.selectionEnd]; captureForm(); renderReports(); const f = fid && document.getElementById(fid); if (f) { f.focus(); try { f.setSelectionRange(...sel); } catch {} } }).catch(() => {}); } return S.structCache[key]; }
+function finalsLine(sp) {
+  const u = sp?.finals?.using || []; if (!curClient()) return '';
+  if (!u.length) return `<div class="help" style="margin:6px 0 0">${ic('archive')} No final report of this type yet for ${esc(curClient().name)}. File edited finals in <a href="#" data-r="tab" data-x="finals">Final reports</a> so the next ones learn from them.</div>`;
+  const on = S.form?.learn !== false;
+  return `<label class="help" style="margin:6px 0 0;display:flex;gap:6px;align-items:flex-start"><input type="checkbox" id="rpLearn" ${on ? 'checked' : ''}> <span>${ic('archive')} Learn from ${esc(curClient().name)}'s edited final report${u.length > 1 ? 's' : ''}: ${u.map(f => `<b>${esc(f.title)}</b>${f.period ? ` (${esc(f.period)})` : ''}${f.match === 'type' ? ` · ${esc(chanLabel(f.channel))}` : ''}`).join(', ')} — structure, slide titles, phrasing and the editor's corrections.</span></label>`;
+}
+const chanLabel = id_ => (S.meta.channels || []).find(c => c.id === id_)?.label || id_;
+const typeLabel = id_ => (S.meta.types || []).find(t => t.id === id_)?.short || id_;
 function typeInfo(typeId, channel = 'medmas', reference) {
   const tp = (S.meta.types || []).find(x => x.id === typeId); if (!tp) return ''; const ch = (S.meta.channels || []).find(x => x.id === channel);
   if (reference && !String(reference).startsWith('senior:')) { const r = S.references.find(x => x.id === reference); return `<div class="rp-typeinfo"><b>${esc(tp.label)}</b> · ${esc(ch?.label || '')}<div>${esc(tp.focus)}</div><div>Structure and writing style follow <b>${esc(r?.title || 'the reference report')}</b>${r?.by ? ` by ${esc(r.by)}` : ''}.</div></div>`; }
   const focus = channel === 'medsos' ? tp.focus.replace(/media and spokespersons/g, 'platforms and accounts').replace(/reputation of leaders/g, 'conversation about leaders') : tp.focus;
   const sp = structPreview(typeId, channel); const text = sp.text || ''; const n = text ? text.split('\n').filter(l => l.trim() && !/^maks|^max/i.test(l)).length : 0;
-  return `<div class="rp-typeinfo"><b>${esc(tp.label)}</b> · ${esc(ch?.label || '')} · ${esc(tp.period)}${tp.maxSlides ? ` · up to ${tp.maxSlides} slides` : ''}<div>${esc(focus)}</div>${sp.loading ? '' : text ? `<details><summary>Structure: ${sp.source === 'client' ? `${esc(curClient()?.name || 'client')}'s own` : 'default'} (${n} slides)${curClient() ? ' — edit it in the client page' : ''}</summary><pre>${esc(text)}</pre></details>` : '<div class="help" style="margin:4px 0 0">No fixed structure: the brief decides.</div>'}</div>`;
+  return `<div class="rp-typeinfo"><b>${esc(tp.label)}</b> · ${esc(ch?.label || '')} · ${esc(tp.period)}${tp.maxSlides ? ` · up to ${tp.maxSlides} slides` : ''}<div>${esc(focus)}</div>${sp.loading ? '' : text ? `<details><summary>Structure: ${sp.source === 'final' ? `from ${esc(curClient()?.name || 'the client')}'s latest final report` : sp.source === 'client' ? `${esc(curClient()?.name || 'client')}'s own` : 'default'} (${n} slides)${sp.source === 'final' ? ' — file a newer final to update it, or write your own in the client page' : curClient() ? ' — edit it in the client page' : ''}</summary><pre>${esc(text)}</pre></details>` : '<div class="help" style="margin:4px 0 0">No fixed structure: the brief decides.</div>'}${finalsLine(sp)}</div>`;
 }
-function captureForm() { if (!$('#rpBrief')) return; S.form = { ...(S.form || {}), reference: $('#rpRef')?.value || '', refDesign: $('#rpRefDesign') ? $('#rpRefDesign').checked : S.form?.refDesign, period: $('#rpPeriod')?.value, coverLayout: $('#rpCovLayout')?.value || S.form?.coverLayout, coverPick: document.querySelector('[name=rpCov]:checked')?.value || S.form?.coverPick, title: $('#rpTitle')?.value, brief: $('#rpBrief')?.value, tpl: $('#rpTpl')?.value, know: $('#rpKnow')?.checked, ds: [...document.querySelectorAll('#rpDs input:checked')].map(i => i.value) };
+function captureForm() { if (!$('#rpBrief')) return; S.form = { ...(S.form || {}), learn: $('#rpLearn') ? $('#rpLearn').checked : S.form?.learn, reference: $('#rpRef')?.value || '', refDesign: $('#rpRefDesign') ? $('#rpRefDesign').checked : S.form?.refDesign, period: $('#rpPeriod')?.value, coverLayout: $('#rpCovLayout')?.value || S.form?.coverLayout, coverPick: document.querySelector('[name=rpCov]:checked')?.value || S.form?.coverPick, title: $('#rpTitle')?.value, brief: $('#rpBrief')?.value, tpl: $('#rpTpl')?.value, know: $('#rpKnow')?.checked, ds: [...document.querySelectorAll('#rpDs input:checked')].map(i => i.value) };
   document.querySelectorAll('[data-shot]').forEach(el => { const sh = (S.shots || []).find(x => x.id === el.dataset.shot); if (sh) sh.label = el.value.trim(); }); }
 function deckView() {
   const k = S.deck; const colors = tplColors(k.template);
   body(`<div class="bar" style="align-items:center;flex-wrap:wrap;gap:8px"><button class="btn sm" data-r="backdeck">← All presentations</button><input type="text" id="rpDTitle" value="${esc(k.title)}" style="flex:1 1 320px;min-width:260px;font-size:18px;font-weight:600">
       <select id="rpDTpl" class="vsel" title="Template">${templateOptions(k.template)}</select>
-      ${finalizeSelect()}<button class="btn sm" data-r="refinal" ${S.busy ? 'disabled' : ''}>${S.busy === 'final' ? spin('Finalizing…') : ic('sparkle') + 'Finalize again'}</button><button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
+      ${finalizeSelect()}<button class="btn sm" data-r="refinal" ${S.busy ? 'disabled' : ''}>${S.busy === 'final' ? spin('Finalizing…') : ic('sparkle') + 'Finalize again'}</button><button class="btn sm" data-r="savedeck">${ic('check')}Save</button><button class="btn sm primary" data-r="pptx" data-x="${k.id}">${ic('download')}Download PowerPoint</button><button class="btn sm" data-r="filefinal" title="After the editor has finished: upload the edited version so Canopus learns from it">${ic('archive')}File the edited final</button><button class="icon-btn" data-r="deldeck" title="Delete">${ic('trash')}</button></div>
     ${k.notes ? `<div class="notice">${esc(k.notes)}</div>` : ''}
     <details class="rp-deckstyle"><summary>${ic('sparkle')}Style: <b>${esc(k.style?.name || 'Template as is')}</b> — change colours and fonts</summary>${styleCards([{ id: 'template', name: 'Template as is', description: "Keep the template's own colours", colors: { dk2: '3A4250', accent1: '8892A0', accent2: 'B8C0CC', accent3: '1FA971', accent4: 'E04A4A', lt2: 'EEF1F5' } }, ...stylesOf(k.clientId).styles], k.style?.id || 'template', 'deckstyle')}</details>
     ${k.outline.cover?.candidates?.length ? `<details class="rp-deckstyle"><summary>${ic('image')}Cover: <b>${k.outline.cover.mode === 'pick' ? 'your choice' : 'chosen by Canopus'} · ${({ full: 'full photo with overlay', split: 'photo on the right', none: 'no photo' })[k.outline.cover.layout] || ''}</b></summary>
@@ -425,6 +433,39 @@ async function uploadTemplate(files) {
   catch (e) { C.toast(e.message, 5000); }
 }
 
+/* ---------- final reports: edited by the editor, filed per client · channel · report type, kept on this server ---------- */
+async function loadFinals() { const cid = S.client || ''; S.finalsFor = cid; try { S.finals = await C.api(`/api/reports/finals?client=${cid}`); } catch (e) { S.finals = []; C.toast(e.message, 5000); } if (S.tab === 'finals') renderReports(); }
+function finalsView() {
+  if (S.finals == null || S.finalsFor !== (S.client || '')) { S.finals = S.finals || []; loadFinals(); }
+  const c = curClient(); const fch = S.finCh || '', ft = S.finT || '';
+  const src = S.finQ ? (S.finHits || []) : (S.finals || []); const list = src.filter(f => (!fch || f.channel === fch) && (!ft || f.reportType === ft));
+  const count = t => (S.finals || []).filter(f => (!fch || f.channel === fch) && f.reportType === t).length;
+  const row = f => `<div class="rp-final"><div style="flex:1;min-width:220px"><b>${esc(f.title)}</b> <span class="badge">${esc(chanLabel(f.channel))} · ${esc(typeLabel(f.reportType))}${f.period ? ' · ' + esc(f.period) : ''}</span> ${f.learn ? `<span class="badge gold" title="Canopus learns from it when making this client's next ${esc(typeLabel(f.reportType))} report">${ic('sparkle')}Learning</span>` : `<span class="badge" title="Never sent to AI; searchable and downloadable on this server only">${ic('lock')}Server only</span>`}
+      <div class="muted">${c ? '' : esc(clientName(f.clientId) || 'No client') + ' · '}${esc(f.filename)}${f.slides ? ` · ${f.slides} slides` : ''} · filed by ${esc(f.by || '—')} ${C.ago(f.created)}${f.deckId ? ' · from a Canopus draft (the editor’s changes are learned)' : ''}</div>${f.note ? `<div class="muted">Editor's note: ${esc(f.note)}</div>` : ''}${f.snippet ? `<div class="muted" style="font-style:italic">…${esc(f.snippet)}…</div>` : ''}</div>
+    <div style="display:flex;gap:6px;align-items:center"><a class="btn sm" href="/api/reports/finals/${f.id}/file">${ic('download')}Download</a>${f.canManage ? `<button class="icon-btn" data-r="editfinal" data-x="${f.id}" title="Edit">${ic('edit')}</button><button class="icon-btn" data-r="delfinal" data-x="${f.id}" title="Delete">${ic('trash')}</button>` : ''}</div></div>`;
+  const groups = (S.meta.types || []).map(t => [t, list.filter(f => f.reportType === t.id)]).filter(([, l]) => l.length);
+  body(`<div class="set-sec"><div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div style="flex:1;min-width:260px"><h3>${ic('archive')}Final reports${c ? ` — ${esc(c.name)}` : ''}</h3>
+      <p class="help" style="margin:0">Reports as the editor approved and sent them, filed by client, channel and report type. Files stay on this server and are not part of chat answers. When someone makes this client's next report of the same type and channel, Canopus learns from the latest finals: structure, slide titles, phrasing and what the editor corrected — only titles and short masked excerpts go into that request. Mark a final <b>Server only</b> to keep it out of AI requests entirely.</p></div>
+      ${c ? `<button class="cta" data-r="uploadfinal">${ic('upload')}Upload final report</button>` : '<div class="help">Choose a client at the top to file a final report.</div>'}</div></div>
+    <div class="set-sec"><div class="seg" style="margin-bottom:8px"><button type="button" data-r="finch" data-x="" class="${!fch ? 'on' : ''}">All channels</button>${(S.meta.channels || []).map(ch => `<button type="button" data-r="finch" data-x="${ch.id}" class="${fch === ch.id ? 'on' : ''}">${esc(ch.label)}</button>`).join('')}</div>
+      <div class="seg rp-types" style="margin-bottom:10px"><button type="button" data-r="fint" data-x="" class="${!ft ? 'on' : ''}">All types</button>${(S.meta.types || []).map(t => `<button type="button" data-r="fint" data-x="${t.id}" class="${ft === t.id ? 'on' : ''}">${esc(t.short)}${count(t.id) ? ` · ${count(t.id)}` : ''}</button>`).join('')}</div>
+      ${c ? `<div style="display:flex;gap:8px;margin-bottom:12px"><input type="text" id="rpFinQ" value="${esc(S.finQ || '')}" placeholder="Search the text of ${esc(c.name)}'s finals (on this server, no AI)" style="flex:1"><button class="btn sm" data-r="finsearch">${ic('search')}Search</button>${S.finQ ? '<button class="btn sm" data-r="finclear">Clear</button>' : ''}</div>` : ''}
+      ${groups.length ? groups.map(([t, l]) => `<h4 style="margin:14px 0 6px">${esc(t.label)} <span class="muted">(${l.length})</span></h4>${l.map(row).join('')}`).join('') : `<p class="help">${S.finQ ? 'Nothing matches.' : 'No final reports here yet.'}</p>`}</div>`);
+}
+function finalModal(f, preset = {}) {
+  const v = f || preset; const types = S.meta.types || [], chans = S.meta.channels || [];
+  C.openModal(`<h3>${f ? 'Edit final report' : 'File a final report'}</h3><p class="s">The version the editor approved and sent to the client. It is stored on this server.</p>
+    ${f ? '' : `<label for="fnClient">Client</label><select id="fnClient" class="vsel" style="width:100%">${S.clients.map(c => `<option value="${c.id}" ${c.id === (v.clientId || S.client) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+    <label for="fnFile">File (PowerPoint, PDF or Word)</label><input type="file" id="fnFile" accept=".pptx,.pdf,.docx">`}
+    <label for="fnTitle">Title</label><input type="text" id="fnTitle" value="${esc(v.title || '')}" placeholder="e.g. Weekly Report Media Massa — Minggu 2 November">
+    <div class="row2"><div><label for="fnChan">Channel</label><select id="fnChan" class="vsel" style="width:100%">${chans.map(c => `<option value="${c.id}" ${c.id === (v.channel || 'medmas') ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select></div>
+      <div><label for="fnType">Report type</label><select id="fnType" class="vsel" style="width:100%">${types.map(t => `<option value="${t.id}" ${t.id === (v.reportType || 'weekly') ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}</select></div></div>
+    <label for="fnPeriod">Period</label><input type="text" id="fnPeriod" value="${esc(v.period || '')}" placeholder="e.g. 8–14 November 2026">
+    <label for="fnNote">Editor's note (optional)</label><textarea id="fnNote" rows="2" placeholder="What the editor changed or wants next time, e.g. “judul slide berupa topik, bukan kesimpulan”">${esc(v.note || '')}</textarea>
+    <label style="display:flex;gap:8px;align-items:flex-start;margin-top:10px"><input type="checkbox" id="fnLearn" ${v.learn === false ? '' : 'checked'}> <span>Canopus learns from it for this client's next reports of this type<br><span class="help">Unchecked = <b>Server only</b>: never sent to AI, only searchable and downloadable here.</span></span></label>
+    <div class="dlg-actions"><button class="btn" data-dlg="cancel">Cancel</button><button class="btn primary" data-r="savefinal" data-x="${f ? f.id : ''}" data-deck="${preset.deckId || ''}">${f ? 'Save' : ic('upload') + 'File it'}</button></div>`);
+}
+
 /* ================= events ================= */
 async function onClick(e) {
   const t = e.target.closest('[data-r]'); if (!t) return; e.preventDefault();
@@ -432,6 +473,20 @@ async function onClick(e) {
   try {
     switch (r) {
       case 'tab': S.tab = x; if (x === 'decks') S.deck = null; renderReports(); break;
+      case 'uploadfinal': finalModal(null, { clientId: S.client }); break;
+      case 'filefinal': { const k = S.deck; if (!S.clients.length) { C.toast('Create a client first.'); break; } finalModal(null, { clientId: k.clientId || S.client, title: k.title, period: k.period, channel: k.channel, reportType: k.reportType || 'adhoc', deckId: k.id }); break; }
+      case 'editfinal': finalModal((S.finals || []).find(f => f.id === x) || (S.finHits || []).find(f => f.id === x)); break;
+      case 'savefinal': {
+        const meta = { title: $('#fnTitle').value.trim(), period: $('#fnPeriod').value.trim(), channel: $('#fnChan').value, reportType: $('#fnType').value, note: $('#fnNote').value.trim(), learn: $('#fnLearn').checked };
+        if (x) await C.api('/api/reports/finals/' + x, { method: 'PATCH', body: meta });
+        else { const f = $('#fnFile').files?.[0]; if (!f) { C.toast('Choose the file first.'); break; } C.toast('Reading ' + f.name + '…', 6000); const e_ = v => encodeURIComponent(v || '');
+          await C.api('/api/reports/finals', { method: 'POST', raw: f, headers: { 'content-type': 'application/octet-stream', 'x-filename': e_(f.name), 'x-client': e_($('#fnClient').value), 'x-type': e_(meta.reportType), 'x-channel': e_(meta.channel), 'x-period': e_(meta.period), 'x-title': e_(meta.title), 'x-note': e_(meta.note), 'x-learn': meta.learn ? '1' : '0', 'x-deck': e_(t.dataset.deck) } }); }
+        C.closeModal(); S.finals = null; S.structCache = {}; S.finQ = ''; renderReports(); C.toast(x ? 'Saved' : 'Final report filed'); break; }
+      case 'delfinal': if (await C.confirmBox('Delete this final report?', 'The file is removed from this server and Canopus stops learning from it.')) { await C.api('/api/reports/finals/' + x, { method: 'DELETE' }); S.finals = null; S.structCache = {}; renderReports(); } break;
+      case 'finch': S.finCh = x; renderReports(); break;
+      case 'fint': S.finT = x; renderReports(); break;
+      case 'finsearch': { S.finQ = $('#rpFinQ').value.trim(); S.finHits = S.finQ ? await C.api(`/api/reports/finals?client=${S.client}&q=${encodeURIComponent(S.finQ)}`) : []; renderReports(); break; }
+      case 'finclear': S.finQ = ''; renderReports(); break;
       case 'pickds': $('#rpDsFile').click(); break;
       case 'pickdoc': $('#rpDocFile').click(); break;
       case 'structpreset': { const el = document.getElementById('cp_structure'); if (el) { el.value = el.value.trim() ? el.value : STRUCTURE_PRESET; el.rows = 10; el.focus(); } break; }
@@ -501,7 +556,7 @@ async function onClick(e) {
         if (!brief && !datasets.length) { C.toast('Write a brief or choose data first'); break; }
         document.querySelectorAll('[data-shot]').forEach(el => { const sh = (S.shots || []).find(x => x.id === el.dataset.shot); if (sh) sh.label = el.value.trim(); });
         captureForm(); const styleSel = S.form?.style ?? (curClient()?.style?.id || stylesOf(S.client).styles.find(x => x.recommended)?.id || 'template'); const styleObj = stylesOf(S.client).styles.find(x => x.id === styleSel) || null;
-        const covers = (S.covers || []).map(x => x.id); const payload = { channel: S.form?.channel || 'medmas', reference: S.form?.reference || null, useReferenceDesign: S.form?.refDesign !== false, reportType: S.form?.type || 'weekly', period: S.form?.period || '', cover: covers.length ? { candidates: covers, mode: S.form?.coverMode === 'pick' ? 'pick' : 'auto', image: S.form?.coverPick || null, layout: S.form?.coverLayout || 'auto' } : null, style: styleObj, images: (S.shots || []).map(x => ({ id: x.id, label: x.label })), client: S.client || null, title: $('#rpTitle').value.trim(), template: $('#rpTpl').value, datasets, brief, model: $('#rpDModel')?.value, finalizeModel: $('#rpFModel')?.value, knowledge: $('#rpKnow').checked }; savePrefs({ analysis: payload.model, finalize: payload.finalizeModel });
+        const covers = (S.covers || []).map(x => x.id); const payload = { learnFinals: S.form?.learn !== false, channel: S.form?.channel || 'medmas', reference: S.form?.reference || null, useReferenceDesign: S.form?.refDesign !== false, reportType: S.form?.type || 'weekly', period: S.form?.period || '', cover: covers.length ? { candidates: covers, mode: S.form?.coverMode === 'pick' ? 'pick' : 'auto', image: S.form?.coverPick || null, layout: S.form?.coverLayout || 'auto' } : null, style: styleObj, images: (S.shots || []).map(x => ({ id: x.id, label: x.label })), client: S.client || null, title: $('#rpTitle').value.trim(), template: $('#rpTpl').value, datasets, brief, model: $('#rpDModel')?.value, finalizeModel: $('#rpFModel')?.value, knowledge: $('#rpKnow').checked }; savePrefs({ analysis: payload.model, finalize: payload.finalizeModel });
         S.busy = 'deck'; renderReports();
         try { const k = await C.api('/api/reports/decks', { method: 'POST', body: payload }); S.busy = ''; S.shots = []; S.covers = []; S.form = null; await load(); await openDeck(k.id); C.refreshMe?.(); }
         finally { S.busy = ''; if (!S.deck) renderReports(); } break; }

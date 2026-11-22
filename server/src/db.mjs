@@ -91,6 +91,7 @@ export function ensureSpaces(user) {
 // Analysts add to their own space and client spaces; Ultimate (senior) accounts also to the team space, organization
 // collections and their own URS; administrators everywhere.
 export function canUpload(user, c) {
+  if (c.kind === 'person' && c.private && c.owner_id !== user.id) return false; // a private space is its owner's alone
   if (user.role === 'admin') return true;
   if (c.kind === 'person') return c.owner_id === user.id;
   if (c.kind === 'client') return true;

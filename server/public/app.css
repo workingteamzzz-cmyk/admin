@@ -712,3 +712,6 @@ svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.6;stroke
 div.k-style{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .k-style summary{cursor:pointer;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .k-style svg{width:15px;height:15px;color:var(--gold)}
+
+.rp-final{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:12px;margin:6px 0;background:var(--raise)}
+.rp-final .badge{vertical-align:middle}

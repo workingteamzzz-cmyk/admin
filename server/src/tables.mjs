@@ -310,6 +310,8 @@ function pivotTable(t, st) {
 
 // Runs the steps on a copy of the table. Returns the curated table, the summary tables and a per-step log.
 // `tagger(texts, labels, instruction)` → Promise<{labels: string[], values: string[]}> is used by ai_tag steps.
+// AI steps never read personal columns (patient, family, reporter, victim names; NIK; phone; address…).
+const noPersonal = cols => { const bad = cols.filter(c => reportSensitive(c)); if (bad.length) throw new Error(`AI steps cannot read personal columns (${bad.join(', ')}). Choose other columns, or remove them first.`); };
 export async function runPlan(table, plan, { tagger, normalizer, maxAiRows = 100000, onStep = () => {} } = {}) {
   let t = { name: table.name, columns: [...table.columns], rows: table.rows.map(r => [...r]) };
   const summaries = []; const log = []; const removed = [];
@@ -340,7 +342,7 @@ export async function runPlan(table, plan, { tagger, normalizer, maxAiRows = 100
           }
           t.rows = keep; entry.detail = counts; break; }
         case 'ai_filter': {
-          if (!tagger) throw new Error('AI is not available');
+          if (!tagger) throw new Error('AI is not available'); noPersonal(st.from);
           const src = st.from.map(c => need(t, c)); const texts = t.rows.map(r => src.map(i => stripHtml(r[i])).filter(Boolean).join(' — ').slice(0, 1500));
           if (t.rows.length > maxAiRows) throw new Error(`Too many rows for AI (${t.rows.length}; the limit is ${maxAiRows}).`);
           const out = await tagger(texts, st.labels, st.instruction || 'Decide whether each text belongs in this client\'s monitoring data.', { purpose: 'filter' });
@@ -353,7 +355,7 @@ export async function runPlan(table, plan, { tagger, normalizer, maxAiRows = 100
           let n = 0; for (const r of t.rows) { const text = src.map(i => stripHtml(r[i])).join(' \n '); const found = ms.filter(m => m.re.test(text)).map(m => m.label); r[j] = found.length ? found.join(', ') : st.none; if (found.length) n++; }
           entry.changed = n; break; }
         case 'ai_normalize': {
-          if (!normalizer) throw new Error('AI is not available'); const i = need(t, st.column);
+          if (!normalizer) throw new Error('AI is not available'); noPersonal([st.column]); const i = need(t, st.column);
           const parts = v => (st.split ? s(v).split(st.split) : [s(v)]).map(x => x.trim()).filter(Boolean);
           const uniq = [...new Set(t.rows.flatMap(r => parts(r[i])))];
           const map = await normalizer(uniq, st.instruction); let n = 0;
@@ -375,7 +377,7 @@ export async function runPlan(table, plan, { tagger, normalizer, maxAiRows = 100
           for (const r of t.rows) r[j] = deriveValue(r[i], st); break; }
         case 'sort': { const i = need(t, st.column); const type = columnType(t.rows.map(r => r[i])); t.rows.sort((a, b) => { const c = compareValues(a[i], b[i], type); return st.dir === 'desc' ? -c : c; }); break; }
         case 'ai_tag': {
-          if (!tagger) throw new Error('AI labelling is not available');
+          if (!tagger) throw new Error('AI labelling is not available'); noPersonal(st.from);
           const src = st.from.map(c => need(t, c)); if (!st.column) throw new Error('Label column name is empty');
           let j = colIdx(t, st.column); if (j < 0) { t.columns.push(st.column); j = t.columns.length - 1; for (const r of t.rows) r.push(''); }
           const todo = t.rows.filter(r => !st.only_empty || !s(r[j]).trim());
@@ -392,7 +394,7 @@ export async function runPlan(table, plan, { tagger, normalizer, maxAiRows = 100
         case 'pivot': summaries.push({ ...pivotTable(t, st), step: si }); break;
       }
       entry.ok = true;
-    } catch (e) { entry.ok = false; entry.error = e.message; }
+    } catch (e) { if (e.status === 402) throw e; entry.ok = false; entry.error = e.message; } // no credit / over budget: stop the whole run
     entry.after = t.rows.length; log.push(entry);
   }
   return { table: t, summaries, log, removed };

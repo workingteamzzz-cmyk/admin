@@ -161,6 +161,7 @@ async function startClaudeEndpoint() {
     }
     const body = JSON.parse(raw || '{}');
     const sys = JSON.stringify(body.system || '');
+    if (/KREDIT-HABIS/.test(raw)) { res.writeHead(400, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.' } })); }
     if (!body.stream) { const reply = /Classify the user/.test(sys) ? classifyMock(userText(lastUser(body))) : reportMock(sys, userText(lastUser(body))) ?? 'Harness Chat';
       res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ id: 'm', type: 'message', role: 'assistant', model: body.model, content: [{ type: 'text', text: reply }], stop_reason: 'end_turn', usage: { input_tokens: 50, output_tokens: 5 } })); }
     if (/SIMULATE-OUTAGE/.test(JSON.stringify(body.messages))) { res.writeHead(529, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } })); }
@@ -654,6 +655,45 @@ try {
     await A.goto(canopus.url + '#reports'); await A.waitForSelector('#rpClient');
     const checks = { created: r1.status === 200, indexed: up.status === 'ready', profile: !!prof?.summary && prof.examples?.length >= 2, hiddenFromUsers: hidden, listed: !!urs, claudeAndGpt: used, deck: d.status === 200 && deck.reference === 'senior:' + sid };
     return ok(Object.values(checks).every(Boolean), Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' '));
+  });
+  await step(A, 'report-finals', 'Final reports: edited finals filed per client · channel · type on this server; the next report learns from them (server-only ones never go to AI)', async () => {
+    const all0 = JSON.parse((await apiCall(A, '/api/reports')).body); const cA = all0.clients.find(c => c.name === 'Kementerian A'); const dk = all0.decks.find(k => k.clientId === cA.id);
+    const upFinal = (page, file, name, h) => page.evaluate(async ([b64, name, h]) => { const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); const r = await fetch('/api/reports/finals', { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': encodeURIComponent(name), 'content-type': 'application/octet-stream', ...Object.fromEntries(Object.entries(h).map(([k, v]) => [k, encodeURIComponent(decodeURIComponent(v))])) }, body: bin }); return { status: r.status, body: await r.json() }; }, [fs.readFileSync(file).toString('base64'), name, h]);
+    const f1 = await upFinal(A, deckFile, 'Weekly Medmas Final 8-14 Nov.pptx', { 'x-client': cA.id, 'x-type': 'weekly', 'x-channel': 'medmas', 'x-period': '8–14 November 2026', 'x-title': 'Weekly Medmas — Minggu 2 November', 'x-note': encodeURIComponent('Judul slide berupa topik; sebut Menaker di slide pimpinan'), 'x-learn': '1', 'x-deck': dk?.id || '' });
+    const f2 = await upFinal(A, F.polhukam, 'Catatan internal.pdf', { 'x-client': cA.id, 'x-type': 'weekly', 'x-channel': 'medmas', 'x-title': 'Catatan internal editor', 'x-learn': '0' });
+    const dup = await upFinal(A, deckFile, 'lagi.pptx', { 'x-client': cA.id, 'x-type': 'weekly', 'x-channel': 'medmas' });
+    const preview = JSON.parse((await apiCall(A, `/api/reports/structure?client=${cA.id}&type=weekly&channel=medmas`)).body);
+    const before = recorded.length; const d = await putJson(A, '/api/reports/decks', { client: cA.id, reportType: 'weekly', channel: 'medmas', period: '15–21 November 2026', brief: 'Weekly minggu 3' }, 'POST'); const deck = JSON.parse(d.body);
+    const req = recorded.slice(before).find(x => /senior media and communications analyst/.test(x.raw));
+    const learned = !!req && req.raw.includes('Final reports for this client, as edited and approved by the editor') && req.raw.includes('Judul slide berupa topik') && req.raw.includes('Weekly Medmas — Minggu 2 November');
+    const serverOnly = !!req && !req.raw.includes('ORION-77') && !req.raw.includes('Catatan internal editor');
+    const noLearn = await putJson(A, '/api/reports/decks', { client: cA.id, reportType: 'weekly', channel: 'medmas', learnFinals: false, brief: 'tanpa final' }, 'POST'); const req2 = recorded.slice(before).filter(x => /senior media and communications analyst/.test(x.raw)).pop();
+    const bDel = await apiCall(B, '/api/reports/finals/' + f1.body.id, { method: 'DELETE', headers: { 'x-canopus': '1' } });
+    const hits = JSON.parse((await apiCall(A, `/api/reports/finals?client=${cA.id}&q=ORION`)).body); const file = await apiCall(A, `/api/reports/finals/${f1.body.id}/file`);
+    await A.goto(canopus.url + '#reports'); await A.reload(); await A.waitForSelector('#rpClient'); await A.selectOption('#rpClient', cA.id); await A.click('[data-r=tab][data-x=finals]'); await A.waitForSelector('.rp-final', { timeout: 10000 }); await A.waitForTimeout(300); await A.screenshot({ path: path.join(OUT, 'server-report-finals-list.png') });
+    await A.click('[data-r=uploadfinal]'); await A.waitForTimeout(200); await A.screenshot({ path: path.join(OUT, 'server-report-finals-upload.png') }); await A.click('[data-dlg=cancel]').catch(() => A.keyboard.press('Escape'));
+    await A.click('[data-r=tab][data-x=decks]'); if (await A.isVisible('[data-r=backdeck]')) await A.click('[data-r=backdeck]'); await A.waitForSelector('#rpLearn', { timeout: 10000 }); await A.locator('#rpLearn').scrollIntoViewIfNeeded(); await A.waitForTimeout(200); await A.screenshot({ path: path.join(OUT, 'server-report-finals-learn.png') });
+    const checks = { filed: f1.status === 200 && f1.body.slides > 0 && f1.body.learn, serverOnlyFiled: f2.status === 200 && !f2.body.learn, duplicate409: dup.status === 409, previewUses: preview.finals?.using?.length === 1, learned, serverOnlyNeverSent: serverOnly, notesSay: /Learned from final report/.test(deck.notes || ''),
+      optOut: noLearn.status === 200 && !!req2 && !req2.raw.includes('Final reports for this client'), analystCannotDelete: bDel.status === 403, localSearch: hits.length === 1 && hits[0].id === f2.body.id, download: file.status === 200 };
+    return ok(Object.values(checks).every(Boolean) && !leaks().length, Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' '));
+  });
+  await step(A, 'audit-fixes', 'Audit fixes: out-of-credit stops with a clear message, zip bombs refused, URS rebuild limited to its owner, URS file metadata hidden', async () => {
+    const credit = await putJson(A, '/api/reports/decks', { brief: 'KREDIT-HABIS', reportType: 'adhoc' }, 'POST'); const cmsg = JSON.parse(credit.body).error || '';
+    const { default: JSZip } = await import(path.join(SERVER_DIR, 'node_modules', 'jszip', 'lib', 'index.js'));
+    const z = new JSZip(); z.file('[Content_Types].xml', '<Types/>'); z.file('xl/workbook.xml', '<workbook/>'); z.file('xl/worksheets/sheet1.xml', Buffer.alloc(260 * 1024 * 1024, 32));
+    const bomb = await z.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 9 } });
+    const bombRes = await A.evaluate(async b64 => { const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); const r = await fetch('/api/reports/datasets', { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': 'bom.xlsx', 'content-type': 'application/octet-stream' }, body: bin }); return { status: r.status, body: await r.text() }; }, bomb.toString('base64'));
+    const alive = (await apiCall(A, '/api/me')).status;
+    const sirius = JSON.parse((await apiCall(A, '/api/knowledge')).body).find(c => c.kind === 'senior' && c.name === 'Sirius');
+    const rebuildB = await apiCall(B, `/api/knowledge/spaces/${sirius.id}/style`, { method: 'POST', headers: { 'x-canopus': '1' } });
+    const zc = await JSZip.loadAsync(fs.readFileSync(deckFile)); zc.file('docProps/core.xml', '<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Budi Senior Asli</dc:creator><cp:lastModifiedBy>Budi Senior Asli</cp:lastModifiedBy></cp:coreProperties>');
+    const named = await zc.generateAsync({ type: 'nodebuffer' });
+    const upN = await A.evaluate(async ([cid, b64]) => { const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0)); const r = await fetch(`/api/knowledge/collections/${cid}/docs`, { method: 'POST', headers: { 'x-canopus': '1', 'x-filename': 'Report Bernama.pptx', 'content-type': 'application/octet-stream' }, body: bin }); return r.json(); }, [sirius.id, named.toString('base64')]);
+    const doc = upN; const fileB = await B.evaluate(async id_ => { const r = await fetch(`/api/knowledge/docs/${id_}/file`); const b = new Uint8Array(await r.arrayBuffer()); let s = ''; for (const x of b) s += String.fromCharCode(x); return { status: r.status, b64: btoa(s) }; }, doc.id);
+    const zz = await JSZip.loadAsync(Buffer.from(fileB.b64, 'base64')); const core = await zz.file('docProps/core.xml')?.async('string') || '';
+    const checks = { creditStops402: credit.status === 402 && /prepaid credit is used up/.test(cmsg), bombRefused: bombRes.status === 422 && /expands to more than/.test(bombRes.body), serverAlive: alive === 200,
+      ursRebuildOwnerOnly: rebuildB.status === 403, ursFileNoRealName: fileB.status === 200 && !/Budi Senior Asli/.test(core) && /Sirius/.test(core) };
+    return ok(Object.values(checks).every(Boolean), Object.entries(checks).map(([k, v]) => `${k}:${v ? 'ok' : 'NO'}`).join(' ') + ` · bomb ${(bomb.length / 1024).toFixed(0)} KB → 260 MB`);
   });
   await step(A, 'report-ask', 'Reports: “Ask in chat” attaches the curated data (without personal columns) for questions and brainstorming', async () => {
     const before = recorded.length; await A.click('[data-r=tab][data-x=data]'); await A.waitForTimeout(200); if (!(await A.isVisible('[data-r=askds]'))) await A.click('[data-r=opends]'); await A.waitForSelector('[data-r=askds]'); await A.click('[data-r=askds]');
